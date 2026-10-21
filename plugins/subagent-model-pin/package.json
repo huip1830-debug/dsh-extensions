@@ -1,0 +1,18 @@
+{
+  "name": "subagent-model-pin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH profile plugin: default subagents to a low-cost route, explicit provider/model upgrades still win",
+  "license": "MIT",
+  "main": "./plugin.mjs",
+  "exports": {
+    ".": "./plugin.mjs",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

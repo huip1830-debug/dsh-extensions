@@ -1,0 +1,13 @@
+# Bundle layer: applied when the profile selects this package (dsh.profile.bundles).
+# Override any value from the profile's own cordis.patch.yml with:
+#   - id: subagent-model-pin
+#     config: { ... }        # config is replaced wholesale, not deep-merged
+- insert:
+    - id: subagent-model-pin
+      name: subagent-model-pin
+      config:
+        provider: opencode-go
+        model: deepseek-v4.1-flash
+        reasoningEffort: high
+        injectDelegationDefaults: true   # false = 关闭 tools/execute 注入，退回纯 request 层 pin
+        debug: false                     # true 时写 %TEMP%\subagent-model-pin.log
