@@ -1,0 +1,4 @@
+# Keep the working tree byte-stable across machines: LF everywhere.
+# PowerShell 7 and Node both handle LF scripts; this avoids the
+# "cloned on Windows, every file rewritten by autocrlf" churn.
+* text=auto eol=lf

@@ -1,0 +1,10 @@
+# OS / editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local logs
+*.log
+
+# Node (tests are dependency-free; this only guards accidental installs)
+node_modules/
