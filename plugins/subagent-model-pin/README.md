@@ -4,13 +4,11 @@ DSH profile 插件：**子 agent 默认跑低成本模型，需要时在委派�
 
 - 默认（不传路由）→ 子 agent 用 `config.provider` / `config.model`（含 effort）。
 - 显式传了 `provider` / `model` / `reasoning_effort` → 放行，即使与父 agent 同款也能升级。
-- 本仓库的 `plugin.mjs` 是**唯一真源**；安装到 profile 后是副本（bundle 方式由 pnpm 管理，脚本方式由 `install.ps1` 复制）。
+- 本仓库的 `plugin.mjs` 是**唯一真源**；安装到 profile 后是 pnpm 管理的副本，改代码要重装才生效。
 
 这是一个**独立的工具链仓库**，与任何业务项目无关：DSH 插件属于本机开发工具，多个项目共用，跟着开发机走。
 
-## 安装（bundle 为标准方式）
-
-### 标准：GUI / CLI 装 bundle
+## 安装
 
 包已声明 `dsh.bundle.patch`，所以 DSH 插件页可以直接装。桌面版或 Web 侧栏 **插件** → **添加插件** → **安装第三方插件**，填：
 
@@ -24,22 +22,7 @@ CLI 等价：
 dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensions.git#path:/plugins/subagent-model-pin"
 ```
 
-装完在插件页启用，重启 DSH。升级 = 同地址重装（插件页会提供"更新"）。
-
-### 离线兜底：脚本装（不进入 bundle 列表）
-
-```powershell
-pwsh -File .\plugins\subagent-model-pin\install.ps1
-
-# 其他 profile / 其他 DSH_HOME / 卸载
-pwsh -File .\plugins\subagent-model-pin\install.ps1 -Profile web
-pwsh -File .\plugins\subagent-model-pin\install.ps1 -DshHome D:\dsh-home
-pwsh -File .\plugins\subagent-model-pin\install.ps1 -Uninstall
-```
-
-脚本把 `plugin.mjs` 复制到 `<DshHome>/profiles/<profile>/plugins/`，再把 `patch.snippet.yml` 追加进同目录的 `cordis.patch.yml`（已有条目则跳过，可重复执行）。只在访问不了 GitHub 的机器上用。
-
-> 两种方式共用同一个行 id `subagent-model-pin`，**不能同时装**，否则重复挂载。切换前先卸掉另一种。
+装完在插件页启用，重启 DSH。升级 = 同地址重装（插件页会提供"更新"）。卸载 = 插件页移除（或 `dsh plugin --profile desktop remove subagent-model-pin`）。
 
 装完必须：
 
@@ -99,7 +82,7 @@ DSH 设置里那个开关（`subagent-model-selection-settings`，UI 文案「�
 2. **预设内的条目不可 patch。** profile patch 只索引「根树 + `group: true` 容器」，预设的 `plugins:` 是普通 config 数据，不在索引里；而且 patch 的 `config` 是**整体替换、不深合并**，没法只加一个 `agentOptions`。
 3. **新增条目必须用 `insert`。** 写成 `- id: <新id>` 会被判定为「未知目标」，按官方规则 *"Unknown targets and non-insert patches ... are warned and skipped"* —— **静默跳过，不报错**，这是最坑的一点（表现为"改了配置、重启了、毫无变化"）。
 
-正确写法见 `patch.snippet.yml`（`install.ps1` 会自动追加）。
+正确写法见本包的 `cordis.patch.yml`（bundle 层，安装后自动生效）。
 
 ## 实现要点
 
@@ -271,6 +254,6 @@ A 证明"显式升级到父同款"被放行；B 证明默认回落 pin。两者 
 
 ## 回滚
 
-- 临时停用：在 patch 里给该条目加 `disabled: true`；
-- 彻底移除：`pwsh -File .\install.ps1 -Uninstall`（或删掉整段 `- insert:`）；
+- 临时停用：插件页关掉该组合包，或在 profile patch 里给该行加 `disabled: true`；
+- 彻底移除：插件页移除（或 `dsh plugin --profile desktop remove subagent-model-pin`）；
 - 两种都需重启 DSH。YAML 是明文，记事本可改。

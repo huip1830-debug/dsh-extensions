@@ -13,8 +13,6 @@ plugins/
     ├── cordis.patch.yml    # bundle 层：插入插件行与默认配置
     ├── plugin.mjs          # 实现（cordis 插件：name / inject / apply）
     ├── locale/             # 插件页显示元信息：en.json 必需，zh.json 等按语言加
-    ├── install.ps1         # 可选：不经过 bundle 的脚本安装（离线兜底）
-    ├── patch.snippet.yml   # 可选：install.ps1 往 profile patch 里追加的片段
     ├── test.mjs            # 离线回归（node test.mjs，零依赖）
     └── README.md           # 行为、配置项、验证方法、已知坑
 ```
@@ -45,17 +43,7 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 
 安装会写 profile 的 `package.json`（`dependencies` + `dsh.profile.bundles` 末尾追加）并用 pnpm 装包；装完在插件页可见/可开关。**升级** = 同一条地址重新安装，或在插件页卸载后重装。
 
-### 离线兜底：脚本装（不进入 bundle 列表）
-
-```powershell
-pwsh -File .\plugins\subagent-model-pin\install.ps1     # -Uninstall 反向清理
-```
-
-它把 `plugin.mjs` 复制到 `<DshHome>/profiles/<profile>/plugins/`，并把 `patch.snippet.yml` 追加进该 profile 的 `cordis.patch.yml`。**只在访问不了 GitHub 的机器上用**。
-
-> **两种方式互斥**：都指向同一个行 id `subagent-model-pin`，同时启用会重复挂载。换方式前先卸掉另一种。
-
-装完都要**重启 DSH**（profile 层插件不支持热加载），并**新开会话**（`allowedModels` 白名单按会话冻结）。
+装完要**重启 DSH**（profile 层插件不支持热加载），并**新开会话**（`allowedModels` 白名单按会话冻结）。
 
 ## 约定
 

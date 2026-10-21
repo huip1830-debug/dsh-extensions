@@ -1,9 +1,0 @@
-- insert:
-    - id: subagent-model-pin
-      name: "./plugins/subagent-model-pin.mjs"   # 相对路径锚定在 patch 文件旁
-      config:
-        provider: opencode-go
-        model: deepseek-v4.1-flash
-        reasoningEffort: high
-        injectDelegationDefaults: true   # false = 关闭 tools/execute 注入，退回纯 request 层 pin
-        debug: false                     # true 时写 %TEMP%\subagent-model-pin.log
