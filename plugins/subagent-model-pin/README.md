@@ -8,25 +8,25 @@ DSH profile 插件：**子 agent 默认跑低成本模型，需要时在委派�
 
 这是一个**独立的工具链仓库**，与任何业务项目无关：DSH 插件属于本机开发工具，多个项目共用，跟着开发机走。
 
-## 安装（两种方式，每个 profile 二选一）
+## 安装（bundle 为标准方式）
 
-### A. GUI / CLI 装 bundle（推荐）
+### 标准：GUI / CLI 装 bundle
 
 包已声明 `dsh.bundle.patch`，所以 DSH 插件页可以直接装。桌面版或 Web 侧栏 **插件** → **添加插件** → **安装第三方插件**，填：
 
 ```
-https://github.com/huip1830-debug/subagent-model-pin.git#path:/plugins/subagent-model-pin
+https://github.com/huip1830-debug/dsh-extensions.git#path:/plugins/subagent-model-pin
 ```
 
 CLI 等价：
 
 ```powershell
-dsh plugin add https://github.com/huip1830-debug/subagent-model-pin.git#path:/plugins/subagent-model-pin
+dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensions.git#path:/plugins/subagent-model-pin"
 ```
 
 装完在插件页启用，重启 DSH。升级 = 同地址重装（插件页会提供"更新"）。
 
-### B. 脚本装（不进入 bundle 列表）
+### 离线兜底：脚本装（不进入 bundle 列表）
 
 ```powershell
 pwsh -File .\plugins\subagent-model-pin\install.ps1
@@ -37,7 +37,7 @@ pwsh -File .\plugins\subagent-model-pin\install.ps1 -DshHome D:\dsh-home
 pwsh -File .\plugins\subagent-model-pin\install.ps1 -Uninstall
 ```
 
-脚本把 `plugin.mjs` 复制到 `<DshHome>/profiles/<profile>/plugins/`，再把 `patch.snippet.yml` 追加进同目录的 `cordis.patch.yml`（已有条目则跳过，可重复执行）。
+脚本把 `plugin.mjs` 复制到 `<DshHome>/profiles/<profile>/plugins/`，再把 `patch.snippet.yml` 追加进同目录的 `cordis.patch.yml`（已有条目则跳过，可重复执行）。只在访问不了 GitHub 的机器上用。
 
 > 两种方式共用同一个行 id `subagent-model-pin`，**不能同时装**，否则重复挂载。切换前先卸掉另一种。
 

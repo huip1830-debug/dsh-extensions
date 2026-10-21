@@ -24,31 +24,31 @@ plugins/
 |------|------|
 | [`subagent-model-pin`](plugins/subagent-model-pin/README.md) | 子 agent 默认跑低成本模型，委派时显式传 `provider`/`model` 可升级 |
 
-## 安装方式（每个 profile 二选一）
+## 安装（bundle 为标准方式）
 
-### 方式 A：GUI / CLI 装 bundle（推荐，跨机免脚本）
+### 标准：GUI / CLI 装 bundle
 
 桌面版或 Web 的侧栏 **插件** → **添加插件** → **安装第三方插件**，填 Git 地址（多插件仓库要带子目录）：
 
 ```
-https://github.com/huip1830-debug/subagent-model-pin.git#path:/plugins/subagent-model-pin
+https://github.com/huip1830-debug/dsh-extensions.git#path:/plugins/subagent-model-pin
 ```
 
 CLI 等价：
 
 ```powershell
-dsh plugin add https://github.com/huip1830-debug/subagent-model-pin.git#path:/plugins/subagent-model-pin
+dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensions.git#path:/plugins/subagent-model-pin"
 ```
 
-安装会写 profile 的 `package.json`（`dsh.profile.bundles` 末尾追加）并用 pnpm 装包；装完在插件页启用。**升级** = 同一条地址重新安装，或在插件页卸载后重装。
+安装会写 profile 的 `package.json`（`dependencies` + `dsh.profile.bundles` 末尾追加）并用 pnpm 装包；装完在插件页可见/可开关。**升级** = 同一条地址重新安装，或在插件页卸载后重装。
 
-### 方式 B：脚本装（不进入 bundle 列表）
+### 离线兜底：脚本装（不进入 bundle 列表）
 
 ```powershell
-pwsh -File .\plugins\subagent-model-pin\install.ps1
+pwsh -File .\plugins\subagent-model-pin\install.ps1     # -Uninstall 反向清理
 ```
 
-它把 `plugin.mjs` 复制到 `<DshHome>/profiles/<profile>/plugins/`，并把 `patch.snippet.yml` 追加进该 profile 的 `cordis.patch.yml`。
+它把 `plugin.mjs` 复制到 `<DshHome>/profiles/<profile>/plugins/`，并把 `patch.snippet.yml` 追加进该 profile 的 `cordis.patch.yml`。**只在访问不了 GitHub 的机器上用**。
 
 > **两种方式互斥**：都指向同一个行 id `subagent-model-pin`，同时启用会重复挂载。换方式前先卸掉另一种。
 
