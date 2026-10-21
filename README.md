@@ -5,18 +5,21 @@
 ## 目录约定
 
 ```
+LICENSE                     # MIT
+.github/workflows/test.yml  # push/PR 时跑 node test.mjs
 plugins/
 └── <plugin-name>/
-    ├── package.json        # name + dsh.bundle.patch（声明为 bundle，GUI/CLI 可安装）
+    ├── package.json        # name + dsh.bundle.patch + exports（含 ./locale/*.json）
     ├── cordis.patch.yml    # bundle 层：插入插件行与默认配置
     ├── plugin.mjs          # 实现（cordis 插件：name / inject / apply）
-    ├── install.ps1         # 可选：不经过 bundle 的脚本安装（离线/临时）
+    ├── locale/             # 插件页显示元信息：en.json 必需，zh.json 等按语言加
+    ├── install.ps1         # 可选：不经过 bundle 的脚本安装（离线兜底）
     ├── patch.snippet.yml   # 可选：install.ps1 往 profile patch 里追加的片段
     ├── test.mjs            # 离线回归（node test.mjs，零依赖）
     └── README.md           # 行为、配置项、验证方法、已知坑
 ```
 
-新增插件时复制这个骨架即可；**不要**把插件做成单文件散落在根目录——GUI 只认带 `dsh.bundle.patch` 的包。
+新增插件时复制这个骨架即可；**不要**把插件做成单文件散落在根目录——GUI 只认带 `dsh.bundle.patch` 的包。`locale/en.json` 是插件页标题/描述的最低要求（缺了会回退成包名），并且 `package.json` 的 `exports` 必须放出 `./locale/*.json`，否则读不到。
 
 ## 插件清单
 

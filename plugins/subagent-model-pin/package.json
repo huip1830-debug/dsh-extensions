@@ -8,7 +8,8 @@
   "main": "./plugin.mjs",
   "exports": {
     ".": "./plugin.mjs",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "dsh": {
     "bundle": {
