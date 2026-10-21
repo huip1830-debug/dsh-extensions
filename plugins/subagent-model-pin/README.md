@@ -43,6 +43,28 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 | `force` | 否 | `true` = 一律覆盖，连显式选择也 pin（回到 v5 之前的"强制"行为） |
 | `depth` | 否 | 只处理委派深度等于该值的子 agent |
 
+配置目前只有两条途径：bundle 自带的 `cordis.patch.yml` 作默认值，profile 的 `cordis.patch.yml` 用同 id 覆盖（`config` 整体替换，不深合并）。插件页暂时没有配置表单，原因见下节。
+
+## GUI 配置（为什么目前只有 YAML）
+
+**结论：插件页不会从配置项自动生成下拉框；要做，必须给包补一个浏览器半区。** 依据（2026-10-21 在 DSH 0.2.1-rc.2 上核对）：
+
+| 事实 | 依据 |
+|------|------|
+| 配置入口只对**注册了 slot** 的插件出现 | 插件页用 `configLedger` 收集 `plugins.row.config` / `plugins.bundle.config` 的 key（`dsh-client-ui-plugin-manager/lib/client.js`）；没注册的插件只有开关 |
+| **没有 schema → 表单自动生成** | Host 的 `Config` schema 只用于启动校验和 `dsh --dump-config-schema`；页面读的是 slot 注册表，不是 schema |
+| 官方配置页都自带浏览器半区 | `plugins.item` / `plugins.bundle.config` / `plugins.row.config` + `ctx.configForms`（settings 传输）+ `ui-primitives` 的 `SettingsFormModel`；现成字段只有文本 / 数字 / 开关三类 |
+| 保存不写 bundle 的 patch | 官方模式写 **settings 命名空间**（`remote.settings.mutate`），Host 在 `apply` 时读；`plugin_manager` 服务也没有"写行配置"的方法 |
+
+要做下拉选模型，得补齐这些：
+
+1. **Host 侧**：暴露一个 settings 命名空间（`provider` / `model` / `reasoningEffort` / `enabled`），`apply` 时优先读它，缺省回退到 bundle 配置；
+2. **浏览器半区**：`client.mjs` + `package.json` 的 `dsh.client` 与 `"./client"` 导出，在 `plugins.row.config` 注册卡片（key 为 `subagent-model-pin#subagent-model-pin`）；
+3. **下拉数据源**：实时取 `remote.session.modelCatalog()`（官方「子智能体」设置页就这么列模型），不硬编码；
+4. **验收**：我只能验证"能加载、能写设置"，交互与样式需要在插件页人工点一遍。
+
+成本与风险：约 200–300 行前端代码；客户端 API 属内部契约（`ui-primitives`、slot 契约），DSH 升级可能要跟改。**在"给非 YAML 用户用"成为真实需求之前不做**；在那之前，换 pin 模型就是改一行 profile patch + 重启。
+
 ## 行为矩阵
 
 | 场景 | 行为 |

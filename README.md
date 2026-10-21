@@ -49,4 +49,5 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 
 - 改插件只改仓库里的源码，改完跑 `node test.mjs`；bundle 方式安装的，profile 里是 pnpm 的副本，需要重装才生效。
 - 插件参数写在各自的 `cordis.patch.yml` 里作默认值；不同机器要用不同值时，在 profile 的 `cordis.patch.yml` 用同 id 覆盖（`config` 整体替换，不深合并）。
+- **插件页不会从配置项自动生成表单**：DSH 的插件页只渲染插件自己通过 `plugins.row.config` / `plugins.bundle.config` 注册的浏览器半区，没有 schema 驱动的下拉框。各插件 README 的「GUI 配置」一节记录了取舍与补齐方式。
 - 不放业务代码、不放密钥；`apiKeyEnv` 之类只写变量名。
