@@ -1,0 +1,19 @@
+{
+  "name": "dispatch-protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH profile plugin: inject always-on delegation discipline into the system prompt, independent of which skills the model loads",
+  "license": "MIT",
+  "main": "./plugin.mjs",
+  "exports": {
+    ".": "./plugin.mjs",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

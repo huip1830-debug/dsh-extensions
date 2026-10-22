@@ -1,0 +1,15 @@
+# Bundle layer: applied when the profile selects this package (dsh.profile.bundles).
+# Override any value from the profile's own cordis.patch.yml with:
+#   - id: dispatch-protocol
+#     config: { ... }        # config is replaced wholesale, not deep-merged
+- insert:
+    - id: dispatch-protocol
+      name: dispatch-protocol
+      config:
+        enabled: true
+        order: 500            # after first-party guidance, before persona suffix (10200)
+        # rules: []           # override the five defaults; non-empty string array
+        # footer: ''          # override the small-change exemption line
+        checkpoint:
+          enabled: true       # remind the parent when a child completes
+          # text: ''          # overrides DEFAULT_CHECKPOINT; supports {childId} and {label}
