@@ -115,7 +115,7 @@ test('a completed child triggers exactly one checkpoint message to its parent', 
   plugin.apply(h.ctx, {})
 
   const parent = h.parent('parent-1')
-  const child = h.child('child-1', 'parent-1', '实现 Task 1')
+  const child = h.child('child-1', 'parent-1', '实现 Task 1', [call(1, 'write', { file_path: 'a.ts' })])
   h.created(child)
 
   h.ended({ childId: 'child-1', stopReason: 'completed' })
@@ -145,7 +145,7 @@ test('checkpoint messages can be disabled by config', () => {
   plugin.apply(h.ctx, { checkpoint: { enabled: false } })
 
   const parent = h.parent('parent-1')
-  h.created(h.child('child-3', 'parent-1', '实现 Task 3'))
+  h.created(h.child('child-3', 'parent-1', '实现 Task 3', [call(1, 'write', { file_path: 'a.ts' })]))
   h.ended({ childId: 'child-3', stopReason: 'completed' })
 
   assert.equal(parent.messages.length, 0)
@@ -156,7 +156,10 @@ test('a parent that already acted on the child report is not reminded again', ()
   plugin.apply(h.ctx, {})
 
   const parent = h.main('parent-1', [splice('child-9'), call(1, 'read', { file_path: 'a.ts' })])
-  const child = h.child('child-9', 'parent-1', '实现 Task 9', [call(1, 'send_message', { agent_id: 'parent-1' })])
+  const child = h.child('child-9', 'parent-1', '实现 Task 9', [
+    call(1, 'write', { file_path: 'a.ts' }),
+    call(1, 'send_message', { agent_id: 'parent-1' }),
+  ])
   h.created(child)
 
   h.ended({ childId: 'child-9', stopReason: 'completed' })
@@ -169,7 +172,10 @@ test('a parent that received a report but did nothing is still reminded', () => 
   plugin.apply(h.ctx, {})
 
   const parent = h.main('parent-2', [splice('child-10')])
-  const child = h.child('child-10', 'parent-2', '实现 Task 10', [call(1, 'send_message', { agent_id: 'parent-2' })])
+  const child = h.child('child-10', 'parent-2', '实现 Task 10', [
+    call(1, 'write', { file_path: 'a.ts' }),
+    call(1, 'send_message', { agent_id: 'parent-2' }),
+  ])
   h.created(child)
 
   h.ended({ childId: 'child-10', stopReason: 'completed' })
@@ -192,6 +198,50 @@ test('a child that kept writing after the report is still reminded', () => {
   h.ended({ childId: 'child-11', stopReason: 'completed' })
 
   assert.equal(parent.messages.length, 1, 'a report followed by writes is not a settled child')
+})
+
+test('a read-only survey child does not trigger a checkpoint', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+
+  const parent = h.main('parent-4', [splice('child-12')])
+  const child = h.child('child-12', 'parent-4', '勘察 Task 12', [
+    call(1, 'read', { file_path: 'a.ts' }),
+    call(1, 'grep', { pattern: 'checkpoint' }),
+    call(1, 'pwsh', { command: 'git status' }),
+    call(1, 'send_message', { agent_id: 'parent-4' }),
+  ])
+  h.created(child)
+
+  h.ended({ childId: 'child-12', stopReason: 'completed' })
+
+  assert.equal(parent.messages.length, 0, 'no diff to read and no command to re-run')
+})
+
+test('a child that called no tools at all does not trigger a checkpoint', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+
+  const parent = h.main('parent-5', [splice('child-13')])
+  h.created(h.child('child-13', 'parent-5', '零工具子代理'))
+
+  h.ended({ childId: 'child-13', stopReason: 'completed' })
+
+  assert.equal(parent.messages.length, 0)
+})
+
+test('a skipped read-only child stays deduplicated across repeated settlement events', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+
+  const parent = h.main('parent-6', [splice('child-14')])
+  const child = h.child('child-14', 'parent-6', '勘察 Task 14', [call(1, 'read', { file_path: 'a.ts' })])
+  h.created(child)
+
+  h.ended({ childId: 'child-14', stopReason: 'completed' })
+  h.ended({ childId: 'child-14', stopReason: 'completed' })
+
+  assert.equal(parent.messages.length, 0, 'the skipped child is still marked reported and never re-sent')
 })
 
 // ---------------------------------------------------------------------------
@@ -392,7 +442,7 @@ test('the nudge can be disabled without touching the checkpoint', () => {
   assert.equal(agent.messages.length, 0)
 
   const parent = h.parent('parent-6')
-  h.created(h.child('child-6', 'parent-6', '实现 Task 6'))
+  h.created(h.child('child-6', 'parent-6', '实现 Task 6', [call(1, 'write', { file_path: 'a.ts' })]))
   h.ended({ childId: 'child-6', stopReason: 'completed' })
   assert.equal(parent.messages.length, 1, 'the checkpoint still runs')
 })

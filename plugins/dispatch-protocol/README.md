@@ -41,6 +41,8 @@
 
 `agent/created` 记录每个子代理的父会话；`subagent/end` 在 `completed` 时向父代理投递一条 `[dispatch-protocol]` 消息（每个子代理只发一次，失败/中止不发）。消息模板支持 `{childId}` 与 `{label}` 占位。
 
+**只读跳过（0.3.3 起）**：子代理**整个会话**没有任何一次 `write`/`edit` 调用时，检查点**不发**。勘察类子代理只读文件、跑命令、汇报结论，既没有 diff 可读，也没有命令可复跑，提醒只会空转。判定只看 `session.snapshotEvents()` 里 `tool/call` 的工具名，**尝试即算**——写入被拒绝或抛错也算执行类，照旧发（判定抛错同样照旧发）。真机依据：`session-03f065ca` 回合 3 的勘察子代理 `56f7d82d` 汇报「未修改任何文件」、主控 0 次工具调用，检查点仍然发出，主控只能在回合 4 补一句「只读任务、无命令可复跑」。
+
 **去重（0.3.2 起）**：子代理通常先用 `send_message` 汇报，父代理会当场读 diff + 复跑；等 `subagent/end` 再提醒同一件事，父代理只能回一个空回合。所以投递前先判定「父代理是否已经按这份汇报动过手」，满足下列全部条件就**不发**：
 
 1. 父代理日志里存在 `agent/inbox/spliced`，文本含 `Agent {childId} sent a message`（子代理**汇报过**）；
@@ -111,6 +113,7 @@ dsh --profile probe headless "不要调用任何工具，只回答：你的系�
 - **规则是建议不是强制**：模型仍可无视。要硬拦截需要 `tools/pre-execute` 那类插件（本项目评估后不做）。
 - **漏派发提示要花一步**：`agent/turn-stopping` 里 `steer` 会让本回合再跑一步。按回合去重，一回合最多一次；模型可以只在补充说明里写「为什么没派」而不真的派发——提醒不是强制。
 - **触发看文件数、判定看调用名**：是否提醒按去重路径计（同一文件多次编辑算 1 个）；「哪些调用算改动」仍按工具名判断——`pwsh` 里的 `Set-Content`/`dotnet format` 等副作用不计；`write`/`edit` 以 `tool/result.isError` 为准，失败的不计（无结果可查时照算）。
+- **检查点的只读判定按调用名、尝试即算**：`write`/`edit` 只要出现在子代理的 `tool/call` 里就算执行类，**不解析 `tool/result`**——失败或被拒绝的写入也不豁免检查点。这与 nudge「成功才计数」的口径不同，是有意的保守方向：宁可多提醒一次，也不要漏掉真正的执行类子代理。
 - **记账在 TEMP 里**：`nudge.log` 默认落在系统临时目录，不随仓库版本化；要长期留档就把路径指到固定位置（或 `false` 关掉）。
 - **profile 插件不支持热加载**：装完必须重启 DSH，新会话才生效。
 - **update 失败会留下半残目录，且可能卡成 delete-pending**：`dsh plugin --profile desktop update` 先把 `node_modules/<pkg>` 整块 rename 掉；任一步失败就可能只剩一半文件，而失败时被打开的子目录（实测是 `lib/`）会进入 delete-pending —— 之后**连改父目录、删除、读 ACL 都 Access denied**，`diagnose-windows-sandbox-acl` 报 `VERDICT=UNREADABLE`、Restart Manager 返回 `ACCESS_DENIED`，只有**重启 Windows** 能清。2026-10-22 踩过一次（`AUDIT-2026-10-22.md` 第七节）。

@@ -52,6 +52,30 @@ function userMessage(text) {
   }
 }
 
+/**
+ * Tool names that mark a child as execution-class. Hard-coded on purpose: a
+ * child that ever *attempted* a write is execution-class even if the write was
+ * refused, so the checkpoint is delivered rather than risk missing it.
+ */
+const CHECKPOINT_WRITE_TOOLS = ['write', 'edit']
+
+/**
+ * 判定：子代理整个会话是否零写入（只读勘察）。
+ *
+ * 只认已提交 `tool/call` 的工具名，尝试即算——不解析 `tool/result` 成败。
+ * 判定抛错时返回 `false`（按执行类处理），与检查点「宁可多提醒」的防御风格一致。
+ * @param agent - the settled child agent.
+ * @returns true when the child never called `write`/`edit`.
+ */
+function ranReadOnly(agent) {
+  try {
+    const events = agent?.session?.snapshotEvents?.() ?? []
+    return !events.some(event => event?.type === 'tool/call' && CHECKPOINT_WRITE_TOOLS.includes(event.data?.name))
+  } catch {
+    return false
+  }
+}
+
 /** Child descriptor label, used only for the checkpoint text. */
 function readLabel(agent) {
   try {
@@ -189,6 +213,10 @@ function registerCheckpoint(ctx, checkpoint) {
     const stopReason = info?.stopReason ?? info?.outcome ?? info?.terminal?.stopReason
     if (stopReason !== 'completed') return
     reported.add(childId)
+
+    // A child that never attempted a write is a read-only survey: there is no
+    // diff to read and no command to re-run, so the checkpoint would be noise.
+    if (ranReadOnly(record.agent)) return
 
     const parent = ctx.agents?.get?.(record.parentId)
     if (parent === undefined) return
