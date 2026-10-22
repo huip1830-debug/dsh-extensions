@@ -568,6 +568,21 @@ test('a keyword quoted in a tool result is not an explanation', () => {
   assert.equal(agent.messages.length, 1, 'only assistant prose counts, not tool output')
 })
 
+test('a justification phrased without the original keywords is still recognised', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const agent = h.main('session-12', [
+    call(1, 'write', { file_path: 'a.md' }),
+    call(1, 'write', { file_path: 'b.md' }),
+    assistantMessage(1, '这三个文件是同一处改动的三个面，一条命令验完。'),
+  ])
+  h.created(agent)
+  h.turnStopping(agent, 1)
+
+  assert.equal(agent.messages.length, 0, 'the 0.3.8 phrasings must suppress the reminder')
+})
+
 test('the suppression keyword list is configurable', () => {
   const h = harness()
   plugin.apply(h.ctx, { nudge: { log: false, justifiedPatterns: ['镜像面'] } })

@@ -33,12 +33,18 @@ export const DEFAULT_NUDGE_TEXT = '[dispatch-protocol] 本回合改了 {fileCoun
 /**
  * Substrings that count as "this turn already explained itself".
  *
- * Deliberately narrow: `理由` / `无需` would swallow unrelated prose ("无需修改"),
- * and a missed suppression only costs the reminder the turn would have received
- * anyway. Width variants fold through NFKC; whitespace inside a phrase
- * ("不 派 发") is NOT repaired — an accepted limit.
+ * Starts narrow (`理由` / `无需` alone would swallow unrelated prose like
+ * "无需修改") and is widened only from observed misses: 0.3.8 adds the three
+ * phrasings a real turn used while still being reminded — "同一处改动的三个面",
+ * "一条命令验完", "镜像面". A missed suppression only costs the reminder the turn
+ * would have received anyway, so growth is allowed but each addition is a
+ * deliberate, reviewable decision. Width variants fold through NFKC; whitespace
+ * inside a phrase ("不 派 发") is NOT repaired — an accepted limit.
  */
-export const DEFAULT_JUSTIFIED_PATTERNS = ['豁免', '不派发', '未派发', '无需派发', '不需要派发', '直接做']
+export const DEFAULT_JUSTIFIED_PATTERNS = [
+  '豁免', '不派发', '未派发', '无需派发', '不需要派发', '直接做',
+  '一条命令验完', '一处改动的', '镜像面',
+]
 
 /** Cap on how many paths the reminder prints verbatim. */
 const MAX_LISTED_FILES = 5

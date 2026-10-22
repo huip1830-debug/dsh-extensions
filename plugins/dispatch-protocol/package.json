@@ -1,6 +1,6 @@
 {
   "name": "dispatch-protocol",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "private": true,
   "type": "module",
   "description": "DSH profile plugin: inject always-on delegation discipline into the system prompt, independent of which skills the model loads",
