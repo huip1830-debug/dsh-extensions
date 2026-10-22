@@ -131,11 +131,12 @@ test('a failed or aborted child does not trigger a checkpoint', () => {
   const h = harness()
   plugin.apply(h.ctx, {})
 
-  const parent = h.parent('parent-1')
+  const parent = h.main('parent-1', [])
   h.created(h.child('child-2', 'parent-1', '实现 Task 2'))
 
   h.ended({ childId: 'child-2', stopReason: 'error' })
   h.ended({ childId: 'child-2', stopReason: 'aborted' })
+  h.turnStopping(parent, 1)
 
   assert.equal(parent.messages.length, 0)
 })
@@ -163,7 +164,9 @@ test('a parent that already acted on the child report is not reminded again', ()
   h.created(child)
 
   h.ended({ childId: 'child-9', stopReason: 'completed' })
+  assert.equal(parent.messages.length, 0, 'settling only registers the checkpoint')
 
+  h.turnStopping(parent, 1)
   assert.equal(parent.messages.length, 0, 'the report was delivered and handled in the parent turn')
 })
 
@@ -179,9 +182,12 @@ test('a parent that received a report but did nothing is still reminded', () => 
   h.created(child)
 
   h.ended({ childId: 'child-10', stopReason: 'completed' })
+  assert.equal(parent.messages.length, 0, 'settling only registers the checkpoint')
 
+  h.turnStopping(parent, 1)
   assert.equal(parent.messages.length, 1, 'without a tool call the checkpoint still fires')
   assert.match(parent.messages[0].text, /dispatch-protocol/)
+  assert.match(parent.messages[0].text, /child-10/)
 })
 
 test('a child that kept writing after the report is still reminded', () => {
@@ -196,7 +202,9 @@ test('a child that kept writing after the report is still reminded', () => {
   h.created(child)
 
   h.ended({ childId: 'child-11', stopReason: 'completed' })
+  assert.equal(parent.messages.length, 0, 'settling only registers the checkpoint')
 
+  h.turnStopping(parent, 1)
   assert.equal(parent.messages.length, 1, 'a report followed by writes is not a settled child')
 })
 
@@ -214,7 +222,9 @@ test('a read-only survey child does not trigger a checkpoint', () => {
   h.created(child)
 
   h.ended({ childId: 'child-12', stopReason: 'completed' })
+  assert.equal(parent.messages.length, 0, 'settling only registers the checkpoint')
 
+  h.turnStopping(parent, 1)
   assert.equal(parent.messages.length, 0, 'no diff to read and no command to re-run')
 })
 
@@ -226,7 +236,9 @@ test('a child that called no tools at all does not trigger a checkpoint', () => 
   h.created(h.child('child-13', 'parent-5', '零工具子代理'))
 
   h.ended({ childId: 'child-13', stopReason: 'completed' })
+  assert.equal(parent.messages.length, 0, 'settling only registers the checkpoint')
 
+  h.turnStopping(parent, 1)
   assert.equal(parent.messages.length, 0)
 })
 
@@ -240,8 +252,81 @@ test('a skipped read-only child stays deduplicated across repeated settlement ev
 
   h.ended({ childId: 'child-14', stopReason: 'completed' })
   h.ended({ childId: 'child-14', stopReason: 'completed' })
+  assert.equal(parent.messages.length, 0, 'settling only registers the checkpoint')
 
+  h.turnStopping(parent, 1)
+  h.turnStopping(parent, 1)
   assert.equal(parent.messages.length, 0, 'the skipped child is still marked reported and never re-sent')
+})
+
+test('a checkpoint registered before the parent read the report cannot race the acceptance step', () => {
+  // Regression for session-96dda908: the report is spliced, the child settles
+  // with no parent tool call yet, and the parent only reads the diff later.
+  // Judging at settle time (0.3.3) emitted the checkpoint three events too soon.
+  const h = harness()
+  plugin.apply(h.ctx, {})
+
+  const parentEvents = [splice('child-15')]
+  const parent = h.main('parent-15', parentEvents)
+  h.created(h.child('child-15', 'parent-15', '实现 Task 15', [
+    call(1, 'write', { file_path: 'a.ts' }),
+    call(1, 'send_message', { agent_id: 'parent-15' }),
+  ]))
+
+  h.ended({ childId: 'child-15', stopReason: 'completed' })
+  assert.equal(parent.messages.length, 0, 'settling only registers the checkpoint')
+
+  // The acceptance step lands only after settlement, as in the live session.
+  parentEvents.push(call(1, 'read', { file_path: 'a.ts' }))
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 0, 'the deferred judgment sees the acceptance step')
+})
+
+test('a drained checkpoint is not delivered again on a later turn-stopping', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+
+  const parent = h.main('parent-16', [splice('child-16')])
+  h.created(h.child('child-16', 'parent-16', '实现 Task 16', [
+    call(1, 'write', { file_path: 'a.ts' }),
+    call(1, 'send_message', { agent_id: 'parent-16' }),
+  ]))
+
+  h.ended({ childId: 'child-16', stopReason: 'completed' })
+  h.turnStopping(parent, 1)
+  h.turnStopping(parent, 1)
+  h.turnStopping(parent, 2)
+
+  assert.equal(parent.messages.length, 1, 'the pending entry is removed after the judgment')
+})
+
+test('two pending checkpoints drain in one turn-stopping while the accepted one stays silent', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+
+  // child-17a's report is followed by a parent tool call; b and c are not.
+  const parent = h.main('parent-17', [
+    splice('child-17a'),
+    call(1, 'read', { file_path: 'a.ts' }),
+    splice('child-17b'),
+    splice('child-17c'),
+  ])
+  for (const id of ['child-17a', 'child-17b', 'child-17c']) {
+    h.created(h.child(id, 'parent-17', `实现 ${id}`, [
+      call(1, 'write', { file_path: `${id}.ts` }),
+      call(1, 'send_message', { agent_id: 'parent-17' }),
+    ]))
+    h.ended({ childId: id, stopReason: 'completed' })
+  }
+  assert.equal(parent.messages.length, 0, 'settling delivers nothing')
+
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 2, 'one message per unaccepted child, never merged')
+  assert.match(parent.messages[0].text, /child-17b/)
+  assert.match(parent.messages[1].text, /child-17c/)
+  assert.doesNotMatch(parent.messages.map(message => message.text).join(''), /child-17a/)
 })
 
 // ---------------------------------------------------------------------------
