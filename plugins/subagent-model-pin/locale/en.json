@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Subagent Model Pin",
-    "description": "Point subagents at a low-cost model route by default; an explicit provider/model on the delegation call still wins."
+    "title": "Subagent Delegation Policy",
+    "description": "Default subagents to a low-cost route, with per-role route and sandbox tiers; an explicit provider/model on the delegation call still wins."
   }
 }

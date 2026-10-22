@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "DSH profile plugin: default subagents to a low-cost route, explicit provider/model upgrades still win",
+  "description": "DSH profile plugin: default subagents to a low-cost route, with per-role route and sandbox tiers; explicit provider/model upgrades still win",
   "license": "MIT",
   "main": "./plugin.mjs",
   "exports": {

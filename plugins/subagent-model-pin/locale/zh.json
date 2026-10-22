@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "子 agent 模型固定",
-    "description": "子 agent 默认跑低成本模型；委派时显式传 provider/model 即可升级到强模型。"
+    "title": "子 agent 委派策略",
+    "description": "子 agent 默认跑低成本路由，可按委派角色分档路由与沙箱；显式 provider/model 仍可升级。"
   }
 }
