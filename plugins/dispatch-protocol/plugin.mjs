@@ -34,7 +34,7 @@
 import { randomUUID } from 'node:crypto'
 import { appendFileSync } from 'node:fs'
 import { resolveConfig } from './lib/config.mjs'
-import { renderNudge, shouldNudge, summarizeTurn } from './lib/nudge.mjs'
+import { renderNudge, shouldNudge, summarizeTurn, justifiedInTurn } from './lib/nudge.mjs'
 
 export const name = 'dispatch-protocol'
 export const inject = ['systemPrompt', 'agents']
@@ -106,14 +106,15 @@ function steerText(agent, text) {
 }
 
 /**
- * Append one accounting line for a delivered nudge.
+ * Append one accounting line for a nudge decision.
  *
  * Best-effort by design: a full disk or a bad path must never close a turn.
  * @param nudge - the resolved `nudge` section.
- * @param agent - the nudged agent.
+ * @param agent - the agent whose turn closed.
  * @param summary - `{ turn, writes, files, delegations }`.
+ * @param suppressed - why no message was delivered, when it was suppressed.
  */
-function recordNudge(nudge, agent, summary) {
+function recordNudge(nudge, agent, summary, suppressed) {
   if (nudge.log === false) return
   try {
     const line = JSON.stringify({
@@ -123,6 +124,7 @@ function recordNudge(nudge, agent, summary) {
       writes: summary.writes,
       files: summary.files,
       delegations: summary.delegations,
+      ...(suppressed === undefined ? {} : { suppressed }),
     })
     appendFileSync(nudge.log, `${line}\n`)
   } catch {
@@ -172,6 +174,12 @@ function registerNudge(ctx, nudge) {
         if (!shouldNudge(summary, nudge)) return
         nudgedTurns.add(turn)
         const withTurn = { ...summary, turn }
+        // A turn that already said why it skipped the dispatch gets no message:
+        // repeating it back is pure noise. The decision is still logged.
+        if (justifiedInTurn(events, turn, nudge.justifiedPatterns)) {
+          recordNudge(nudge, target, withTurn, 'justified')
+          return
+        }
         steerText(target, renderNudge(nudge.text, withTurn))
         recordNudge(nudge, target, withTurn)
       } catch {

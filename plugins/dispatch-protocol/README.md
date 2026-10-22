@@ -73,6 +73,7 @@
 - **失败不计数**：写调用的结局要看它的 `tool/result`——`isError === true` 的写入没有落盘，不计入 `writes`/`files`；没有 `callId` 或找不到结果的调用照旧计数（回合被打断时不能把写入抹掉）。
 - **触发条件**：本回合**去重文件数** ≥ `nudge.threshold`（默认 2；同一文件多次编辑只算 1）**且**派发调用（`subagent`/`subagent_fork`/`workflow`）为 0。
 - **动作**：给主控发一条 `{fileCount}`/`{writes}`/`{files}`/`{turn}` 渲染的提醒（形如「改了 4 个文件（9 次写入）」），并往 `nudge.log`（默认 `%TEMP%\dispatch-protocol-nudge.jsonl`，一行一条 JSON）记一笔账。
+- **已解释则静默（0.3.6 起）**：本回合的 `assistant/message` 正文里若已出现 `nudge.justifiedPatterns` 中的任一词（默认 `豁免` / `不派发` / `未派发` / `无需派发` / `不需要派发` / `直接做`），**不发消息**，只往日志记一行并带 `"suppressed":"justified"`。多文件写入是常态，模型常常在同一回合已经写清「为什么自己改」，再把问题复述一遍只会让会话窗口多一条噪音——实测 `session-a2e9f600` 的 turn 3：主控正文已写「4 个文件是同一处文案的 4 个镜像面…属于豁免」，提醒仍照样发出，用户只得到一条重复消息。判定只看 `assistant/message`（模型说的话），不看 `tool/result` 文本；只认本回合，别的回合解释过不算。
 - **不适用于子代理**：子代理本身不能再派发，其写操作已经记在父回合里。
 
 只数调用名，不解析副作用：`pwsh` 里 `Set-Content` 之类的写入落在口径之外（不算）；而 `write`/`edit` 按**结果**算——成功才计数，被策略拒绝或抛错的调用（`tool/result.isError === true`）不计。计数按去重路径：同一文件改多次只算 1 个文件。
@@ -91,10 +92,11 @@
 | `nudge.threshold` | `2` | 本回合去重文件数 ≥ 该值且 0 派发时提醒（正整数） |
 | `nudge.writeTools` | `['write','edit']` | 计入「改动」的工具名 |
 | `nudge.delegationTools` | `['subagent','subagent_fork','workflow']` | 计入「已派发」的工具名 |
+| `nudge.justifiedPatterns` | `['豁免','不派发','未派发','无需派发','不需要派发','直接做']` | 本回合正文命中任一即静默（子串匹配，NFKC 归一） |
 | `nudge.text` | 内置模板 | 覆盖提醒文案，支持 `{fileCount}` / `{writes}` / `{files}` / `{turn}` |
 | `nudge.log` | `%TEMP%\dispatch-protocol-nudge.jsonl` | 记账文件路径；`false` 关闭记账 |
 
-非法配置（`order` 非有限数字、`rules` 为空/非数组、`footer`/`checkpoint.text` 非字符串、`nudge.threshold` 非正整数、工具名单为空数组、`nudge.log` 既非路径也非 `false`）在插件加载时直接报错，不会静默降级。
+非法配置（`order` 非有限数字、`rules` 为空/非数组、`footer`/`checkpoint.text` 非字符串、`nudge.threshold` 非正整数、工具名单为空数组、`nudge.justifiedPatterns` 为空数组或含空白串、`nudge.log` 既非路径也非 `false`）在插件加载时直接报错，不会静默降级。
 
 ## 验证
 
@@ -113,7 +115,7 @@ dsh --profile probe headless "不要调用任何工具，只回答：你的系�
 
 预期：模型复述出「先勘察」「执行类派发」「验收要复跑」「提交权」「并行只读」五条。
 
-漏派发提示的真机口径：一个回合内连续改 2 个以上**去重文件**（同一文件多次编辑只算 1）且不派发，收尾时会多出一段以 `[dispatch-protocol]` 开头的提醒；`%TEMP%\dispatch-protocol-nudge.jsonl` 同时多一行 `{session, turn, writes, files, delegations}`。
+漏派发提示的真机口径：一个回合内连续改 2 个以上**去重文件**（同一文件多次编辑只算 1）且不派发、正文也没写不派发理由时，收尾时会多出一段以 `[dispatch-protocol]` 开头的提醒；`%TEMP%\dispatch-protocol-nudge.jsonl` 同时多一行 `{session, turn, writes, files, delegations}`；被静默的那次记的是同一行加 `"suppressed":"justified"`。
 
 ## 已知坑
 
@@ -121,6 +123,7 @@ dsh --profile probe headless "不要调用任何工具，只回答：你的系�
 - **section 名重复会报错**：同一 profile 只能挂一个 `dispatch-protocol`；改配置用同 id 覆盖，不要重复插入。
 - **规则是建议不是强制**：模型仍可无视。要硬拦截需要 `tools/pre-execute` 那类插件（本项目评估后不做）。
 - **漏派发提示要花一步**：`agent/turn-stopping` 里 `steer` 会让本回合再跑一步。按回合去重，一回合最多一次；模型可以只在补充说明里写「为什么没派」而不真的派发——提醒不是强制。
+- **静默判定是关键词粗判**：引述规则原文（例如「超出单文件豁免」）也会被当成已解释，`不 派 发` 这种被空格切开的写法则**不会**命中。两个方向都是有意的：宁可少发一次提醒，也不要每次打扰。误报多就调 `nudge.justifiedPatterns`，不必改代码。
 - **检查点只在未验收时花一步**：0.3.4 起 settle 只登记，回合收尾判定已验收就零消息、零额外步骤（比 0.3.2/0.3.3 的 settle 即发更省）；未验收才 `steer` 一条，花一步，与 nudge 同价。父代理没有 hook 作用域时仍回退为 settle 时 `followup`，行为同 0.3.3。
 - **触发看文件数、判定看调用名**：是否提醒按去重路径计（同一文件多次编辑算 1 个）；「哪些调用算改动」仍按工具名判断——`pwsh` 里的 `Set-Content`/`dotnet format` 等副作用不计；`write`/`edit` 以 `tool/result.isError` 为准，失败的不计（无结果可查时照算）。
 - **检查点的只读判定按调用名、尝试即算**：`write`/`edit` 只要出现在子代理的 `tool/call` 里就算执行类，**不解析 `tool/result`**——失败或被拒绝的写入也不豁免检查点。这与 nudge「成功才计数」的口径不同，是有意的保守方向：宁可多提醒一次，也不要漏掉真正的执行类子代理。

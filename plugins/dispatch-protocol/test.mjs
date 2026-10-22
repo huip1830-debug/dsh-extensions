@@ -501,6 +501,83 @@ test('a turn that delegated is never reminded', () => {
   assert.equal(agent.messages.length, 0)
 })
 
+test('a turn whose prose already explains the skip is not reminded', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-'))
+  try {
+    const log = join(dir, 'nudge.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log } })
+
+    const agent = h.main('session-8', [
+      call(1, 'write', { file_path: 'a.md' }),
+      call(1, 'write', { file_path: 'b.md' }),
+      assistantMessage(1, '两处都是纯文案改动，属于单文件小改豁免。'),
+    ])
+    h.created(agent)
+    h.turnStopping(agent, 1)
+
+    assert.equal(agent.messages.length, 0, 'no reminder when the turn explained itself')
+    const [line] = readFileSync(log, 'utf8').trim().split('\n').map(row => JSON.parse(row))
+    assert.equal(line.suppressed, 'justified', 'the suppression is still accounted for')
+    assert.equal(line.turn, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a justification in another turn does not suppress this one', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const agent = h.main('session-9', [
+    call(1, 'write', { file_path: 'a.md' }),
+    assistantMessage(1, '这属于豁免。'),
+    call(2, 'write', { file_path: 'a.md' }),
+    call(2, 'write', { file_path: 'b.md' }),
+  ])
+  h.created(agent)
+  h.turnStopping(agent, 2)
+
+  assert.equal(agent.messages.length, 1, 'turn 2 never explained itself')
+})
+
+test('a keyword quoted in a tool result is not an explanation', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const agent = h.main('session-10', [
+    call(1, 'write', { file_path: 'a.md' }),
+    call(1, 'write', { file_path: 'b.md' }),
+    {
+      type: 'tool/result',
+      data: {
+        turn: 1,
+        step: 1,
+        message: { isError: false, toolCallId: 'call-1-write', content: [{ type: 'text', text: '豁免 不派发' }] },
+      },
+    },
+  ])
+  h.created(agent)
+  h.turnStopping(agent, 1)
+
+  assert.equal(agent.messages.length, 1, 'only assistant prose counts, not tool output')
+})
+
+test('the suppression keyword list is configurable', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false, justifiedPatterns: ['镜像面'] } })
+
+  const agent = h.main('session-11', [
+    call(1, 'write', { file_path: 'a.md' }),
+    call(1, 'write', { file_path: 'b.md' }),
+    assistantMessage(1, '四个文件是同一处文案的镜像面。'),
+  ])
+  h.created(agent)
+  h.turnStopping(agent, 1)
+
+  assert.equal(agent.messages.length, 0)
+})
+
 test('a subagent is never nudged, even with many writes', () => {
   const h = harness()
   plugin.apply(h.ctx, { nudge: { log: false } })
@@ -560,6 +637,9 @@ test('nudge config rejects values that would silently never fire', () => {
   assert.throws(() => resolveNudge({ text: '   ' }), /text/)
   assert.throws(() => resolveNudge({ writeTools: 'write' }), /writeTools/)
   assert.throws(() => resolveNudge({ delegationTools: [] }), /delegationTools/)
+  assert.throws(() => resolveNudge({ justifiedPatterns: [] }), /justifiedPatterns/)
+  assert.throws(() => resolveNudge({ justifiedPatterns: '豁免' }), /justifiedPatterns/)
+  assert.throws(() => resolveNudge({ justifiedPatterns: [' '] }), /justifiedPatterns/)
   assert.throws(() => resolveConfig({ nudge: { threshold: -1 } }), /threshold/)
 
   const defaults = resolveNudge({})
@@ -593,6 +673,18 @@ function call(turn, name, args, id) {
 /** One committed `tool/result` record; `isError` marks a refused call. */
 function result(turn, callId, isError) {
   return { type: 'tool/result', data: { turn, step: 1, message: { isError, toolCallId: callId, content: [] } } }
+}
+
+/** One committed `assistant/message` record: the model's prose for a step. */
+function assistantMessage(turn, text) {
+  return {
+    type: 'assistant/message',
+    data: {
+      turn,
+      step: 1,
+      message: { role: 'assistant', content: [{ type: 'text', text }], source: { kind: 'model' } },
+    },
+  }
 }
 
 /** One `agent/inbox/spliced` record: a child report delivered into the parent. */

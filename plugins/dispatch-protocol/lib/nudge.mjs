@@ -23,8 +23,22 @@ export const DEFAULT_WRITE_TOOLS = ['write', 'edit']
 /**
  * The one model-facing reminder. Delivered at most once per turn, so a model
  * that answers it with more edits cannot re-trigger it in the same turn.
+ *
+ * A turn whose own prose already justifies the skip is suppressed before this
+ * text is ever rendered, so the wording no longer hedges ("若超出豁免…"): the
+ * absence of an explanation is exactly what earned it.
  */
-export const DEFAULT_NUDGE_TEXT = '[dispatch-protocol] 本回合改了 {fileCount} 个文件（{writes} 次写入）：{files}。派发 0 次。若这批改动超出「单文件小改」豁免，请在收尾说明里给出不派发的理由；否则应改为只读勘察派子代理、实现派子代理、自己复跑验收。'
+export const DEFAULT_NUDGE_TEXT = '[dispatch-protocol] 本回合改了 {fileCount} 个文件（{writes} 次写入）：{files}。派发 0 次，也没有说明理由。要么一行给出不派发的理由，要么改为派发。'
+
+/**
+ * Substrings that count as "this turn already explained itself".
+ *
+ * Deliberately narrow: `理由` / `无需` would swallow unrelated prose ("无需修改"),
+ * and a missed suppression only costs the reminder the turn would have received
+ * anyway. Width variants fold through NFKC; whitespace inside a phrase
+ * ("不 派 发") is NOT repaired — an accepted limit.
+ */
+export const DEFAULT_JUSTIFIED_PATTERNS = ['豁免', '不派发', '未派发', '无需派发', '不需要派发', '直接做']
 
 /** Cap on how many paths the reminder prints verbatim. */
 const MAX_LISTED_FILES = 5
@@ -59,6 +73,12 @@ export function resolveNudge(source = {}) {
     throw new Error('dispatch-protocol: nudge.delegationTools must be a non-empty array of non-empty strings')
   }
 
+  const justifiedPatterns = config.justifiedPatterns ?? DEFAULT_JUSTIFIED_PATTERNS
+  if (!Array.isArray(justifiedPatterns) || justifiedPatterns.length === 0
+    || justifiedPatterns.some(pattern => typeof pattern !== 'string' || pattern.trim() === '')) {
+    throw new Error('dispatch-protocol: nudge.justifiedPatterns must be a non-empty array of non-empty strings')
+  }
+
   const log = config.log === false
     ? false
     : (typeof config.log === 'string' && config.log.trim() !== ''
@@ -68,7 +88,7 @@ export function resolveNudge(source = {}) {
     throw new Error('dispatch-protocol: nudge.log must be a path or false')
   }
 
-  return { enabled: config.enabled !== false, threshold, writeTools, delegationTools, text, log }
+  return { enabled: config.enabled !== false, threshold, writeTools, delegationTools, justifiedPatterns, text, log }
 }
 
 /**
@@ -161,6 +181,36 @@ function readPath(raw) {
  */
 export function shouldNudge(summary, config) {
   return summary.files.length >= config.threshold && summary.delegations === 0
+}
+
+/**
+ * Decide whether this turn's own prose already explains the skipped dispatch.
+ *
+ * Only `assistant/message` text of the closing turn counts: a keyword quoted in
+ * a tool result, or said in an earlier turn, is not an explanation for this one.
+ * The scan is generous across steps (a model that explains mid-turn and closes
+ * with "已完成。" is still covered), and coarse by design — quoting the rule text
+ * ("超出单文件豁免") suppresses the reminder too, which fails toward silence.
+ * @param events - `session.snapshotEvents()`.
+ * @param turn - the turn being closed.
+ * @param patterns - the resolved `nudge.justifiedPatterns`.
+ * @returns true when any text block of that turn contains a pattern.
+ */
+export function justifiedInTurn(events, turn, patterns) {
+  const prose = []
+  for (const event of events ?? []) {
+    if (event?.type !== 'assistant/message') continue
+    const data = event.data ?? {}
+    if (data.turn !== turn) continue
+    const content = data.message?.content
+    if (!Array.isArray(content)) continue
+    for (const block of content) {
+      if (block?.type === 'text' && typeof block.text === 'string') prose.push(block.text)
+    }
+  }
+  if (prose.length === 0) return false
+  const text = prose.join('\n').normalize('NFKC')
+  return patterns.some(pattern => text.includes(pattern.normalize('NFKC')))
 }
 
 /**
