@@ -38,6 +38,8 @@ test('the default text states all five dispatch rules', () => {
   assert.match(text, /复跑/)
   assert.match(text, /提交权/)
   assert.match(text, /并行/)
+  assert.match(text, /互不依赖/, 'parallel recon must carry a trigger, not just a permission')
+  assert.match(text, /在同一条消息里并行发出/, 'the trigger must name the concrete action')
   assert.match(text, /单文件/, 'the closing paragraph states the exemption')
 })
 
