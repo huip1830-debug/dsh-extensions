@@ -175,6 +175,44 @@ test('summarizeTurn counts only the requested turn\'s writes and files', () => {
   assert.equal(second.delegations, 0)
 })
 
+test('a write whose result is an error is not counted', () => {
+  const config = resolveNudge({ threshold: 2 })
+  const events = [
+    call(1, 'write', { file_path: 'a.ts' }, 'call-a'),
+    call(1, 'write', { file_path: 'b.ts' }, 'call-b'),
+    result(1, 'call-a', true),
+  ]
+
+  const summary = summarizeTurn(events, 1, config)
+  assert.equal(summary.writes, 1, 'the refused write is not a write')
+  assert.deepEqual(summary.files, ['b.ts'])
+  assert.equal(shouldNudge(summary, config), false, 'one surviving file is below the threshold')
+})
+
+test('a write without a matching result is still counted', () => {
+  const config = resolveNudge({})
+  const events = [
+    call(1, 'write', { file_path: 'a.ts' }, 'call-a'),
+    call(1, 'write', { file_path: 'b.ts' }),
+  ]
+
+  const summary = summarizeTurn(events, 1, config)
+  assert.equal(summary.writes, 2, 'a missing result must not erase a write')
+  assert.equal(summary.files.length, 2)
+})
+
+test('a successful result does not suppress the write', () => {
+  const config = resolveNudge({})
+  const events = [
+    call(1, 'write', { file_path: 'a.ts' }, 'call-a'),
+    result(1, 'call-a', false),
+  ]
+
+  const summary = summarizeTurn(events, 1, config)
+  assert.equal(summary.writes, 1)
+  assert.deepEqual(summary.files, ['a.ts'])
+})
+
 test('a multi-write turn without delegation is reminded exactly once', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-'))
   try {
@@ -368,8 +406,13 @@ test('renderNudge fills the placeholders and truncates a long file list', () => 
 // ---------------------------------------------------------------------------
 
 /** One committed `tool/call` record, shaped like the session log stores it. */
-function call(turn, name, args) {
-  return { type: 'tool/call', data: { turn, step: 1, callId: `call-${turn}-${name}`, name, arguments: JSON.stringify(args ?? {}) } }
+function call(turn, name, args, id) {
+  return { type: 'tool/call', data: { turn, step: 1, callId: id ?? `call-${turn}-${name}`, name, arguments: JSON.stringify(args ?? {}) } }
+}
+
+/** One committed `tool/result` record; `isError` marks a refused call. */
+function result(turn, callId, isError) {
+  return { type: 'tool/result', data: { turn, step: 1, message: { isError, toolCallId: callId, content: [] } } }
 }
 
 /** Build a fake host context: prompt registry, agents registry, event bus. */

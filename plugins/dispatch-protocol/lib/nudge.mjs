@@ -83,11 +83,13 @@ export function resolveNudge(source = {}) {
  * @returns `{ writes, files, delegations }` for that turn.
  */
 export function summarizeTurn(events, turn, config) {
+  const log = events ?? []
+  const failedCallIds = collectFailedCallIds(log)
   const writes = []
   const files = []
   let delegations = 0
 
-  for (const event of events ?? []) {
+  for (const event of log) {
     if (event?.type !== 'tool/call') continue
     const data = event.data ?? {}
     if (data.turn !== turn) continue
@@ -99,6 +101,10 @@ export function summarizeTurn(events, turn, config) {
       continue
     }
     if (!config.writeTools.includes(tool)) continue
+    // A refused write never touched the file: skip it. A call with no id, or
+    // with no result event, stays counted — a missing result must not erase a
+    // write.
+    if (failedCallIds.has(data.callId)) continue
 
     writes.push(tool)
     const path = readPath(data.arguments)
@@ -106,6 +112,26 @@ export function summarizeTurn(events, turn, config) {
   }
 
   return { writes: writes.length, files, delegations }
+}
+
+/**
+ * Collect the ids of calls whose logged result is an error.
+ *
+ * Results are not filtered by turn: a call id is unique session-wide, so the
+ * set only needs to answer "did this call fail?".
+ * @param events - the committed session log.
+ * @returns the failed call ids.
+ */
+function collectFailedCallIds(events) {
+  const ids = new Set()
+  for (const event of events) {
+    if (event?.type !== 'tool/result') continue
+    const message = event.data?.message
+    if (message?.isError !== true) continue
+    const callId = message?.toolCallId ?? message?.source?.callId
+    if (typeof callId === 'string' && callId !== '') ids.add(callId)
+  }
+  return ids
 }
 
 /**

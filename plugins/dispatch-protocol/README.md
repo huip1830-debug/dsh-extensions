@@ -1,6 +1,6 @@
 # dispatch-protocol
 
-> 当前部署：desktop **0.3.0**；probe 为 `link:` → 直接吃工作区。改动后的发布顺序固定为：提交推送 → `dsh plugin --profile desktop update dispatch-protocol` → 重启 DSH → 台账/本行记一笔。没走完不算发布。
+> 当前部署：desktop **0.3.1**；probe 为 `link:` → 直接吃工作区。改动后的发布顺序固定为：提交推送 → `dsh plugin --profile desktop update dispatch-protocol` → 重启 DSH → 台账/本行记一笔。没走完不算发布。
 
 把「派发纪律」常驻注入 DSH。三个机制，都不拦截任何调用：
 
@@ -49,11 +49,12 @@
 
 - **触发点**：`agent/turn-stopping`（serial，回合即将收尾、`turn/end` 提交之前）。这里 `steer` 会让本回合再跑一步，因此提醒只花一步，且**每回合最多一次**（按回合号去重，模型回一句「收到」后继续改文件也不会再触发）。
 - **计数来源**：该回合已提交的 `tool/call` 事件。事件自带 `turn`，所以不需要任何跨回合状态，恢复的会话算出的数字与实时一致。
+- **失败不计数**：写调用的结局要看它的 `tool/result`——`isError === true` 的写入没有落盘，不计入 `writes`/`files`；没有 `callId` 或找不到结果的调用照旧计数（回合被打断时不能把写入抹掉）。
 - **触发条件**：本回合**去重文件数** ≥ `nudge.threshold`（默认 2；同一文件多次编辑只算 1）**且**派发调用（`subagent`/`subagent_fork`/`workflow`）为 0。
 - **动作**：给主控发一条 `{fileCount}`/`{writes}`/`{files}`/`{turn}` 渲染的提醒（形如「改了 4 个文件（9 次写入）」），并往 `nudge.log`（默认 `%TEMP%\dispatch-protocol-nudge.jsonl`，一行一条 JSON）记一笔账。
 - **不适用于子代理**：子代理本身不能再派发，其写操作已经记在父回合里。
 
-只数调用名，不解析副作用：`pwsh` 里 `Set-Content` 之类的写入、以及失败的 `write`/`edit` 调用都会落在口径之外（前者不算、后者照算）。计数按去重路径：同一文件改多次只算 1 个文件。
+只数调用名，不解析副作用：`pwsh` 里 `Set-Content` 之类的写入落在口径之外（不算）；而 `write`/`edit` 按**结果**算——成功才计数，被策略拒绝或抛错的调用（`tool/result.isError === true`）不计。计数按去重路径：同一文件改多次只算 1 个文件。
 
 ## 配置
 
@@ -99,7 +100,7 @@ dsh --profile probe headless "不要调用任何工具，只回答：你的系�
 - **section 名重复会报错**：同一 profile 只能挂一个 `dispatch-protocol`；改配置用同 id 覆盖，不要重复插入。
 - **规则是建议不是强制**：模型仍可无视。要硬拦截需要 `tools/pre-execute` 那类插件（本项目评估后不做）。
 - **漏派发提示要花一步**：`agent/turn-stopping` 里 `steer` 会让本回合再跑一步。按回合去重，一回合最多一次；模型可以只在补充说明里写「为什么没派」而不真的派发——提醒不是强制。
-- **触发看文件数、判定看调用名**：是否提醒按去重路径计（同一文件多次编辑算 1 个）；但「哪些调用算改动」仍按工具名判断——`pwsh` 里的 `Set-Content`/`dotnet format` 等副作用不计，失败的 `write`/`edit` 照算。
+- **触发看文件数、判定看调用名**：是否提醒按去重路径计（同一文件多次编辑算 1 个）；「哪些调用算改动」仍按工具名判断——`pwsh` 里的 `Set-Content`/`dotnet format` 等副作用不计；`write`/`edit` 以 `tool/result.isError` 为准，失败的不计（无结果可查时照算）。
 - **记账在 TEMP 里**：`nudge.log` 默认落在系统临时目录，不随仓库版本化；要长期留档就把路径指到固定位置（或 `false` 关掉）。
 - **profile 插件不支持热加载**：装完必须重启 DSH，新会话才生效。
 - **update 失败会留下半残目录，且可能卡成 delete-pending**：`dsh plugin --profile desktop update` 先把 `node_modules/<pkg>` 整块 rename 掉；任一步失败就可能只剩一半文件，而失败时被打开的子目录（实测是 `lib/`）会进入 delete-pending —— 之后**连改父目录、删除、读 ACL 都 Access denied**，`diagnose-windows-sandbox-acl` 报 `VERDICT=UNREADABLE`、Restart Manager 返回 `ACCESS_DENIED`，只有**重启 Windows** 能清。2026-10-22 踩过一次（`AUDIT-2026-10-22.md` 第七节）。
