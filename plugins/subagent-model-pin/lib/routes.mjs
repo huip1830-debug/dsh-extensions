@@ -1,9 +1,14 @@
-// Role-based routing: pick a child route from the delegation label.
+// Role-based routing: pick a child route (and optional sandbox mode) from the
+// delegation label.
 //
 // A role matches when the child's delegation description starts with the
 // role's `match` string (case-insensitive, leading whitespace ignored). The
 // first matching role wins; otherwise the configured default route applies.
-// An explicit `provider`/`model` on the delegation call still overrides both.
+// An explicit `provider`/`model` on the delegation call still overrides the
+// route; the sandbox mode has no delegation-call field, so the role owns it.
+
+/** Sandbox modes the role table may name; mirrors the host's closed union. */
+export const SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access']
 
 /**
  * Validate the configured roles, failing loud at load.
@@ -23,6 +28,9 @@ export function validateRoles(roles) {
     if (typeof role.model !== 'string' || role.model.length === 0) {
       throw new Error('subagent-model-pin: roles[].model is required')
     }
+    if (role.sandbox !== undefined && !SANDBOX_MODES.includes(role.sandbox)) {
+      throw new Error(`subagent-model-pin: roles[].sandbox must be one of ${SANDBOX_MODES.join(', ')}`)
+    }
   }
   return roles
 }
@@ -30,8 +38,8 @@ export function validateRoles(roles) {
 /**
  * Resolve the route for one delegation.
  * @param description - the delegation `description` (the child's label).
- * @param config - plugin config carrying `provider`/`model`/`reasoningEffort`/`roles`.
- * @returns `{ provider, model, reasoningEffort, matched }`; `matched` is true when a role won.
+ * @param config - plugin config carrying `provider`/`model`/`reasoningEffort`/`roles`/`sandbox`.
+ * @returns `{ provider, model, reasoningEffort, sandbox, matched }`; `matched` is true when a role won.
  */
 export function resolveRoute(description, config) {
   const roles = config?.roles ?? []
@@ -43,6 +51,7 @@ export function resolveRoute(description, config) {
           provider: role.provider,
           model: role.model,
           reasoningEffort: role.reasoningEffort ?? config.reasoningEffort,
+          sandbox: role.sandbox ?? config.sandbox,
           matched: true,
         }
       }
@@ -52,6 +61,7 @@ export function resolveRoute(description, config) {
     provider: config.provider,
     model: config.model,
     reasoningEffort: config.reasoningEffort,
+    sandbox: config.sandbox,
     matched: false,
   }
 }

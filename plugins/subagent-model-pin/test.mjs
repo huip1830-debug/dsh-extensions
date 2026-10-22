@@ -61,9 +61,17 @@ function createHarness(overrides = {}) {
     /** Create a child agent, then expose its `agent/request` result for a resolved route. */
     async createChild({ id = 'child-1', header = { origin: 'subagent', parentSession: 'parent' }, events = [] } = {}) {
       const listeners = new Map()
+      const appended = []
       const agent = {
         id,
-        session: { header, snapshotEvents: () => events },
+        session: {
+          header,
+          snapshotEvents: () => events,
+          append: (type, data) => {
+            appended.push({ type, data })
+            events.push({ type, data })
+          },
+        },
         ctx: {
           on(name, listener) {
             const list = listeners.get(name) ?? []
@@ -80,6 +88,7 @@ function createHarness(overrides = {}) {
       for (const listener of rootEvents.get('agent/created') ?? []) await listener({ agent })
       return {
         agent,
+        appended,
         async request(resolved) {
           const chain = listeners.get('agent/request') ?? []
           assert.ok(chain.length <= 1, 'expected at most one agent/request listener')
@@ -261,3 +270,38 @@ test('a non-subagent agent is left alone', async () => {
   const resolved = await child.request({ ...PARENT_ROUTE })
   assert.deepEqual(resolved, PARENT_ROUTE)
 })
+
+// --- role sandbox -----------------------------------------------------------
+
+const SANDBOX_ROLE = { ...SURVEY_ROLE, sandbox: 'read-only' }
+
+test('roles[].sandbox narrows the matching child before its first tool call', async () => {
+  const h = createHarness({ roles: [SANDBOX_ROLE] })
+  const child = await h.createChild({ events: descriptor('Survey the repo') })
+
+  assert.deepEqual(child.appended, [{ type: 'sandbox/mode', data: { mode: 'read-only' } }])
+})
+
+test('no sandbox event for an unmatched label or a role without sandbox', async () => {
+  const h = createHarness({ roles: [SANDBOX_ROLE] })
+  const impl = await h.createChild({ events: descriptor('Implement something') })
+  assert.deepEqual(impl.appended, [])
+
+  const h2 = createHarness({ roles: [SURVEY_ROLE] })
+  const survey = await h2.createChild({ events: descriptor('Survey something') })
+  assert.deepEqual(survey.appended, [])
+})
+
+test('sandbox is not re-appended when the child already sits in that mode', async () => {
+  const h = createHarness({ roles: [SANDBOX_ROLE] })
+  const child = await h.createChild({
+    events: [...descriptor('Survey settled'), { type: 'sandbox/mode', data: { mode: 'read-only' } }],
+  })
+  assert.deepEqual(child.appended, [])
+})
+
+test('unknown sandbox modes fail at load', () => {
+  assert.throws(() => createHarness({ roles: [{ ...SURVEY_ROLE, sandbox: 'nope' }] }), /sandbox/)
+  assert.throws(() => createHarness({ sandbox: 'nope' }), /sandbox/)
+})
+

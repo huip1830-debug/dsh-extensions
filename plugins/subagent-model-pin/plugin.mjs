@@ -38,7 +38,7 @@
 
 import { appendFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { resolveRoute, validateRoles } from './lib/routes.mjs'
+import { SANDBOX_MODES, resolveRoute, validateRoles } from './lib/routes.mjs'
 
 const LOG = join(process.env.TEMP ?? '.', 'subagent-model-pin.log')
 
@@ -104,6 +104,32 @@ function readDelegationChoice(parent, label) {
   return undefined
 }
 
+/**
+ * Narrow one child session to the sandbox mode its role names.
+ *
+ * The child's permission scope is fixed when the delegation starts and can
+ * never be widened from inside; `session.append('sandbox/mode', …)` is the
+ * durable write path and the last event wins, so appending here (before the
+ * child's first tool call) confines it without touching the parent.
+ * @param agent - the newly created child agent.
+ * @param mode - the sandbox mode to append.
+ * @param log - diagnostic sink.
+ */
+function applyRoleSandbox(agent, mode, log) {
+  try {
+    const session = agent?.session
+    if (session === undefined || typeof session.append !== 'function') return
+    const events = session.snapshotEvents?.() ?? []
+    const current = [...events].reverse().find((event) => event?.type === 'sandbox/mode')?.data?.mode
+    if (current === mode) return
+    session.append('sandbox/mode', { mode })
+    log(`sandbox ${mode} -> ${agent?.id} (was ${String(current)})`)
+  } catch (error) {
+    // Narrowing is best-effort; never break a delegation on it.
+    log(`sandbox ${mode} ERROR ${error?.message ?? error}`)
+  }
+}
+
 export const name = 'subagent-model-pin'
 export const inject = ['sessions']
 
@@ -121,6 +147,9 @@ export function apply(ctx, config) {
   if (typeof provider !== 'string' || provider.length === 0) throw new Error('subagent-model-pin: config.provider is required')
   if (typeof model !== 'string' || model.length === 0) throw new Error('subagent-model-pin: config.model is required')
   validateRoles(config?.roles)
+  if (config?.sandbox !== undefined && !SANDBOX_MODES.includes(config.sandbox)) {
+    throw new Error(`subagent-model-pin: config.sandbox must be one of ${SANDBOX_MODES.join(', ')}`)
+  }
 
   log(`apply() called with ${JSON.stringify(config ?? null)}`)
 
@@ -184,6 +213,11 @@ export function apply(ctx, config) {
     const route = resolveRoute(label, config)
     const explicit = readDelegationChoice(ctx.get('sessions')?.get?.(parentId), label)
     log(`delegation label=${JSON.stringify(label)} explicit=${explicit} role=${route.matched}`)
+
+    // Sandbox narrowing happens here, before the child's first tool call: the
+    // role table is the only place a mode can come from, because the delegation
+    // tool carries no sandbox field.
+    if (route.sandbox !== undefined) applyRoleSandbox(agent, route.sandbox, log)
 
     // prepend: true → outermost listener, so our return value is the final one.
     agent.ctx.effect(() => agent.ctx.on('agent/request', async (_payload, next) => {

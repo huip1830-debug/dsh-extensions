@@ -202,6 +202,32 @@ workflow 同理：`agent(prompt, { provider, model })`。
 - 升级时显式传 provider/model，并在交付说明里写清"为什么升级"。
 ```
 
+## 角色沙箱（`roles[].sandbox`）
+
+同一个角色表也能收窄子 agent 的沙箱：`sandbox` 取 `read-only` / `workspace-write` / `danger-full-access`，未写则继承父会话。
+
+```yaml
+- id: subagent-model-pin
+  config:
+    provider: opencode-go
+    model: deepseek-v4.1-flash
+    roles:
+      - match: Survey
+        provider: deepseek-official
+        model: deepseek-flash
+        sandbox: read-only      # 只读勘察：写盘被文件沙箱直接拒绝
+```
+
+实现方式：在 `agent/created` 里对匹配的子会话追加一条 `sandbox/mode` 事件（子会话权限在委派开始时固定、不能自行放宽，只能从外部收窄）。委派工具没有 sandbox 字段，所以沙箱只能由角色表决定；显式 `provider/model` 仍只影响路由。
+
+已验证（headless E2E，mock provider 驱动真实 agent 循环）：
+
+- 子会话事件序列：`sandbox/mode workspace-write source=delegation` → `approval/policy never source=delegation` → `sandbox/mode read-only`（插件追加）；
+- 子 agent 的 `write` 返回 `[sandbox: file access denied under read-only mode]`，目标文件未生成；
+- 对照组（角色不带 `sandbox`）：同一委派下写盘成功。
+
+注意：headless 等禁用了 child model selection 的宿主里，必须同时设 `injectDelegationDefaults: false`，否则委派参数被注入 `provider/model` 会报 `child model selection is disabled for this tool instance`。
+
 ## 验证是否真的生效
 
 子会话日志是 zstd **多帧**追加的（每帧一次 append），`zstdDecompressSync` 只解第一帧，必须逐帧解：
@@ -233,7 +259,7 @@ const text = Buffer.concat(offsets.map(o => zstdDecompressSync(buf.subarray(o)))
 ## 离线回归
 
 ```powershell
-node test.mjs     # 11 个用例，无依赖（在插件目录内执行）
+node test.mjs     # 20 个用例，无依赖（在插件目录内执行）
 ```
 
 覆盖：显式升级到父路由、纯继承、显式"没选"、workflow/冷恢复回退、非委派工具、`force`、`injectDelegationDefaults:false`、非子 agent。
@@ -294,3 +320,4 @@ A 证明"显式升级到父同款"被放行；B 证明默认回落 pin。两者 
 - 临时停用：插件页关掉该组合包，或在 profile patch 里给该行加 `disabled: true`；
 - 彻底移除：插件页移除（或 `dsh plugin --profile desktop remove subagent-model-pin`）；
 - 两种都需重启 DSH。YAML 是明文，记事本可改。
+

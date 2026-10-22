@@ -15,6 +15,8 @@
         #   - match: Survey                # 前缀匹配，大小写不敏感
         #     provider: deepseek-official
         #     model: deepseek-flash
+        #     sandbox: read-only           # 可选：收窄该角色子会话的沙箱（read-only/workspace-write/danger-full-access）
         #   - match: Implement
         #     provider: opencode-go
         #     model: deepseek-v4.1-flash
+
