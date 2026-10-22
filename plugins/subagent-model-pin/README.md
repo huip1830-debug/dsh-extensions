@@ -42,6 +42,21 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 | `debug` | 否 | `true` 时写 `%TEMP%\subagent-model-pin.log`（apply / agent/created / 每次改写前后，含 `label=` 与 `explicit=`） |
 | `force` | 否 | `true` = 一律覆盖，连显式选择也 pin（回到 v5 之前的"强制"行为） |
 | `depth` | 否 | 只处理委派深度等于该值的子 agent |
+| `roles` | 否 | 按委派 `description` 前缀分档路由的数组；每项含 `match`（前缀，大小写不敏感）、`provider`、`model`，可选 `reasoningEffort`。首个命中生效；未命中回落到 `provider`/`model`；委派调用里显式传的路由仍然优先 |
+
+### roles：按角色分档
+
+```yaml
+roles:
+  - match: Survey
+    provider: deepseek-official
+    model: deepseek-flash
+  - match: Review
+    provider: deepseek-official
+    model: deepseek-flash
+```
+
+匹配规则：取子代理的 `description`（即 descriptor label），去掉首尾空白、转小写后做 `startsWith`。所以派发时按 `Survey …` / `Implement …` / `Review …` 命名即可自动分档；不按约定命名则落回默认路由。`roles` 非法（非数组、`match` 为空、缺 `provider`/`model`）在插件加载时直接报错。
 
 配置目前只有两条途径：bundle 自带的 `cordis.patch.yml` 作默认值，profile 的 `cordis.patch.yml` 用同 id 覆盖（`config` 整体替换，不深合并）。插件页暂时没有配置表单，原因见下节。
 

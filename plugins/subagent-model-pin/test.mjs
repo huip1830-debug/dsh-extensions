@@ -97,6 +97,55 @@ const delegationCall = (description, args = {}) => [{
   data: { name: 'subagent', arguments: JSON.stringify({ description, ...args }) },
 }]
 
+const SURVEY_ROLE = { match: 'Survey', provider: 'deepseek-official', model: 'deepseek-flash' }
+
+test('roles route a delegation by description prefix and fall back to the default route', async () => {
+  const h = createHarness({ roles: [SURVEY_ROLE] })
+
+  const survey = await h.execute('subagent', { description: 'Survey W14 code', prompt: 'p' })
+  assert.equal(survey.provider, 'deepseek-official')
+  assert.equal(survey.model, 'deepseek-flash')
+
+  const impl = await h.execute('subagent', { description: 'Implement W14', prompt: 'p' })
+  assert.equal(impl.provider, PIN.provider)
+  assert.equal(impl.model, PIN.model)
+})
+
+test('role matching ignores case and leading whitespace', async () => {
+  const h = createHarness({ roles: [{ ...SURVEY_ROLE, match: 'survey' }] })
+  const args = await h.execute('subagent', { description: '  SURVEY the code', prompt: 'p' })
+  assert.equal(args.model, 'deepseek-flash')
+})
+
+test('a role route overrides the inherited-parent-route heuristic at request time', async () => {
+  const h = createHarness({ roles: [{ match: 'Review', provider: 'deepseek-official', model: 'deepseek-flash' }] })
+  h.sessions.set('parent', h.session({ parentRoute: PARENT_ROUTE }))
+
+  const child = await h.createChild({ events: descriptor('Review Task 1') })
+  const resolved = await child.request({ ...PARENT_ROUTE, reasoningEffort: 'high' })
+
+  assert.equal(resolved.provider, 'deepseek-official')
+  assert.equal(resolved.model, 'deepseek-flash')
+})
+
+test('an explicit route still beats a role route', async () => {
+  const h = createHarness({ roles: [SURVEY_ROLE] })
+  const args = await h.execute('subagent', {
+    description: 'Survey explicit',
+    prompt: 'p',
+    provider: 'opencode-go',
+    model: 'deepseek-v4.1-flash',
+  })
+  assert.equal(args.provider, 'opencode-go')
+  assert.equal(args.model, 'deepseek-v4.1-flash')
+})
+
+test('invalid role configuration fails at load', () => {
+  assert.throws(() => createHarness({ roles: [{ match: '', provider: 'p', model: 'm' }] }), /roles/)
+  assert.throws(() => createHarness({ roles: [{ match: 'X', provider: 'p' }] }), /model/)
+  assert.throws(() => createHarness({ roles: 'nope' }), /roles/)
+})
+
 test('injects the pin route into a delegation call that omitted a route', async () => {
   const h = createHarness()
   const args = await h.execute('subagent', { description: 'plain', prompt: 'p' })

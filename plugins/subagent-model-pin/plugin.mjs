@@ -38,6 +38,7 @@
 
 import { appendFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { resolveRoute, validateRoles } from './lib/routes.mjs'
 
 const LOG = join(process.env.TEMP ?? '.', 'subagent-model-pin.log')
 
@@ -119,6 +120,7 @@ export function apply(ctx, config) {
 
   if (typeof provider !== 'string' || provider.length === 0) throw new Error('subagent-model-pin: config.provider is required')
   if (typeof model !== 'string' || model.length === 0) throw new Error('subagent-model-pin: config.model is required')
+  validateRoles(config?.roles)
 
   log(`apply() called with ${JSON.stringify(config ?? null)}`)
 
@@ -142,13 +144,14 @@ export function apply(ctx, config) {
           && args !== null && typeof args === 'object' && !Array.isArray(args)
           && args.provider === undefined && args.model === undefined
         if (injectable) {
+          const route = resolveRoute(args.description, config)
           exec.arguments = {
             ...args,
-            provider,
-            model,
-            ...(reasoningEffort === undefined ? {} : { reasoning_effort: reasoningEffort }),
+            provider: route.provider,
+            model: route.model,
+            ...(route.reasoningEffort === undefined ? {} : { reasoning_effort: route.reasoningEffort }),
           }
-          log(`tools/execute inject ${provider}/${model} -> ${exec.name} label=${JSON.stringify(args.description)}`)
+          log(`tools/execute inject ${route.provider}/${route.model} (role=${route.matched}) -> ${exec.name} label=${JSON.stringify(args.description)}`)
         }
       } catch (error) {
         // Injection is best-effort: never block a delegation on it.
@@ -178,8 +181,9 @@ export function apply(ctx, config) {
 
     const parentId = header.parentSession
     const label = readChildLabel(agent)
+    const route = resolveRoute(label, config)
     const explicit = readDelegationChoice(ctx.get('sessions')?.get?.(parentId), label)
-    log(`delegation label=${JSON.stringify(label)} explicit=${explicit}`)
+    log(`delegation label=${JSON.stringify(label)} explicit=${explicit} role=${route.matched}`)
 
     // prepend: true → outermost listener, so our return value is the final one.
     agent.ctx.effect(() => agent.ctx.on('agent/request', async (_payload, next) => {
@@ -191,6 +195,18 @@ export function apply(ctx, config) {
           if (explicit === true) {
             log(`keep explicit ${resolved.provider}/${resolved.model}`)
             return resolved
+          }
+          // A role route outranks the inherited-route heuristic: the label says
+          // what this child is for, so it decides the model family.
+          if (route.matched) {
+            const { reasoningEffort: _roleInherited, ...roleRest } = resolved
+            log(`pin role ${route.provider}/${route.model} over ${resolved.provider}/${resolved.model}`)
+            return {
+              ...roleRest,
+              provider: route.provider,
+              model: route.model,
+              ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }),
+            }
           }
           const parentRoute = readParentRoute(parentId)
           // Fallback only: when the delegation call cannot be found (workflow
@@ -206,12 +222,12 @@ export function apply(ctx, config) {
         }
         // Default path: also drop any effort inherited from the parent route.
         const { reasoningEffort: _inherited, ...rest } = resolved ?? {}
-        log(`pin ${provider}/${model} over ${resolved?.provider}/${resolved?.model} (explicit=${explicit})`)
+        log(`pin ${route.provider}/${route.model} over ${resolved?.provider}/${resolved?.model} (explicit=${explicit})`)
         return {
           ...rest,
-          provider,
-          model,
-          ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+          provider: route.provider,
+          model: route.model,
+          ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }),
         }
       } catch (error) {
         log(`agent/request ${agent.id} ERROR ${error?.message ?? error}`)

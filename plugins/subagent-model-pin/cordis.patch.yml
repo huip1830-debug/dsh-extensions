@@ -11,3 +11,10 @@
         reasoningEffort: high
         injectDelegationDefaults: true   # false = 关闭 tools/execute 注入，退回纯 request 层 pin
         debug: false                     # true 时写 %TEMP%\subagent-model-pin.log
+        # roles:                           # 按委派 description 前缀分档；显式 provider/model 仍然优先
+        #   - match: Survey                # 前缀匹配，大小写不敏感
+        #     provider: deepseek-official
+        #     model: deepseek-flash
+        #   - match: Implement
+        #     provider: opencode-go
+        #     model: deepseek-v4.1-flash
