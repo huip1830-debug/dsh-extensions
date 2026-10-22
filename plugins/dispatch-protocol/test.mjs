@@ -40,6 +40,9 @@ test('the default text states all five dispatch rules', () => {
   assert.match(text, /并行/)
   assert.match(text, /互不依赖/, 'parallel recon must carry a trigger, not just a permission')
   assert.match(text, /在同一条消息里并行发出/, 'the trigger must name the concrete action')
+  assert.match(text, /互斥并行写/, 'implementation parallelism is allowed behind disjoint whitelists')
+  assert.match(text, /契约在派发前定死/, 'parallel implementation requires frozen contracts')
+  assert.match(text, /共享产物/, 'shared build outputs stay serial')
   assert.match(text, /单文件/, 'the closing paragraph states the exemption')
 })
 
@@ -97,12 +100,14 @@ test('one closing paragraph states who does what and when a dispatch may be skip
   assert.match(text, /不许整包留给自己/, 'the fallback-to-self trap must be named')
   assert.match(text, /缺计划类 skill/, 'the missing-plan-skill path must be named')
 
-  // No magic numbers: the whitelist is bounded by "one batch, one verification
-  // command" and the task list by "one entry = one decision or one batch".
+  // No magic numbers: the whitelist is bounded by "the whole batch must be
+  // verifiable by one integrated command" and the task list by "one entry = one
+  // decision or one batch".
   assert.doesNotMatch(text, /≤3 个/, 'the whitelist is not capped by file count')
   assert.doesNotMatch(text, /≤7 条/, 'the task list is not capped by item count')
   assert.match(text, /逐条列名/, 'the whitelist is enumerated, not counted')
-  assert.match(text, /一批只对应一条验证命令/, 'the batch bound is the verification command')
+  assert.match(text, /一条集成命令/, 'the batch bound is the integrated command')
+  assert.match(text, /窄验证/, 'per-child verification is narrow, attribution stays intact')
   assert.match(text, /每条 = 一个决策点或一批派发/, 'task-list entries map to decisions or batches')
 
   const dropped = harness()
