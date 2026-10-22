@@ -9,12 +9,12 @@
         enabled: true
         order: 500            # after first-party guidance, before persona suffix (10200)
         # rules: []           # override the five defaults; non-empty string array
-        # footer: ''          # override the small-change exemption line
+        # footer: ''          # override the closing paragraph (cost + exemption); '' drops it
         checkpoint:
           enabled: true       # remind the parent when a child completes
           # text: ''          # overrides DEFAULT_CHECKPOINT; supports {childId} and {label}
         nudge:
           enabled: true       # remind a turn that wrote files without delegating
-          threshold: 2        # >= this many write/edit calls and 0 delegations
-          # text: ''          # overrides DEFAULT_NUDGE_TEXT; supports {writes} {files} {turn}
+          threshold: 2        # >= this many distinct files (not calls) and 0 delegations
+          # text: ''          # overrides DEFAULT_NUDGE_TEXT; supports {fileCount} {writes} {files} {turn}
           # log: false        # default: %TEMP%/dispatch-protocol-nudge.jsonl

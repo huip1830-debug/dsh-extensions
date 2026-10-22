@@ -24,7 +24,7 @@ export const DEFAULT_WRITE_TOOLS = ['write', 'edit']
  * The one model-facing reminder. Delivered at most once per turn, so a model
  * that answers it with more edits cannot re-trigger it in the same turn.
  */
-export const DEFAULT_NUDGE_TEXT = '[dispatch-protocol] 本回合写了 {writes} 次文件（{files}），派发 0 次。若这批改动超出「单文件小改」豁免，请在收尾说明里给出不派发的理由；否则应改为只读勘察派子代理、实现派子代理、自己复跑验收。'
+export const DEFAULT_NUDGE_TEXT = '[dispatch-protocol] 本回合改了 {fileCount} 个文件（{writes} 次写入）：{files}。派发 0 次。若这批改动超出「单文件小改」豁免，请在收尾说明里给出不派发的理由；否则应改为只读勘察派子代理、实现派子代理、自己复跑验收。'
 
 /** Cap on how many paths the reminder prints verbatim. */
 const MAX_LISTED_FILES = 5
@@ -126,22 +126,26 @@ function readPath(raw) {
 
 /**
  * Decide whether this turn looks like a skipped dispatch.
+ *
+ * `threshold` counts distinct files, not write calls: editing one file three
+ * times stays inside the small-change exemption.
  * @param summary - `summarizeTurn(...)` output.
  * @param config - the resolved `nudge` section.
- * @returns true when the turn wrote enough files and delegated nothing.
+ * @returns true when the turn touched enough distinct files and delegated nothing.
  */
 export function shouldNudge(summary, config) {
-  return summary.writes >= config.threshold && summary.delegations === 0
+  return summary.files.length >= config.threshold && summary.delegations === 0
 }
 
 /**
  * Render the reminder text.
- * @param template - `nudge.text`, with `{writes}`, `{files}`, `{turn}`.
+ * @param template - `nudge.text`, with `{fileCount}`, `{writes}`, `{files}`, `{turn}`.
  * @param summary - `summarizeTurn(...)` output plus the closing `turn`.
  * @returns the message body.
  */
 export function renderNudge(template, summary) {
   return template
+    .replaceAll('{fileCount}', String(summary.files.length))
     .replaceAll('{writes}', String(summary.writes))
     .replaceAll('{files}', formatFiles(summary.files))
     .replaceAll('{turn}', String(summary.turn))

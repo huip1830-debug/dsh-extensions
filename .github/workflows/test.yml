@@ -15,7 +15,6 @@ jobs:
         plugin:
           - subagent-model-pin
           - dispatch-protocol
-          - dispatch-guard
     steps:
       - uses: actions/checkout@v4
 

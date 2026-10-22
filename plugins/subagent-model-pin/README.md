@@ -1,5 +1,7 @@
 # subagent-model-pin
 
+> 当前部署：desktop **0.2.x**（`roles[].sandbox` 随 `ceba3a0` 发布）；probe 为 `link:`。改动后：提交推送 → `dsh plugin --profile desktop update subagent-model-pin` → 重启。
+
 DSH profile 插件：**子 agent 默认跑低成本模型，需要时在委派调用里显式升级**。
 
 - 默认（不传路由）→ 子 agent 用 `config.provider` / `config.model`（含 effort）。
@@ -59,6 +61,8 @@ roles:
 匹配规则：取子代理的 `description`（即 descriptor label），去掉首尾空白、转小写后做 `startsWith`。所以派发时按 `Survey …` / `Implement …` / `Review …` 命名即可自动分档；不按约定命名则落回默认路由。`roles` 非法（非数组、`match` 为空、缺 `provider`/`model`）在插件加载时直接报错。
 
 配置目前只有两条途径：bundle 自带的 `cordis.patch.yml` 作默认值，profile 的 `cordis.patch.yml` 用同 id 覆盖（`config` 整体替换，不深合并）。插件页暂时没有配置表单，原因见下节。
+
+**角色与沙箱的唯一真相源就是这里的 `roles`**：`sandbox` 字段（`read-only` / `workspace-write` / `danger-full-access`）也在同一张表里。别再在别处维护第二份角色名单——2026-10-22 的审查把这种复制列为漂移源（`dispatch-guard` 的 `stall.exempt` 就因从未配置而失效，已归档）。
 
 ## GUI 配置（为什么目前只有 YAML）
 

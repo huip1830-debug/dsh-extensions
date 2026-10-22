@@ -38,7 +38,7 @@ test('the default text states all five dispatch rules', () => {
   assert.match(text, /复跑/)
   assert.match(text, /提交权/)
   assert.match(text, /并行/)
-  assert.match(text, /小改/)
+  assert.match(text, /单文件/, 'the closing paragraph states the exemption')
 })
 
 test('configured rules replace the default text', () => {
@@ -48,7 +48,11 @@ test('configured rules replace the default text', () => {
 
   assert.match(text, /第一条/)
   assert.match(text, /第二条/)
-  assert.doesNotMatch(text, /复跑/)
+  // The closing paragraph stays: replacing `rules` replaces the numbered rules
+  // only. `白名单` belongs to default rule 1, so its absence is what proves the
+  // default rules are gone.
+  assert.doesNotMatch(text, /白名单/)
+  assert.match(text, /成本与豁免/, 'the closing paragraph is independent of the rules')
 })
 
 test('a disabled plugin registers nothing', () => {
@@ -75,6 +79,35 @@ test('the default rules carry the evidence and dispatch formats', () => {
   assert.match(text, /文件:行号/, 'survey evidence format must be stated')
   assert.match(text, /允许修改/, 'dispatch whitelist section must be stated')
   assert.match(text, /唯一一条命令|一条命令/, 'single verification command must be stated')
+})
+
+test('one closing paragraph states who does what and when a dispatch may be skipped', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+  const text = h.sections[0].text
+
+  assert.match(text, /成本与豁免/, 'cost split and exemption are one paragraph')
+  assert.match(text, /单文件且纯文案/, 'the small-change exemption survives')
+  assert.match(text, /默认派给子代理/, 'mechanical volume defaults to children')
+  assert.match(text, /拆批/, 'uncertainty must map to batching')
+  assert.match(text, /只读勘察批次/, 'the first batch is a read-only survey')
+  assert.match(text, /可多批陆续派发/, 'several batches are allowed')
+  assert.match(text, /不许整包留给自己/, 'the fallback-to-self trap must be named')
+  assert.match(text, /缺计划类 skill/, 'the missing-plan-skill path must be named')
+
+  // No magic numbers: the whitelist is bounded by "one batch, one verification
+  // command" and the task list by "one entry = one decision or one batch".
+  assert.doesNotMatch(text, /≤3 个/, 'the whitelist is not capped by file count')
+  assert.doesNotMatch(text, /≤7 条/, 'the task list is not capped by item count')
+  assert.match(text, /逐条列名/, 'the whitelist is enumerated, not counted')
+  assert.match(text, /一批只对应一条验证命令/, 'the batch bound is the verification command')
+  assert.match(text, /每条 = 一个决策点或一批派发/, 'task-list entries map to decisions or batches')
+
+  const dropped = harness()
+  plugin.apply(dropped.ctx, { footer: '' })
+  assert.doesNotMatch(dropped.sections[0].text, /成本与豁免/)
+
+  assert.throws(() => resolveConfig({ footer: 42 }), /footer/)
 })
 
 test('a completed child triggers exactly one checkpoint message to its parent', () => {
@@ -160,6 +193,8 @@ test('a multi-write turn without delegation is reminded exactly once', () => {
 
     assert.equal(agent.messages.length, 1, 'the nudge costs one step, once per turn')
     assert.match(agent.messages[0].text, /派发 0 次/)
+    assert.match(agent.messages[0].text, /改了 2 个文件/)
+    assert.match(agent.messages[0].text, /2 次写入/)
     assert.match(agent.messages[0].text, /x\.xaml/)
     assert.equal(agent.messages[0].role, 'user', 'the provider requires a user-role message')
 
@@ -173,6 +208,39 @@ test('a multi-write turn without delegation is reminded exactly once', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('repeated writes to one file stay inside the small-change exemption', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false, threshold: 2 } })
+
+  const agent = h.main('session-2b', [
+    call(1, 'edit', { file_path: 'same.mjs' }),
+    call(1, 'edit', { file_path: 'same.mjs' }),
+    call(1, 'edit', { file_path: 'same.mjs' }),
+  ])
+  h.created(agent)
+  h.turnStopping(agent, 1)
+
+  assert.equal(agent.messages.length, 0, 'three writes to one file count as one file')
+})
+
+test('enough distinct files are reminded even when each is written once', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false, threshold: 3 } })
+
+  const agent = h.main('session-2c', [
+    call(1, 'write', { file_path: 'a.txt' }),
+    call(1, 'write', { file_path: 'b.txt' }),
+    call(1, 'write', { file_path: 'c.txt' }),
+    call(1, 'write', { file_path: 'd.txt' }),
+  ])
+  h.created(agent)
+  h.turnStopping(agent, 1)
+
+  assert.equal(agent.messages.length, 1)
+  assert.match(agent.messages[0].text, /改了 4 个文件/)
+  assert.match(agent.messages[0].text, /4 次写入/)
 })
 
 test('a single write keeps the small-change exemption and is not reminded', () => {
@@ -283,7 +351,7 @@ test('nudge config rejects values that would silently never fire', () => {
 })
 
 test('renderNudge fills the placeholders and truncates a long file list', () => {
-  const text = renderNudge('w={writes} f={files} t={turn}', {
+  const text = renderNudge('w={writes} f={files} t={turn} c={fileCount}', {
     writes: 7,
     files: ['a', 'b', 'c', 'd', 'e', 'f', 'g'],
     turn: 3,
@@ -291,8 +359,10 @@ test('renderNudge fills the placeholders and truncates a long file list', () => 
 
   assert.match(text, /w=7/)
   assert.match(text, /t=3/)
+  assert.match(text, /c=7/, 'fileCount is the number of distinct files')
   assert.match(text, /等 7 个/)
   assert.match(renderNudge('{files}', { writes: 0, files: [], turn: 1 }), /未记录路径/)
+  assert.match(renderNudge('{fileCount}', { writes: 0, files: [], turn: 1 }), /^0$/)
 })
 
 // ---------------------------------------------------------------------------

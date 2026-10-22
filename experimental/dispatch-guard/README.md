@@ -1,4 +1,8 @@
-# dispatch-guard
+# dispatch-guard（已归档）
+
+> **归档状态（2026-10-22）**：未安装进任何 profile，`stall.exempt` 从未配置，已移出 `plugins/` 与 CI 矩阵。相邻需求（漏派发提醒）由 `dispatch-protocol` 的 `nudge` 承担。
+>
+> 恢复方式：`git mv experimental/dispatch-guard plugins/dispatch-guard`，把 `dispatch-guard` 加回 `.github/workflows/test.yml` 的 matrix 和根 README 插件清单，再 `dsh plugin --profile <p> add "github:huip1830-debug/dsh-extensions#path:/plugins/dispatch-guard"` 并配置 `stall.exempt`（否则它的只读豁免永远不生效）。
 
 子代理的运行时护栏。两条规则都由宿主强制，不依赖提示词：
 
