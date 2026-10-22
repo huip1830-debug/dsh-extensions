@@ -102,4 +102,6 @@ dsh --profile probe headless "不要调用任何工具，只回答：你的系�
 - **触发看文件数、判定看调用名**：是否提醒按去重路径计（同一文件多次编辑算 1 个）；但「哪些调用算改动」仍按工具名判断——`pwsh` 里的 `Set-Content`/`dotnet format` 等副作用不计，失败的 `write`/`edit` 照算。
 - **记账在 TEMP 里**：`nudge.log` 默认落在系统临时目录，不随仓库版本化；要长期留档就把路径指到固定位置（或 `false` 关掉）。
 - **profile 插件不支持热加载**：装完必须重启 DSH，新会话才生效。
-- **运行中更新可能 EPERM（Windows 目录锁）**：`dsh plugin --profile desktop update` 会先把 `node_modules/<pkg>` 整个 rename 掉，DSH 还开着时可能 `EPERM: rename` 失败，并留下一个 `lib/` 被锁、其余文件已删的半残目录。**顺序必须是：先完全退出 DSH → 再 update → 再启动**。2026-10-22 就这样坏过一次（`AUDIT-2026-10-22.md` 有记录）。
+- **update 失败会留下半残目录，且可能卡成 delete-pending**：`dsh plugin --profile desktop update` 先把 `node_modules/<pkg>` 整块 rename 掉；任一步失败就可能只剩一半文件，而失败时被打开的子目录（实测是 `lib/`）会进入 delete-pending —— 之后**连改父目录、删除、读 ACL 都 Access denied**，`diagnose-windows-sandbox-acl` 报 `VERDICT=UNREADABLE`、Restart Manager 返回 `ACCESS_DENIED`，只有**重启 Windows** 能清。2026-10-22 踩过一次（`AUDIT-2026-10-22.md` 第七节）。
+  - 预防：**完全退出 DSH → update → 启动**；确认没有遗留的 `robocopy`/`pnpm` 子进程再跑（那次真正的持有者是一条被我挂住的 robocopy）。
+  - 恢复：重启后 `lib/` 自动消失，重跑同一条 update 即可归位；验收标志是 `lib/config.mjs` 存在且没有手工补丁目录。
