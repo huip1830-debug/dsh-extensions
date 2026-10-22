@@ -117,6 +117,12 @@ dsh --profile probe headless "不要调用任何工具，只回答：你的系�
 
 漏派发提示的真机口径：一个回合内连续改 2 个以上**去重文件**（同一文件多次编辑只算 1）且不派发、正文也没写不派发理由时，收尾时会多出一段以 `[dispatch-protocol]` 开头的提醒；`%TEMP%\dispatch-protocol-nudge.jsonl` 同时多一行 `{session, turn, writes, files, delegations}`；被静默的那次记的是同一行加 `"suppressed":"justified"`。
 
+**0.3.6 真机证据（2026-10-22，desktop 0.3.6）**：
+
+- 抑制路径：一个回合改 3 个文件、0 派发、正文含「不派发」→ 日志写 `"suppressed":"justified"`，会话 0 条提醒。对照同文件更早的 `turn:6`（0.3.5）：0 派发、15 次写入、**无** `suppressed` 字段，随后照常发出提醒。两行的差异就是 0.3.6 的全部作用。
+- 只读并行：同一条消息发出两个只读子代理，`childCreatedAt` 相差 1 ms、运行区间重叠 16.7 s（19.1 s 与 16.8 s 两个区间），两个都没有触发完成检查点。并行由模型在同一 assistant 消息里发两个 `subagent` 调用驱动，宿主不自动派生。
+- **口径提醒**：回合里只要有派发（`subagent`/`subagent_fork`/`workflow`），`shouldNudge` 直接为假，**既不进抑制判定也不写日志**——「没看到提醒」在这个前提下不能当作抑制生效的证据，这是真机上踩过一次的假阳性。
+
 ## 已知坑
 
 - **系统提示词改动会影响 KV 缓存前缀**：`order` 与文本变化会让后续请求失去前缀复用；规则固定后不要频繁改。
