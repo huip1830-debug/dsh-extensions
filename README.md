@@ -24,6 +24,8 @@ plugins/
 | 插件 | 作用 |
 |------|------|
 | [`subagent-model-pin`](plugins/subagent-model-pin/README.md) | 子 agent 默认跑低成本模型，委派时显式传 `provider`/`model` 可升级 |
+| [`dispatch-guard`](plugins/dispatch-guard/README.md) | 失败子代理早停并通知主模型；连续无写操作的子代理先提醒后阻断 |
+| [`dispatch-protocol`](plugins/dispatch-protocol/README.md) | 把派发纪律常驻注入系统提示词（DSH 专属，不影响 Codex/OpenCode） |
 
 ## 安装（bundle 为标准方式）
 

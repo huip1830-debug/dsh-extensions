@@ -9,6 +9,13 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin:
+          - subagent-model-pin
+          - dispatch-protocol
+          - dispatch-guard
     steps:
       - uses: actions/checkout@v4
 
@@ -17,5 +24,5 @@ jobs:
           node-version: '22'
 
       - name: Run offline regression (no dependencies)
-        working-directory: plugins/subagent-model-pin
+        working-directory: plugins/${{ matrix.plugin }}
         run: node test.mjs
