@@ -13,3 +13,8 @@
         checkpoint:
           enabled: true       # remind the parent when a child completes
           # text: ''          # overrides DEFAULT_CHECKPOINT; supports {childId} and {label}
+        nudge:
+          enabled: true       # remind a turn that wrote files without delegating
+          threshold: 2        # >= this many write/edit calls and 0 delegations
+          # text: ''          # overrides DEFAULT_NUDGE_TEXT; supports {writes} {files} {turn}
+          # log: false        # default: %TEMP%/dispatch-protocol-nudge.jsonl

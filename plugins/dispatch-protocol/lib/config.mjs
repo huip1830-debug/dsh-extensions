@@ -1,5 +1,7 @@
 // Dispatch discipline text injected as a system-prompt section.
 
+import { resolveNudge } from './nudge.mjs'
+
 /** The five non-negotiable rules; overridable through `config.rules`. */
 export const DEFAULT_RULES = [
   '先勘察，后派发：派发前把「文件:行号 + 相关代码 + 结论 + 不确定项」写成现状文件并在派发中引用，同时给出可改文件白名单（≤3 个）。禁止把「调研 X 然后实现」交给执行类子代理。',
@@ -48,5 +50,9 @@ export function resolveConfig(config = {}) {
   const numbered = rules.map((rule, index) => `${index + 1}. ${rule}`).join('\n')
   const text = ['## 派发纪律（DSH）', '', numbered, '', footer].join('\n')
 
-  return { enabled: source.enabled !== false, order, rules, footer, text, checkpoint }
+  // Validated even when the checkpoint is the only mechanism in use: a typo in
+  // `nudge.threshold` must fail at load time, not silently never fire.
+  const nudge = resolveNudge(source.nudge)
+
+  return { enabled: source.enabled !== false, order, rules, footer, text, checkpoint, nudge }
 }

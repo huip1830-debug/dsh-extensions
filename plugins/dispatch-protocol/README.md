@@ -1,9 +1,10 @@
 # dispatch-protocol
 
-把「派发纪律」常驻注入 DSH。两个机制，都不拦截任何调用：
+把「派发纪律」常驻注入 DSH。三个机制，都不拦截任何调用：
 
 1. **系统提示词 section**：每次请求（主控与每个子代理）都会看到五条规则，不依赖模型是否加载了某个 skill。
 2. **完成检查点**：子代理结束（`stopReason === 'completed'`）时，给父代理发一条提醒，要求读 diff、独立复跑子代理声称的命令。静态规则容易被跳过，时点提醒不会。
+3. **漏派发提示**：一回合改了多个文件却一次没派发时，在本回合收尾前给主控一条提醒。规则只约束「怎么派发」，从来不含「必须派发」，所以「这回合漏了派发」只能观测，不能推断。
 
 ## 为什么不用 AGENTS.md
 
@@ -27,6 +28,20 @@
 
 `agent/created` 记录每个子代理的父会话；`subagent/end` 在 `completed` 时向父代理投递一条 `[dispatch-protocol]` 消息（每个子代理只发一次，失败/中止不发）。消息模板支持 `{childId}` 与 `{label}` 占位。
 
+## 漏派发提示
+
+五条规则只约束派发的**形式**，没有任何机制要求「必须派发」。实测就有会话全程不派发：`session-a80150dd`（2 回合 / 56 步 / 67 次工具调用 / 0 次派发）把 5 个 XAML 同性质改动判成「小改豁免」自己做了，全程没有任何提示。
+
+本机制把「漏派发」变成可观测事实：
+
+- **触发点**：`agent/turn-stopping`（serial，回合即将收尾、`turn/end` 提交之前）。这里 `steer` 会让本回合再跑一步，因此提醒只花一步，且**每回合最多一次**（按回合号去重，模型回一句「收到」后继续改文件也不会再触发）。
+- **计数来源**：该回合已提交的 `tool/call` 事件。事件自带 `turn`，所以不需要任何跨回合状态，恢复的会话算出的数字与实时一致。
+- **触发条件**：本回合 `write`/`edit` 调用数 ≥ `nudge.threshold`（默认 2）**且**派发调用（`subagent`/`subagent_fork`/`workflow`）为 0。
+- **动作**：给主控发一条 `{writes}`/`{files}`/`{turn}` 渲染的提醒，并往 `nudge.log`（默认 `%TEMP%\dispatch-protocol-nudge.jsonl`，一行一条 JSON）记一笔账。
+- **不适用于子代理**：子代理本身不能再派发，其写操作已经记在父回合里。
+
+只数调用名，不解析副作用：`pwsh` 里 `Set-Content` 之类的写入、以及失败的 `write`/`edit` 调用都会落在口径之外（前者不算、后者照算）。
+
 ## 配置
 
 | 字段 | 默认 | 含义 |
@@ -37,8 +52,14 @@
 | `footer` | 小改豁免一行 | 追加在规则之后 |
 | `checkpoint.enabled` | `true` | 子代理完成后是否给父代理发检查点 |
 | `checkpoint.text` | 内置模板 | 覆盖检查点文案，支持 `{childId}` / `{label}` |
+| `nudge.enabled` | `true` | 是否检查「漏派发」 |
+| `nudge.threshold` | `2` | 本回合写/改调用 ≥ 该值且 0 派发时提醒（正整数） |
+| `nudge.writeTools` | `['write','edit']` | 计入「改动」的工具名 |
+| `nudge.delegationTools` | `['subagent','subagent_fork','workflow']` | 计入「已派发」的工具名 |
+| `nudge.text` | 内置模板 | 覆盖提醒文案，支持 `{writes}` / `{files}` / `{turn}` |
+| `nudge.log` | `%TEMP%\dispatch-protocol-nudge.jsonl` | 记账文件路径；`false` 关闭记账 |
 
-非法配置（`order` 非有限数字、`rules` 为空/非数组、`footer`/`checkpoint.text` 非字符串）在插件加载时直接报错，不会静默降级。
+非法配置（`order` 非有限数字、`rules` 为空/非数组、`footer`/`checkpoint.text` 非字符串、`nudge.threshold` 非正整数、工具名单为空数组、`nudge.log` 既非路径也非 `false`）在插件加载时直接报错，不会静默降级。
 
 ## 验证
 
@@ -57,9 +78,14 @@ dsh --profile probe headless "不要调用任何工具，只回答：你的系�
 
 预期：模型复述出「先勘察」「执行类派发」「验收要复跑」「提交权」「并行只读」五条。
 
+漏派发提示的真机口径：一个回合内连续改 2 个以上文件且不派发，收尾时会多出一段以 `[dispatch-protocol]` 开头的提醒；`%TEMP%\dispatch-protocol-nudge.jsonl` 同时多一行 `{session, turn, writes, files, delegations}`。
+
 ## 已知坑
 
 - **系统提示词改动会影响 KV 缓存前缀**：`order` 与文本变化会让后续请求失去前缀复用；规则固定后不要频繁改。
 - **section 名重复会报错**：同一 profile 只能挂一个 `dispatch-protocol`；改配置用同 id 覆盖，不要重复插入。
 - **规则是建议不是强制**：模型仍可无视。要硬拦截需要 `tools/pre-execute` 那类插件（本项目评估后不做）。
+- **漏派发提示要花一步**：`agent/turn-stopping` 里 `steer` 会让本回合再跑一步。按回合去重，一回合最多一次；模型可以只在补充说明里写「为什么没派」而不真的派发——提醒不是强制。
+- **只按调用名计数**：`pwsh` 里的 `Set-Content`/`dotnet format` 等副作用不计入 `writes`；失败的 `write`/`edit` 照算。口径偏「调用」而非「落地文件」。
+- **记账在 TEMP 里**：`nudge.log` 默认落在系统临时目录，不随仓库版本化；要长期留档就把路径指到固定位置（或 `false` 关掉）。
 - **profile 插件不支持热加载**：装完必须重启 DSH，新会话才生效。

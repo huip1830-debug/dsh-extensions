@@ -1,0 +1,160 @@
+// Missed-dispatch detection: a turn that changed several files while delegating
+// nothing.
+//
+// The five rules in the system prompt are advisory — nothing in the harness
+// makes a model dispatch. A session can therefore survey, edit five files, build
+// and test entirely on its own and still read as compliant, because the
+// discipline only governs the *form* of a dispatch, never its occurrence.
+// Observed case: session-a80150dd (2 turns, 56 steps, 67 tool calls, 0
+// delegations) — the model weighed the small-change exemption for a five-file
+// change, found that `writing-plans` was missing, and fell back to doing the
+// work inline. This module turns that into a checkable signal instead of a
+// post-mortem.
+
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+/** Delegation tools: a turn that used one of these did not miss the dispatch. */
+export const DEFAULT_DELEGATION_TOOLS = ['subagent', 'subagent_fork', 'workflow']
+
+/** Tools whose calls count as "touched a file" for this check. */
+export const DEFAULT_WRITE_TOOLS = ['write', 'edit']
+
+/**
+ * The one model-facing reminder. Delivered at most once per turn, so a model
+ * that answers it with more edits cannot re-trigger it in the same turn.
+ */
+export const DEFAULT_NUDGE_TEXT = '[dispatch-protocol] 本回合写了 {writes} 次文件（{files}），派发 0 次。若这批改动超出「单文件小改」豁免，请在收尾说明里给出不派发的理由；否则应改为只读勘察派子代理、实现派子代理、自己复跑验收。'
+
+/** Cap on how many paths the reminder prints verbatim. */
+const MAX_LISTED_FILES = 5
+
+/**
+ * Validate the `nudge` config section.
+ * @param source - the raw `nudge` object from the profile patch layer.
+ * @returns the resolved section, with `log` already expanded to a path.
+ */
+export function resolveNudge(source = {}) {
+  const config = source ?? {}
+
+  const threshold = config.threshold ?? 2
+  if (!Number.isInteger(threshold) || threshold < 1) {
+    throw new Error('dispatch-protocol: nudge.threshold must be a positive integer')
+  }
+
+  const text = config.text ?? DEFAULT_NUDGE_TEXT
+  if (typeof text !== 'string' || text.trim() === '') {
+    throw new Error('dispatch-protocol: nudge.text must be a non-empty string')
+  }
+
+  const writeTools = config.writeTools ?? DEFAULT_WRITE_TOOLS
+  if (!Array.isArray(writeTools) || writeTools.length === 0
+    || writeTools.some(tool => typeof tool !== 'string' || tool.trim() === '')) {
+    throw new Error('dispatch-protocol: nudge.writeTools must be a non-empty array of non-empty strings')
+  }
+
+  const delegationTools = config.delegationTools ?? DEFAULT_DELEGATION_TOOLS
+  if (!Array.isArray(delegationTools) || delegationTools.length === 0
+    || delegationTools.some(tool => typeof tool !== 'string' || tool.trim() === '')) {
+    throw new Error('dispatch-protocol: nudge.delegationTools must be a non-empty array of non-empty strings')
+  }
+
+  const log = config.log === false
+    ? false
+    : (typeof config.log === 'string' && config.log.trim() !== ''
+      ? config.log
+      : join(tmpdir(), 'dispatch-protocol-nudge.jsonl'))
+  if (log !== false && typeof log !== 'string') {
+    throw new Error('dispatch-protocol: nudge.log must be a path or false')
+  }
+
+  return { enabled: config.enabled !== false, threshold, writeTools, delegationTools, text, log }
+}
+
+/**
+ * Count one turn's file writes and delegations from the committed session log.
+ *
+ * `tool/call` carries its own `turn`, so a turn boundary needs no bookkeeping:
+ * everything is derived from the log, and a resumed session computes the same
+ * numbers as a live one.
+ * @param events - `session.snapshotEvents()`.
+ * @param turn - the turn being closed.
+ * @param config - the resolved `nudge` section.
+ * @returns `{ writes, files, delegations }` for that turn.
+ */
+export function summarizeTurn(events, turn, config) {
+  const writes = []
+  const files = []
+  let delegations = 0
+
+  for (const event of events ?? []) {
+    if (event?.type !== 'tool/call') continue
+    const data = event.data ?? {}
+    if (data.turn !== turn) continue
+    const tool = data.name
+    if (typeof tool !== 'string') continue
+
+    if (config.delegationTools.includes(tool)) {
+      delegations += 1
+      continue
+    }
+    if (!config.writeTools.includes(tool)) continue
+
+    writes.push(tool)
+    const path = readPath(data.arguments)
+    if (path !== undefined && !files.includes(path)) files.push(path)
+  }
+
+  return { writes: writes.length, files, delegations }
+}
+
+/**
+ * Read the target path out of a tool call's arguments.
+ * @param raw - the JSON-encoded arguments string the log stores.
+ * @returns the path, or undefined when the call names none.
+ */
+function readPath(raw) {
+  if (typeof raw !== 'string') return undefined
+  try {
+    const args = JSON.parse(raw)
+    const path = args?.file_path ?? args?.path
+    return typeof path === 'string' && path !== '' ? path : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Decide whether this turn looks like a skipped dispatch.
+ * @param summary - `summarizeTurn(...)` output.
+ * @param config - the resolved `nudge` section.
+ * @returns true when the turn wrote enough files and delegated nothing.
+ */
+export function shouldNudge(summary, config) {
+  return summary.writes >= config.threshold && summary.delegations === 0
+}
+
+/**
+ * Render the reminder text.
+ * @param template - `nudge.text`, with `{writes}`, `{files}`, `{turn}`.
+ * @param summary - `summarizeTurn(...)` output plus the closing `turn`.
+ * @returns the message body.
+ */
+export function renderNudge(template, summary) {
+  return template
+    .replaceAll('{writes}', String(summary.writes))
+    .replaceAll('{files}', formatFiles(summary.files))
+    .replaceAll('{turn}', String(summary.turn))
+}
+
+/**
+ * Join paths for the reminder, capping the list so one long path cannot double
+ * the message size.
+ * @param files - distinct paths written this turn.
+ * @returns a comma-separated list, plus a "+N" suffix when truncated.
+ */
+function formatFiles(files) {
+  if (files.length === 0) return '未记录路径'
+  const shown = files.slice(0, MAX_LISTED_FILES).join(', ')
+  return files.length > MAX_LISTED_FILES ? `${shown} 等 ${files.length} 个` : shown
+}

@@ -2,13 +2,20 @@
 //
 //   node test.mjs
 //
-// The harness fakes the one extension point the plugin uses:
+// The harness fakes the extension points the plugin uses:
 //   - `ctx.systemPrompt.section(section)` (the system-prompt registry)
+//   - `agent/created` / `subagent/end` (root event bus)
+//   - `agent.ctx.on('agent/turn-stopping')` + `agent.steer` (the nudge check)
+//   - `session.snapshotEvents()` (committed `tool/call` records)
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import * as plugin from './plugin.mjs'
 import { resolveConfig, DEFAULT_RULES } from './lib/config.mjs'
+import { renderNudge, resolveNudge, shouldNudge, summarizeTurn } from './lib/nudge.mjs'
 
 test('registers one prompt section with literal text and a stable order', () => {
   const h = harness()
@@ -112,12 +119,195 @@ test('checkpoint messages can be disabled by config', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Missed-dispatch nudge
+
+test('summarizeTurn counts only the requested turn\'s writes and files', () => {
+  const config = resolveNudge({})
+  const events = [
+    call(1, 'write', { file_path: 'a.ts' }),
+    call(1, 'edit', { file_path: 'b.ts' }),
+    call(1, 'read', { file_path: 'c.ts' }),
+    call(1, 'subagent', { description: '勘察' }),
+    call(2, 'write', { file_path: 'd.ts' }),
+  ]
+
+  const summary = summarizeTurn(events, 1, config)
+  assert.equal(summary.writes, 2)
+  assert.deepEqual(summary.files, ['a.ts', 'b.ts'])
+  assert.equal(summary.delegations, 1)
+  assert.equal(shouldNudge(summary, config), false, 'a delegation means the dispatch happened')
+
+  const second = summarizeTurn(events, 2, config)
+  assert.equal(second.writes, 1)
+  assert.equal(second.delegations, 0)
+})
+
+test('a multi-write turn without delegation is reminded exactly once', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-'))
+  try {
+    const log = join(dir, 'nudge.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log, threshold: 2 } })
+
+    const agent = h.main('session-1', [
+      call(1, 'write', { file_path: 'x.xaml' }),
+      call(1, 'edit', { file_path: 'y.xaml' }),
+    ])
+    h.created(agent)
+
+    h.turnStopping(agent, 1)
+    h.turnStopping(agent, 1)
+
+    assert.equal(agent.messages.length, 1, 'the nudge costs one step, once per turn')
+    assert.match(agent.messages[0].text, /派发 0 次/)
+    assert.match(agent.messages[0].text, /x\.xaml/)
+    assert.equal(agent.messages[0].role, 'user', 'the provider requires a user-role message')
+
+    const lines = readFileSync(log, 'utf8').trim().split('\n')
+    assert.equal(lines.length, 1)
+    const record = JSON.parse(lines[0])
+    assert.equal(record.turn, 1)
+    assert.equal(record.writes, 2)
+    assert.equal(record.delegations, 0)
+    assert.deepEqual(record.files, ['x.xaml', 'y.xaml'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a single write keeps the small-change exemption and is not reminded', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const agent = h.main('session-2', [call(1, 'write', { file_path: 'only.txt' })])
+  h.created(agent)
+  h.turnStopping(agent, 1)
+
+  assert.equal(agent.messages.length, 0)
+})
+
+test('writes below the configured threshold are not reminded', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false, threshold: 3 } })
+
+  const agent = h.main('session-3', [
+    call(1, 'write', { file_path: 'a.txt' }),
+    call(1, 'write', { file_path: 'b.txt' }),
+  ])
+  h.created(agent)
+  h.turnStopping(agent, 1)
+
+  assert.equal(agent.messages.length, 0)
+})
+
+test('a turn that delegated is never reminded', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const agent = h.main('session-4', [
+    call(1, 'write', { file_path: 'a.txt' }),
+    call(1, 'write', { file_path: 'b.txt' }),
+    call(1, 'subagent', { description: '实现 Task 1' }),
+  ])
+  h.created(agent)
+  h.turnStopping(agent, 1)
+
+  assert.equal(agent.messages.length, 0)
+})
+
+test('a subagent is never nudged, even with many writes', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const child = h.main('child-9', [
+    call(1, 'write', { file_path: 'a.txt' }),
+    call(1, 'write', { file_path: 'b.txt' }),
+  ], { origin: 'subagent', parentSession: 'session-5' })
+  h.created(child)
+  h.turnStopping(child, 1)
+
+  assert.equal(child.messages.length, 0)
+})
+
+test('the nudge can be disabled without touching the checkpoint', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { enabled: false } })
+
+  const agent = h.main('session-6', [
+    call(1, 'write', { file_path: 'a.txt' }),
+    call(1, 'write', { file_path: 'b.txt' }),
+  ])
+  h.created(agent)
+  h.turnStopping(agent, 1)
+
+  assert.equal(agent.messages.length, 0)
+
+  const parent = h.parent('parent-6')
+  h.created(h.child('child-6', 'parent-6', '实现 Task 6'))
+  h.ended({ childId: 'child-6', stopReason: 'completed' })
+  assert.equal(parent.messages.length, 1, 'the checkpoint still runs')
+})
+
+test('a log path of false records nothing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-'))
+  try {
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log: false } })
+
+    const agent = h.main('session-7', [
+      call(1, 'write', { file_path: 'a.txt' }),
+      call(1, 'write', { file_path: 'b.txt' }),
+    ])
+    h.created(agent)
+    h.turnStopping(agent, 1)
+
+    assert.equal(agent.messages.length, 1, 'the reminder still reaches the model')
+    assert.deepEqual(readdirSync(dir), [])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('nudge config rejects values that would silently never fire', () => {
+  assert.throws(() => resolveNudge({ threshold: 0 }), /threshold/)
+  assert.throws(() => resolveNudge({ threshold: 1.5 }), /threshold/)
+  assert.throws(() => resolveNudge({ text: '   ' }), /text/)
+  assert.throws(() => resolveNudge({ writeTools: 'write' }), /writeTools/)
+  assert.throws(() => resolveNudge({ delegationTools: [] }), /delegationTools/)
+  assert.throws(() => resolveConfig({ nudge: { threshold: -1 } }), /threshold/)
+
+  const defaults = resolveNudge({})
+  assert.equal(defaults.threshold, 2)
+  assert.equal(defaults.enabled, true)
+  assert.match(defaults.log, /dispatch-protocol-nudge\.jsonl$/)
+})
+
+test('renderNudge fills the placeholders and truncates a long file list', () => {
+  const text = renderNudge('w={writes} f={files} t={turn}', {
+    writes: 7,
+    files: ['a', 'b', 'c', 'd', 'e', 'f', 'g'],
+    turn: 3,
+  })
+
+  assert.match(text, /w=7/)
+  assert.match(text, /t=3/)
+  assert.match(text, /等 7 个/)
+  assert.match(renderNudge('{files}', { writes: 0, files: [], turn: 1 }), /未记录路径/)
+})
+
+// ---------------------------------------------------------------------------
+
+/** One committed `tool/call` record, shaped like the session log stores it. */
+function call(turn, name, args) {
+  return { type: 'tool/call', data: { turn, step: 1, callId: `call-${turn}-${name}`, name, arguments: JSON.stringify(args ?? {}) } }
+}
 
 /** Build a fake host context: prompt registry, agents registry, event bus. */
 function harness() {
   const sections = []
   const events = new Map()
   const agents = new Map()
+  const agentHooks = new Map()
 
   const ctx = {
     systemPrompt: {
@@ -164,11 +354,48 @@ function harness() {
         },
       }
     },
+    /** A live top-level agent with its own hook scope and session log. */
+    main(id, sessionEvents = [], header = {}) {
+      const messages = []
+      const hooks = new Map()
+      const agent = {
+        id,
+        messages,
+        session: {
+          id,
+          header: { origin: header.origin, parentSession: header.parentSession, delegationDepth: header.origin === 'subagent' ? 1 : 0 },
+          snapshotEvents: () => sessionEvents,
+        },
+        ctx: {
+          on(name, listener) {
+            const list = hooks.get(name) ?? []
+            list.push(listener)
+            hooks.set(name, list)
+            return () => {}
+          },
+          effect(run) {
+            return run()
+          },
+        },
+        steer: record(messages),
+        inject: record(messages),
+        followup: record(messages),
+      }
+      agentHooks.set(agent, hooks)
+      agents.set(id, agent)
+      return agent
+    },
     created(agent) {
       for (const listener of events.get('agent/created') ?? []) listener({ agent })
     },
     ended(info) {
       for (const listener of events.get('subagent/end') ?? []) listener(info)
+    },
+    /** Fire the agent-scoped `agent/turn-stopping` hook for one turn. */
+    turnStopping(agent, turn) {
+      for (const listener of agentHooks.get(agent)?.get('agent/turn-stopping') ?? []) {
+        listener({ agent, turn, signal: new AbortController().signal })
+      }
     },
   }
 }
