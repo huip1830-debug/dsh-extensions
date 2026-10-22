@@ -1,0 +1,20 @@
+# Bundle layer: applied when the profile selects this package (dsh.profile.bundles).
+# Override any value from the profile's own cordis.patch.yml with:
+#   - id: dispatch-guard
+#     config: { ... }        # config is replaced wholesale, not deep-merged
+- insert:
+    - id: dispatch-guard
+      name: dispatch-guard
+      config:
+        failure:
+          maxAttempts: 2                 # matching model-request failures before the child is stopped
+          codes: [RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]
+          notifyParent: true
+        stall:
+          enabled: true
+          nudgeAfterSteps: 12            # consecutive steps without a write before the one nudge
+          blockAfterSteps: 20            # consecutive steps without a write before the step is blocked
+          exempt:
+            labels: []                   # descriptor labels never stall-guarded
+            promptPatterns: ['【只读】', 'read-only', '不要写', '不得写', '禁止写', 'do not write', 'mode\\s*:\\s*explore']
+        debug: false

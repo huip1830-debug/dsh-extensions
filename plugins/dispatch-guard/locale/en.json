@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Dispatch Guard",
+    "description": "Stop failing child agents early with one actionable notice to the parent, and nudge or block children that stop producing writes."
+  }
+}

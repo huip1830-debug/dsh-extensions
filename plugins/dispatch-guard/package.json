@@ -1,0 +1,19 @@
+{
+  "name": "dispatch-guard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH profile plugin: block failing child agents early and stop child agents that stop producing writes, with one actionable notice to the parent",
+  "license": "MIT",
+  "main": "./plugin.mjs",
+  "exports": {
+    ".": "./plugin.mjs",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
