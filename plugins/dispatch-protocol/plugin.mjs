@@ -167,7 +167,7 @@ function registerNudge(ctx, nudge) {
 function registerCheckpoint(ctx, checkpoint) {
   if (!checkpoint.enabled) return
 
-  /** childId → `{ parentId, label }` for settlement lookup. */
+  /** childId → `{ parentId, label, agent }` for settlement lookup. */
   const children = new Map()
   const reported = new Set()
 
@@ -177,6 +177,7 @@ function registerCheckpoint(ctx, checkpoint) {
     children.set(agent.id, {
       parentId: header.parentSession,
       label: readLabel(agent) ?? '未命名',
+      agent,
     })
   })
 
@@ -191,9 +192,56 @@ function registerCheckpoint(ctx, checkpoint) {
 
     const parent = ctx.agents?.get?.(record.parentId)
     if (parent === undefined) return
+    if (parentAlreadyHandled(parent, record.agent, childId)) return
     const text = checkpoint.text
       .replaceAll('{childId}', childId)
       .replaceAll('{label}', record.label)
     if (typeof parent.followup === 'function') parent.followup(userMessage(text))
   })
+}
+
+/** 判定：父代理是否已经按该子代理的汇报动过手。 */
+function parentAlreadyHandled(parent, child, childId) {
+  try {
+    const parentEvents = parent?.session?.snapshotEvents?.() ?? []
+    const marker = `Agent ${childId} sent a message`
+    let reportAt = -1
+    for (let i = 0; i < parentEvents.length; i++) {
+      const event = parentEvents[i]
+      if (event?.type !== 'agent/inbox/spliced') continue
+      if (!splicedTexts(event).some(text => text.includes(marker))) continue
+      reportAt = i
+    }
+    if (reportAt < 0) return false
+    if (!hasToolCallAfter(parentEvents, reportAt)) return false
+
+    const childEvents = child?.session?.snapshotEvents?.() ?? []
+    const sendAt = lastIndexWhere(childEvents, e => e?.type === 'tool/call' && e.data?.name === 'send_message')
+    if (sendAt < 0) return true
+    const wroteAfter = hasToolCallAfter(childEvents, sendAt, ['write', 'edit'])
+    return !wroteAfter
+  } catch {
+    return false
+  }
+}
+
+function splicedTexts(event) {
+  const inserted = event?.data?.inserted
+  if (!Array.isArray(inserted)) return []
+  return inserted.flatMap(item => (item?.content ?? []).map(block => block?.text ?? ''))
+}
+
+function hasToolCallAfter(events, index, names) {
+  for (let i = index + 1; i < events.length; i++) {
+    const event = events[i]
+    if (event?.type !== 'tool/call') continue
+    if (!names) return true
+    if (names.includes(event.data?.name)) return true
+  }
+  return false
+}
+
+function lastIndexWhere(events, predicate) {
+  for (let i = events.length - 1; i >= 0; i--) if (predicate(events[i])) return i
+  return -1
 }

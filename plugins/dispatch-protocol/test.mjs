@@ -151,6 +151,49 @@ test('checkpoint messages can be disabled by config', () => {
   assert.equal(parent.messages.length, 0)
 })
 
+test('a parent that already acted on the child report is not reminded again', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+
+  const parent = h.main('parent-1', [splice('child-9'), call(1, 'read', { file_path: 'a.ts' })])
+  const child = h.child('child-9', 'parent-1', '实现 Task 9', [call(1, 'send_message', { agent_id: 'parent-1' })])
+  h.created(child)
+
+  h.ended({ childId: 'child-9', stopReason: 'completed' })
+
+  assert.equal(parent.messages.length, 0, 'the report was delivered and handled in the parent turn')
+})
+
+test('a parent that received a report but did nothing is still reminded', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+
+  const parent = h.main('parent-2', [splice('child-10')])
+  const child = h.child('child-10', 'parent-2', '实现 Task 10', [call(1, 'send_message', { agent_id: 'parent-2' })])
+  h.created(child)
+
+  h.ended({ childId: 'child-10', stopReason: 'completed' })
+
+  assert.equal(parent.messages.length, 1, 'without a tool call the checkpoint still fires')
+  assert.match(parent.messages[0].text, /dispatch-protocol/)
+})
+
+test('a child that kept writing after the report is still reminded', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+
+  const parent = h.main('parent-3', [splice('child-11'), call(1, 'read', { file_path: 'a.ts' })])
+  const child = h.child('child-11', 'parent-3', '实现 Task 11', [
+    call(1, 'send_message', { agent_id: 'parent-3' }),
+    call(1, 'write', { file_path: 'a.ts' }),
+  ])
+  h.created(child)
+
+  h.ended({ childId: 'child-11', stopReason: 'completed' })
+
+  assert.equal(parent.messages.length, 1, 'a report followed by writes is not a settled child')
+})
+
 // ---------------------------------------------------------------------------
 // Missed-dispatch nudge
 
@@ -415,6 +458,14 @@ function result(turn, callId, isError) {
   return { type: 'tool/result', data: { turn, step: 1, message: { isError, toolCallId: callId, content: [] } } }
 }
 
+/** One `agent/inbox/spliced` record: a child report delivered into the parent. */
+function splice(childId, target = 'next-step') {
+  return {
+    type: 'agent/inbox/spliced',
+    data: { target, inserted: [{ role: 'user', content: [{ type: 'text', text: `Agent ${childId} sent a message: 完成` }] }] },
+  }
+}
+
 /** Build a fake host context: prompt registry, agents registry, event bus. */
 function harness() {
   const sections = []
@@ -458,12 +509,12 @@ function harness() {
       agents.set(id, agent)
       return agent
     },
-    child(id, parentId, label) {
+    child(id, parentId, label, sessionEvents = []) {
       return {
         id,
         session: {
           header: { origin: 'subagent', parentSession: parentId, delegationDepth: 1 },
-          snapshotEvents: () => [{ type: 'subagent/descriptor', data: { label } }],
+          snapshotEvents: () => [{ type: 'subagent/descriptor', data: { label } }, ...sessionEvents],
         },
       }
     },
