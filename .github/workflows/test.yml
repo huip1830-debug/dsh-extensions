@@ -22,6 +22,11 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Run offline regression (no dependencies)
+      - name: Install dependencies (only for plugins that declare them)
+        working-directory: plugins/${{ matrix.plugin }}
+        run: |
+          if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; fi
+
+      - name: Run offline regression
         working-directory: plugins/${{ matrix.plugin }}
         run: node test.mjs

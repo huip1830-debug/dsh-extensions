@@ -38,21 +38,65 @@
 
 import { appendFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { SANDBOX_MODES, resolveRoute, validateRoles } from './lib/routes.mjs'
-
-const LOG = join(process.env.TEMP ?? '.', 'subagent-model-pin.log')
+import z from '@deepseek-ai/schemastery'
+import { SANDBOX_MODES, readOptionalString, readVolatile, resolveRoute, validateRoles } from './lib/routes.mjs'
 
 /** Delegation tools whose arguments carry model-facing route fields. */
 const DELEGATION_TOOLS = new Set(['subagent', 'subagent_fork'])
 
+/**
+ * Log path, resolved per write so tests can redirect it and the file only
+ * appears once diagnostics are actually enabled.
+ */
+function logPath() {
+  return process.env.SUBAGENT_MODEL_PIN_LOG ?? join(process.env.TEMP ?? '.', 'subagent-model-pin.log')
+}
+
 /** Append one diagnostic line; never let logging break the host. */
 function writeLog(message) {
   try {
-    appendFileSync(LOG, `${new Date().toISOString()} ${message}\n`)
+    appendFileSync(logPath(), `${new Date().toISOString()} ${message}\n`)
   } catch {
     // logging must never break the host
   }
 }
+
+const sandboxSchema = z.union([
+  z.const('read-only'),
+  z.const('workspace-write'),
+  z.const('danger-full-access'),
+])
+
+const roleSchema = z.object({
+  match: z.string().required(),
+  provider: z.string().required(),
+  model: z.string().required(),
+  reasoningEffort: z.string(),
+  sandbox: sandboxSchema,
+})
+
+/**
+ * Activation-time config schema.
+ *
+ * The four `.volatile()` fields are exactly the ones the Plugins-page config
+ * card may write: the settings transport (`remote.settings.mutate`) refuses
+ * non-volatile paths, and the Host updates volatile references in place when
+ * the profile patch changes — no remount, no restart. Every read of a volatile
+ * field must go through `readVolatile`/`readOptionalString` at call time.
+ * `roles`, `force`, `depth`, `sandbox` and `injectDelegationDefaults` stay
+ * YAML-only by construction.
+ */
+export const Config = z.object({
+  provider: z.string().default('').volatile(),
+  model: z.string().default('').volatile(),
+  reasoningEffort: z.string().default('').volatile(),
+  debug: z.boolean().default(false).volatile(),
+  roles: z.array(roleSchema),
+  force: z.boolean(),
+  depth: z.number(),
+  sandbox: sandboxSchema,
+  injectDelegationDefaults: z.boolean(),
+})
 
 /**
  * Read the child's own descriptor label.
@@ -134,24 +178,27 @@ export const name = 'subagent-model-pin'
 export const inject = ['sessions']
 
 export function apply(ctx, config) {
-  // Diagnostics are opt-in: `debug: true` writes %TEMP%\subagent-model-pin.log.
-  const log = config?.debug === true ? writeLog : () => {}
+  // Diagnostics are opt-in and hot-switchable: the volatile `debug` field is
+  // re-read on every write, so toggling it from the config card takes effect
+  // without a restart.
+  const log = (message) => {
+    if (readVolatile(config?.debug) === true) writeLog(message)
+  }
 
-  const provider = config?.provider
-  const model = config?.model
-  const reasoningEffort = config?.reasoningEffort
+  const provider = readOptionalString(config?.provider)
+  const model = readOptionalString(config?.model)
   const depth = config?.depth
   // `force: true` restores the old always-override behavior (no escape hatch).
   const force = config?.force === true
 
-  if (typeof provider !== 'string' || provider.length === 0) throw new Error('subagent-model-pin: config.provider is required')
-  if (typeof model !== 'string' || model.length === 0) throw new Error('subagent-model-pin: config.model is required')
+  if (provider === undefined) throw new Error('subagent-model-pin: config.provider is required')
+  if (model === undefined) throw new Error('subagent-model-pin: config.model is required')
   validateRoles(config?.roles)
   if (config?.sandbox !== undefined && !SANDBOX_MODES.includes(config.sandbox)) {
     throw new Error(`subagent-model-pin: config.sandbox must be one of ${SANDBOX_MODES.join(', ')}`)
   }
 
-  log(`apply() called with ${JSON.stringify(config ?? null)}`)
+  log(`apply() called with provider=${provider} model=${model} effort=${readOptionalString(config?.reasoningEffort) ?? '-'} roles=${(config?.roles ?? []).length} force=${force}`)
 
   // Fill the default route into the delegation arguments *before* the child is
   // created. `subagent/descriptor.agentModel` snapshots the creation-time

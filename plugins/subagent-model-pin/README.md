@@ -1,6 +1,6 @@
 # subagent-model-pin
 
-> 当前部署：desktop **0.2.x**（`roles[].sandbox` 随 `ceba3a0` 发布）；probe 为 `link:`。改动后：提交推送 → `dsh plugin --profile desktop update subagent-model-pin` → 重启。
+> 当前部署：desktop **0.2.x**（配置卡片与 `roles[].sandbox` 随本提交发布）；probe 为 `link:`。改动后：提交推送 → 关闭 DSH → `dsh plugin --profile desktop update subagent-model-pin` → 启动。
 
 DSH profile 插件：**子 agent 默认跑低成本模型，需要时在委派调用里显式升级**。
 
@@ -35,16 +35,18 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 
 ## 配置项
 
-| 键 | 必填 | 说明 |
-|----|------|------|
-| `provider` | 是 | pin 到的 provider id |
-| `model` | 是 | pin 到的模型 id |
-| `reasoningEffort` | 否 | pin 时一并写入的 effort；换路由时会丢掉继承来的 effort，避免落在新模型不支持的档位 |
-| `injectDelegationDefaults` | 否 | 默认 `true`。在 `tools/execute` 阶段把默认路由写进委派参数，使 descriptor / 首请求 / 冷恢复三者一致；设 `false` 退回纯 request 层 pin |
-| `debug` | 否 | `true` 时写 `%TEMP%\subagent-model-pin.log`（apply / agent/created / 每次改写前后，含 `label=` 与 `explicit=`） |
-| `force` | 否 | `true` = 一律覆盖，连显式选择也 pin（回到 v5 之前的"强制"行为） |
-| `depth` | 否 | 只处理委派深度等于该值的子 agent |
-| `roles` | 否 | 按委派 `description` 前缀分档路由的数组；每项含 `match`（前缀，大小写不敏感）、`provider`、`model`，可选 `reasoningEffort`。首个命中生效；未命中回落到 `provider`/`model`；委派调用里显式传的路由仍然优先 |
+| 键 | 必填 | 界面可改 | 说明 |
+|----|------|----------|------|
+| `provider` | 是 | ✅ | pin 到的 provider id |
+| `model` | 是 | ✅ | pin 到的模型 id |
+| `reasoningEffort` | 否 | ✅ | pin 时一并写入的 effort；换路由时会丢掉继承来的 effort，避免落在新模型不支持的档位 |
+| `debug` | 否 | ✅ | `true` 时写 `%TEMP%\subagent-model-pin.log`（apply / agent/created / 每次改写前后，含 `label=` 与 `explicit=`）；路径可用环境变量 `SUBAGENT_MODEL_PIN_LOG` 覆盖 |
+| `injectDelegationDefaults` | 否 | — | 默认 `true`。在 `tools/execute` 阶段把默认路由写进委派参数，使 descriptor / 首请求 / 冷恢复三者一致；设 `false` 退回纯 request 层 pin |
+| `force` | 否 | — | `true` = 一律覆盖，连显式选择也 pin（回到 v5 之前的"强制"行为） |
+| `depth` | 否 | — | 只处理委派深度等于该值的子 agent |
+| `roles` | 否 | — | 按委派 `description` 前缀分档路由的数组；每项含 `match`（前缀，大小写不敏感）、`provider`、`model`，可选 `reasoningEffort`、`sandbox`。首个命中生效；未命中回落到 `provider`/`model`；委派调用里显式传的路由仍然优先 |
+
+「界面可改」= 插件页配置卡片可编辑（见下节「GUI 配置」），这四个字段在 Config schema 里标了 `.volatile()`，settings 系统只允许界面写 volatile 路径，所以 `roles` 等其余字段**从机制上**不可能被界面覆盖。
 
 ### roles：按角色分档
 
@@ -60,29 +62,36 @@ roles:
 
 匹配规则：取子代理的 `description`（即 descriptor label），去掉首尾空白、转小写后做 `startsWith`。所以派发时按 `Survey …` / `Implement …` / `Review …` 命名即可自动分档；不按约定命名则落回默认路由。`roles` 非法（非数组、`match` 为空、缺 `provider`/`model`）在插件加载时直接报错。
 
-配置目前只有两条途径：bundle 自带的 `cordis.patch.yml` 作默认值，profile 的 `cordis.patch.yml` 用同 id 覆盖（`config` 整体替换，不深合并）。插件页暂时没有配置表单，原因见下节。
+配置有三条途径：插件页配置卡片（4 个 volatile 字段，见下节）、bundle 自带的 `cordis.patch.yml` 作默认值、profile 的 `cordis.patch.yml` 用同 id 覆盖（`config` 整体替换，不深合并——手写 YAML 时务必抄全字段）。
 
 **角色与沙箱的唯一真相源就是这里的 `roles`**：`sandbox` 字段（`read-only` / `workspace-write` / `danger-full-access`）也在同一张表里。别再在别处维护第二份角色名单——2026-10-22 的审查把这种复制列为漂移源（`dispatch-guard` 的 `stall.exempt` 就因从未配置而失效，已归档）。
 
-## GUI 配置（为什么目前只有 YAML）
+## GUI 配置（插件页配置卡片）
 
-**结论：插件页不会从配置项自动生成下拉框；要做，必须给包补一个浏览器半区。** 依据（2026-10-21 在 DSH 0.2.1-rc.2 上核对）：
+0.2.0 起插件页自带配置卡片：**插件 → subagent-model-pin → 配置区**（bundle 详情内），可编辑上表标 ✅ 的四个字段：
+
+- **Provider / 模型**：下拉实时取自 `remote.session.modelCatalog()`（与官方「子智能体」设置页同源），只能选目录里存在的组合；个别 provider 拉取失败会降级提示，不影响其他选项。
+- **推理强度**：按选中模型的 `reasoning.efforts` 列出档位，首项「跟随模型默认」（保存为空串 = 不 pin effort）；模型无档位时禁用并标注。
+- **调试日志**：开关即写即生效（volatile 字段 Host 原地更新，**无需重启 DSH**）。
+
+生效语义：
+
+- **保存立即写入** profile 的 `cordis.patch.yml`（settings 传输落盘，带 revision 冲突检测）；pin 路由的改动作用于**此后的委派**，但白名单按会话冻结——**需新开会话**，且新路由必须在「允许 Agent 为子智能体选择模型」的白名单里，否则注入式委派会被拒。
+- **「恢复 YAML 配置」按钮**：对四个字段发 `unset`。注意 Host 的语义是「重置 = 显式钉住当前 YAML 值」（settings 的 unset 遇 inherited 值会写成显式拷贝），所以重置后立刻等于 YAML，但**之后再改 YAML 的这四个字段不会生效**——需到界面再点一次重置，或手工删 profile patch 里该行的 config。
+- 摘要行在插件页直接显示当前生效路由；存在界面覆盖时带「界面覆盖」徽标。
+
+实现要点（改动前先看）：
 
 | 事实 | 依据 |
 |------|------|
-| 配置入口只对**注册了 slot** 的插件出现 | 插件页用 `configLedger` 收集 `plugins.row.config` / `plugins.bundle.config` 的 key（`dsh-client-ui-plugin-manager/lib/client.js`）；没注册的插件只有开关 |
-| **没有 schema → 表单自动生成** | Host 的 `Config` schema 只用于启动校验和 `dsh --dump-config-schema`；页面读的是 slot 注册表，不是 schema |
-| 官方配置页都自带浏览器半区 | `plugins.item` / `plugins.bundle.config` / `plugins.row.config` + `ctx.configForms`（settings 传输）+ `ui-primitives` 的 `SettingsFormModel`；现成字段只有文本 / 数字 / 开关三类 |
-| 保存不写 bundle 的 patch | 官方模式写 **settings 命名空间**（`remote.settings.mutate`），Host 在 `apply` 时读；`plugin_manager` 服务也没有"写行配置"的方法 |
+| 浏览器半区是手写的 `window.__ModuleLoader__.load({id, factory})` 纯 JS，Host 按字节直读、不转译 | `dsh-client-modules`（`exports["./client"]` + `dsh.client.platform === 'web'`）；`id` 必须等于包名，文件缺失会让 Host 启动失败 |
+| 卡片注册在 `plugins.bundle.config` slot，key = 包名 | 官方先例：cot-translation / voice-input；`plugins.row.config` 零官方占用者，未采用 |
+| 表单自绑 `ctx.configForms.get('subagent-model-pin')`（命名空间 = patch 行 id），不依赖页面传入的 `form` prop | 官方 4 个设置页同款；`form` prop 零消费者 |
+| 界面只能写 `.volatile()` 字段；Host 写盘时校验路径并把 volatile 子树剥离后合并进 profile patch | `dsh-settings/lib/index.js` `write()` / `validatePaths` / `strip` |
+| Host 侧 `plugin.mjs` 运行期一律 `readVolatile(config.x)` 现取，不缓存 | volatile 引用由 loader 用 `updateVolatile` 原地换值，不 remount |
+| 改 `client.js` 后需重启 DSH | bundle 在激活时快照进内存 |
 
-要做下拉选模型，得补齐这些：
-
-1. **Host 侧**：暴露一个 settings 命名空间（`provider` / `model` / `reasoningEffort` / `enabled`），`apply` 时优先读它，缺省回退到 bundle 配置；
-2. **浏览器半区**：`client.mjs` + `package.json` 的 `dsh.client` 与 `"./client"` 导出，在 `plugins.row.config` 注册卡片（key 为 `subagent-model-pin#subagent-model-pin`）；
-3. **下拉数据源**：实时取 `remote.session.modelCatalog()`（官方「子智能体」设置页就这么列模型），不硬编码；
-4. **验收**：我只能验证"能加载、能写设置"，交互与样式需要在插件页人工点一遍。
-
-成本与风险：约 200–300 行前端代码；客户端 API 属内部契约（`ui-primitives`、slot 契约），DSH 升级可能要跟改。**在"给非 YAML 用户用"成为真实需求之前不做**；在那之前，换 pin 模型就是改一行 profile patch + 重启。
+成本约 300 行手写 `client.js`；客户端契约（slot、`ui-primitives`、种子模块表）属内部 API，DSH 升级可能要跟改。
 
 ## 行为矩阵
 
@@ -263,10 +272,11 @@ const text = Buffer.concat(offsets.map(o => zstdDecompressSync(buf.subarray(o)))
 ## 离线回归
 
 ```powershell
-node test.mjs     # 20 个用例，无依赖（在插件目录内执行）
+npm ci          # 或 pnpm install（0.2.0 起有 schemastery 依赖，首次需要）
+node test.mjs   # 26 个用例（在插件目录内执行）
 ```
 
-覆盖：显式升级到父路由、纯继承、显式"没选"、workflow/冷恢复回退、非委派工具、`force`、`injectDelegationDefaults:false`、非子 agent。
+覆盖：显式升级到父路由、纯继承、显式"没选"、workflow/冷恢复回退、非委派工具、`force`、`injectDelegationDefaults:false`、非子 agent、角色沙箱，以及 volatile 字段（界面配置卡）的覆盖即时生效 / 回落 / 空串 effort / debug 热切换。
 
 ## 已知副作用
 
@@ -277,7 +287,7 @@ node test.mjs     # 20 个用例，无依赖（在插件目录内执行）
 | workflow 子级显式升级到"与父相同"的路由仍可能被 pin | workflow 不经过 `subagent` 工具，无 `description` 可匹配；回退分支只认「路由不同」 |
 | 冷恢复的子会话走回退分支 | 恢复时不产生新的委派 `tool/call`，按路由比对处理 |
 | 主 agent 不受影响 | `agent/created` 被 `origin` 判断过滤掉 |
-| 插件改动需重启 DSH | profile 层插件不支持热加载 |
+| 插件代码改动需重启 DSH | profile 层插件不支持热加载；但 4 个 volatile 字段的**配置值**改动即时生效（Host 原地换值），改 `client.js` 后也需重启 |
 
 ## 排查技巧：dump 组合配置
 
@@ -307,6 +317,7 @@ dump 里能看到相对插件路径被解析成 `file:///...` 绝对 URL，可�
 | 7 | 按 `subagent/descriptor.label` 回查父会话 `tool/call` 参数 | 已验证 | 委派参数是唯一保留"模型原始选择"的信号 |
 | 8 | descriptor/冷恢复记录的是继承路由 | 已修（`tools/execute` 注入） | pin 在 request 层发生，晚于 descriptor 写入 |
 | 9 | 分支会话沿用旧白名单 | 设计如此，无法用插件绕过 | policy 事件只写一次，投影只认第一条 |
+| 10 | 插件页配置卡片（0.2.0） | 已验证 | schemastery `.volatile()` 四字段 + 手写 `client.js` 注册 `plugins.bundle.config`；settings 写盘只含 volatile 子树，roles 等不可能被界面覆盖 |
 
 ### 实测记录（2026-10-21）
 

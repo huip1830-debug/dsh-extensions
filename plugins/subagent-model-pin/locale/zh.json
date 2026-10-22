@@ -2,5 +2,33 @@
   "meta": {
     "title": "子 agent 委派策略",
     "description": "子 agent 默认跑低成本路由，可按委派角色分档路由与沙箱；显式 provider/model 仍可升级。"
+  },
+  "card": {
+    "summaryFallback": "未配置路由",
+    "overriddenBadge": "界面覆盖",
+    "notice": "保存立即写入配置；debug 开关立即生效。pin 路由的改动作用于此后的委派，但需新开会话，且新路由须在「允许 Agent 为子智能体选择模型」的白名单内。",
+    "providerLabel": "Provider",
+    "modelLabel": "模型",
+    "effortLabel": "推理强度",
+    "effortDefault": "跟随模型默认",
+    "effortUnsupported": "该模型不支持推理档位",
+    "debugLabel": "调试日志",
+    "debugHelp": "写入 %TEMP%\\subagent-model-pin.log（可用环境变量 SUBAGENT_MODEL_PIN_LOG 改路径）",
+    "save": "保存",
+    "saving": "保存中…",
+    "discard": "放弃",
+    "reset": "恢复 YAML 配置",
+    "resetting": "恢复中…",
+    "resetConfirm": "将清除界面对 provider / 模型 / 推理强度 / debug 的全部覆盖，回到 cordis.patch.yml 里的值。确定？",
+    "conflict": "配置已在别处修改，请确认后重试。",
+    "failed": "保存失败，已刷新为最新值，请重试。",
+    "catalogLoading": "模型目录加载中…",
+    "catalogError": "模型目录加载失败",
+    "catalogPartial": "部分 provider 拉取失败，选项可能不全。",
+    "retry": "重试",
+    "notInCatalog": "（不在当前目录）",
+    "statusLoading": "配置加载中…",
+    "statusUnavailable": "Host 未提供该配置命名空间——请先把插件升级到新版本。",
+    "readOnly": "当前配置不可写。"
   }
 }

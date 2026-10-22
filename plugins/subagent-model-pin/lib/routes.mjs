@@ -11,6 +11,34 @@
 export const SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access']
 
 /**
+ * Read a config field that may be a schemastery Volatile reference.
+ *
+ * When the plugin is activated by cordis with a `Config` schema, every
+ * `.volatile()` field arrives as a frozen `{ get() }` reference whose value the
+ * Host swaps in place when the settings document changes. Reading must go
+ * through `get()` at call time — never cache the unwrapped value. Plain values
+ * (unit tests, or a host that ignored the schema) pass through unchanged.
+ * @param value - a volatile reference or a plain value.
+ * @returns the current unwrapped value; undefined when the ref cannot be read.
+ */
+export function readVolatile(value) {
+  if (value !== null && typeof value === 'object' && typeof value.get === 'function') {
+    try {
+      return value.get()
+    } catch {
+      return undefined
+    }
+  }
+  return value
+}
+
+/** Normalize an optional string field: '' (the volatile default) means unset. */
+export function readOptionalString(value) {
+  const unwrapped = readVolatile(value)
+  return typeof unwrapped === 'string' && unwrapped.length > 0 ? unwrapped : undefined
+}
+
+/**
  * Validate the configured roles, failing loud at load.
  * @param roles - raw `config.roles`.
  * @returns the same array when valid.
@@ -38,11 +66,18 @@ export function validateRoles(roles) {
 /**
  * Resolve the route for one delegation.
  * @param description - the delegation `description` (the child's label).
- * @param config - plugin config carrying `provider`/`model`/`reasoningEffort`/`roles`/`sandbox`.
+ * @param config - plugin config carrying `provider`/`model`/`reasoningEffort`/`roles`/`sandbox`;
+ *   the three route fields may be volatile references and are read per call.
  * @returns `{ provider, model, reasoningEffort, sandbox, matched }`; `matched` is true when a role won.
  */
 export function resolveRoute(description, config) {
   const roles = config?.roles ?? []
+  const fallback = {
+    provider: readOptionalString(config?.provider),
+    model: readOptionalString(config?.model),
+    reasoningEffort: readOptionalString(config?.reasoningEffort),
+    sandbox: config?.sandbox,
+  }
   const label = typeof description === 'string' ? description.trim().toLowerCase() : ''
   if (label.length > 0) {
     for (const role of roles) {
@@ -50,18 +85,12 @@ export function resolveRoute(description, config) {
         return {
           provider: role.provider,
           model: role.model,
-          reasoningEffort: role.reasoningEffort ?? config.reasoningEffort,
-          sandbox: role.sandbox ?? config.sandbox,
+          reasoningEffort: role.reasoningEffort ?? fallback.reasoningEffort,
+          sandbox: role.sandbox ?? fallback.sandbox,
           matched: true,
         }
       }
     }
   }
-  return {
-    provider: config.provider,
-    model: config.model,
-    reasoningEffort: config.reasoningEffort,
-    sandbox: config.sandbox,
-    matched: false,
-  }
+  return { ...fallback, matched: false }
 }

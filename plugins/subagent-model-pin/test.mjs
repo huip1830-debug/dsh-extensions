@@ -7,6 +7,10 @@
 //   - `agent/created` + per-agent `agent/request` (waterfall returning the route)
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createVolatile, updateVolatile } from '@deepseek-ai/cosmokit'
 
 import * as plugin from './plugin.mjs'
 
@@ -18,6 +22,35 @@ const PARENT_ROUTE = { provider: 'deepseek-official', model: 'deepseek-flash' }
  * @param overrides - extra plugin config merged over the pin defaults.
  */
 function createHarness(overrides = {}) {
+  return createHarnessWith({
+    provider: PIN.provider,
+    model: PIN.model,
+    reasoningEffort: PIN.effort,
+    ...overrides,
+  })
+}
+
+/**
+ * Build a harness whose config comes from the real schemastery `Config` schema,
+ * so volatile fields arrive as the `{ get() }` references cordis would supply.
+ * @param overrides - raw config passed through `plugin.Config`.
+ * @returns the harness plus the validated `config` (for `updateVolatile`).
+ */
+function createSchemaHarness(overrides = {}) {
+  const config = plugin.Config({
+    provider: PIN.provider,
+    model: PIN.model,
+    reasoningEffort: PIN.effort,
+    ...overrides,
+  })
+  return { config, ...createHarnessWith(config) }
+}
+
+/**
+ * Build a fake host context around the plugin from a ready-made config.
+ * @param config - the exact config object handed to `plugin.apply`.
+ */
+function createHarnessWith(config) {
   const rootEvents = new Map()
   const sessions = new Map()
 
@@ -33,12 +66,7 @@ function createHarness(overrides = {}) {
     },
   }
 
-  plugin.apply(ctx, {
-    provider: PIN.provider,
-    model: PIN.model,
-    reasoningEffort: PIN.effort,
-    ...overrides,
-  })
+  plugin.apply(ctx, config)
 
   const session = ({ events = [], parentRoute } = {}) => ({
     snapshotEvents: () => events,
@@ -303,5 +331,89 @@ test('sandbox is not re-appended when the child already sits in that mode', asyn
 test('unknown sandbox modes fail at load', () => {
   assert.throws(() => createHarness({ roles: [{ ...SURVEY_ROLE, sandbox: 'nope' }] }), /sandbox/)
   assert.throws(() => createHarness({ sandbox: 'nope' }), /sandbox/)
+})
+
+// --- volatile fields (the Plugins-page config card) -------------------------
+
+const GUI_ROUTE = { provider: 'deepseek-official', model: 'deepseek-flash', effort: 'low' }
+
+test('a volatile route swap takes effect on the next delegation without re-activation', async () => {
+  const { config, execute } = createSchemaHarness()
+
+  const before = await execute('subagent', { description: 'plain', prompt: 'p' })
+  assert.equal(before.provider, PIN.provider)
+  assert.equal(before.model, PIN.model)
+
+  // What the Host does when the settings document changes: swap the volatile
+  // references in place, keeping the same config object and plugin instance.
+  updateVolatile(config.provider, createVolatile(GUI_ROUTE.provider))
+  updateVolatile(config.model, createVolatile(GUI_ROUTE.model))
+  updateVolatile(config.reasoningEffort, createVolatile(GUI_ROUTE.effort))
+
+  const after = await execute('subagent', { description: 'plain again', prompt: 'p' })
+  assert.equal(after.provider, GUI_ROUTE.provider)
+  assert.equal(after.model, GUI_ROUTE.model)
+  assert.equal(after.reasoning_effort, GUI_ROUTE.effort)
+})
+
+test('resetting a volatile field back to the YAML value restores the old route', async () => {
+  const { config, execute } = createSchemaHarness()
+  updateVolatile(config.provider, createVolatile(GUI_ROUTE.provider))
+  updateVolatile(config.model, createVolatile(GUI_ROUTE.model))
+  updateVolatile(config.provider, createVolatile(PIN.provider))
+  updateVolatile(config.model, createVolatile(PIN.model))
+
+  const args = await execute('subagent', { description: 'plain', prompt: 'p' })
+  assert.equal(args.provider, PIN.provider)
+  assert.equal(args.model, PIN.model)
+})
+
+test("an empty volatile effort means 'no pinned effort' again", async () => {
+  const { config, execute } = createSchemaHarness()
+  updateVolatile(config.reasoningEffort, createVolatile(''))
+
+  const args = await execute('subagent', { description: 'plain', prompt: 'p' })
+  assert.equal(args.provider, PIN.provider)
+  assert.equal('reasoning_effort' in args, false)
+})
+
+test('a role route still beats the volatile default route', async () => {
+  const { config, execute } = createSchemaHarness({ roles: [SURVEY_ROLE] })
+  updateVolatile(config.provider, createVolatile(GUI_ROUTE.provider))
+  updateVolatile(config.model, createVolatile(GUI_ROUTE.model))
+
+  const survey = await execute('subagent', { description: 'Survey W14', prompt: 'p' })
+  assert.equal(survey.model, SURVEY_ROLE.model)
+  const plain = await execute('subagent', { description: 'Implement W14', prompt: 'p' })
+  assert.equal(plain.provider, GUI_ROUTE.provider)
+})
+
+test('schema-built config still refuses an empty provider/model at apply', () => {
+  assert.throws(() => createSchemaHarness({ provider: '', model: '' }), /provider/)
+})
+
+test('debug toggles live: log writes follow the volatile flag', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'smp-log-'))
+  const logFile = join(dir, 'pin.log')
+  process.env.SUBAGENT_MODEL_PIN_LOG = logFile
+  t.after(() => {
+    delete process.env.SUBAGENT_MODEL_PIN_LOG
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const { config, execute } = createSchemaHarness({ debug: false })
+  await execute('subagent', { description: 'quiet', prompt: 'p' })
+  assert.throws(() => readFileSync(logFile), /ENOENT/)
+
+  updateVolatile(config.debug, createVolatile(true))
+  await execute('subagent', { description: 'loud', prompt: 'p' })
+  const text = readFileSync(logFile, 'utf8')
+  assert.match(text, /inject/)
+  assert.match(text, /loud/)
+
+  updateVolatile(config.debug, createVolatile(false))
+  writeFileSync(logFile, '')
+  await execute('subagent', { description: 'quiet again', prompt: 'p' })
+  assert.equal(readFileSync(logFile, 'utf8'), '')
 })
 

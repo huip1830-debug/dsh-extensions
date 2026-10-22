@@ -2,5 +2,33 @@
   "meta": {
     "title": "Subagent Delegation Policy",
     "description": "Default subagents to a low-cost route, with per-role route and sandbox tiers; an explicit provider/model on the delegation call still wins."
+  },
+  "card": {
+    "summaryFallback": "no route configured",
+    "overriddenBadge": "UI override",
+    "notice": "Saving writes immediately; the debug switch applies instantly. Pin-route changes affect later delegations but need a fresh session, and the new route must sit in the \"allow agents to pick subagent models\" allowlist.",
+    "providerLabel": "Provider",
+    "modelLabel": "Model",
+    "effortLabel": "Reasoning effort",
+    "effortDefault": "Follow the model default",
+    "effortUnsupported": "This model has no effort levels",
+    "debugLabel": "Debug log",
+    "debugHelp": "Writes %TEMP%\\subagent-model-pin.log (override with the SUBAGENT_MODEL_PIN_LOG env var)",
+    "save": "Save",
+    "saving": "Saving…",
+    "discard": "Discard",
+    "reset": "Restore YAML config",
+    "resetting": "Restoring…",
+    "resetConfirm": "Clear every UI override of provider / model / effort / debug and return to the values in cordis.patch.yml?",
+    "conflict": "The config changed elsewhere; review and retry.",
+    "failed": "Save failed; refreshed to the latest values, please retry.",
+    "catalogLoading": "Loading the model catalog…",
+    "catalogError": "Failed to load the model catalog",
+    "catalogPartial": "Some providers failed to load; options may be incomplete.",
+    "retry": "Retry",
+    "notInCatalog": " (not in the current catalog)",
+    "statusLoading": "Loading config…",
+    "statusUnavailable": "The Host serves no config namespace for this plugin — upgrade the plugin first.",
+    "readOnly": "The config is read-only right now."
   }
 }
