@@ -144,131 +144,164 @@ export function apply(ctx, rawConfig) {
     }))
   }
 
-  registerNudge(ctx, config.nudge)
-  registerCheckpoint(ctx, config.checkpoint)
+  registerReminders(ctx, config.nudge, config.checkpoint)
 }
 
 /**
- * Remind a delegating agent that closed a multi-write turn without dispatching.
+ * Run both reminders from one turn-stopping handler per agent.
+ *
+ * The completion checkpoint is judged first and a delivered checkpoint owns the
+ * turn, so a nudge never shares a turn with it — no dependence on subscription
+ * order, and only one `steer` per turn. Turn state is keyed by parent id;
+ * `lastCheckpointTurn` is recorded for the later one-turn grace rule.
  * @param ctx - the plugin context.
  * @param nudge - the resolved `nudge` section.
- */
-function registerNudge(ctx, nudge) {
-  if (!nudge.enabled) return
-
-  ctx.on('agent/created', ({ agent }) => {
-    // Children cannot delegate, and their writes are already covered by the
-    // parent's own turn — nudging them would only add noise.
-    if (agent?.session?.header?.origin === 'subagent') return
-    if (typeof agent?.ctx?.on !== 'function') return
-
-    /** Turns already reminded, so the extra step cannot re-trigger the nudge. */
-    const nudgedTurns = new Set()
-
-    const observe = ({ agent: scopedAgent, turn } = {}) => {
-      try {
-        const target = scopedAgent ?? agent
-        if (!Number.isInteger(turn) || nudgedTurns.has(turn)) return
-        const events = target?.session?.snapshotEvents?.() ?? []
-        const summary = summarizeTurn(events, turn, nudge)
-        if (!shouldNudge(summary, nudge)) return
-        nudgedTurns.add(turn)
-        const withTurn = { ...summary, turn }
-        // A turn that already said why it skipped the dispatch gets no message:
-        // repeating it back is pure noise. The decision is still logged.
-        if (justifiedInTurn(events, turn, nudge.justifiedPatterns)) {
-          recordNudge(nudge, target, withTurn, 'justified')
-          return
-        }
-        steerText(target, renderNudge(nudge.text, withTurn))
-        recordNudge(nudge, target, withTurn)
-      } catch {
-        // Observation is advisory: never fail a turn on it.
-      }
-    }
-
-    const subscribe = () => agent.ctx.on('agent/turn-stopping', observe)
-    if (typeof agent.ctx.effect === 'function') agent.ctx.effect(subscribe)
-    else subscribe()
-  })
-}
-
-/**
- * Remind the parent when a delegated child reports success.
- *
- * Delivery is deferred to the parent's next `agent/turn-stopping`. Settlement
- * happens right after the child reports, before the parent has read the diff,
- * so judging at settle time always reads "not handled yet". The deferred
- * judgment sees the parent's whole turn instead.
- * @param ctx - the plugin context.
  * @param checkpoint - the resolved `checkpoint` section.
  */
-function registerCheckpoint(ctx, checkpoint) {
-  if (!checkpoint.enabled) return
+function registerReminders(ctx, nudge, checkpoint) {
+  if (!nudge.enabled && !checkpoint.enabled) return
 
   /** childId → `{ parentId, label, agent }` for settlement lookup. */
   const children = new Map()
   const reported = new Set()
   /** parentId → Map<childId, `{ label, agent }`> awaiting the parent's next turn-stopping. */
   const pending = new Map()
-  /** Parent ids whose `agent/turn-stopping` subscription is already installed. */
+  /** Agent ids whose single `agent/turn-stopping` handler is already installed. */
   const watched = new Set()
 
-  /** Apply the skip rules (read-only child, parent already acted). */
-  const needsCheckpoint = (parent, childId, record) => {
-    // A child that never attempted a write is a read-only survey: there is no
-    // diff to read and no command to re-run, so the checkpoint would be noise.
-    if (ranReadOnly(record.agent)) return false
-    if (parentAlreadyHandled(parent, record.agent, childId)) return false
-    return true
-  }
+  const lastDeliveredTurn = new Map()
+  const lastCheckpointTurn = new Map()
+  const lastNudgedTurn = new Map()
 
   const render = (record, childId) => checkpoint.text
     .replaceAll('{childId}', childId)
     .replaceAll('{label}', record.label)
 
   /**
-   * Drain one parent's pending checkpoints. The subscription is installed once
-   * per parent and reused across turns; an empty queue is a no-op.
+   * Classify one pending checkpoint, applying the skip rules.
+   * @param parent - the parent agent.
+   * @param childId - the settled child id.
+   * @param record - `{ label, agent }` for that child.
+   * @returns `'delivered' | 'read-only' | 'handled'`.
+   */
+  const classify = (parent, childId, record) => {
+    // A child that never attempted a write is a read-only survey: there is no
+    // diff to read and no command to re-run, so the checkpoint would be noise.
+    if (ranReadOnly(record.agent)) return 'read-only'
+    if (parentAlreadyHandled(parent, record.agent, childId)) return 'handled'
+    return 'delivered'
+  }
+
+  /**
+   * Drain one parent's pending checkpoints and report the verdict for the turn.
    * @param parentId - the parent session id.
    * @param scopedAgent - the agent carried by the hook event, when present.
+   * @returns `{ delivered, handled, readOnly, empty }`.
    */
   const drain = (parentId, scopedAgent) => {
+    const result = { delivered: false, handled: false, readOnly: false, empty: true }
     const queue = pending.get(parentId)
-    if (queue === undefined) return
+    if (queue === undefined) return result
+    result.empty = false
     const parent = scopedAgent ?? ctx.agents?.get?.(parentId)
     const entries = [...queue]
     pending.delete(parentId)
-    if (parent === undefined) return
+    if (parent === undefined) return result
     for (const [childId, record] of entries) {
       try {
-        if (needsCheckpoint(parent, childId, record)) steerText(parent, render(record, childId))
+        const verdict = classify(parent, childId, record)
+        if (verdict === 'read-only') {
+          result.readOnly = true
+          continue
+        }
+        if (verdict === 'handled') {
+          result.handled = true
+          continue
+        }
+        steerText(parent, render(record, childId))
+        result.delivered = true
       } catch {
         // Observation is advisory: never fail a turn on it.
       }
     }
+    return result
   }
 
-  /** Install the parent's turn-stopping hook at most once. */
-  const watch = (parent, parentId) => {
-    if (watched.has(parentId)) return
-    watched.add(parentId)
-    const subscribe = () => parent.ctx.on('agent/turn-stopping', ({ agent } = {}) => drain(parentId, agent))
-    if (typeof parent.ctx.effect === 'function') parent.ctx.effect(subscribe)
+  /**
+   * Remind a root agent that closed a multi-write turn without dispatching.
+   * @param target - the agent whose turn is closing.
+   * @param parentId - that agent's id.
+   * @param turn - the turn being closed.
+   * @param isRootAgent - whether the agent may be nudged at all.
+   */
+  const evaluateNudge = (target, parentId, turn, isRootAgent) => {
+    // Children cannot delegate, and their writes are already covered by the
+    // parent's own turn — nudging them would only add noise.
+    if (!nudge.enabled || !isRootAgent) return
+    if (!Number.isInteger(turn) || lastNudgedTurn.get(parentId) === turn) return
+    if (lastDeliveredTurn.get(parentId) === turn) return
+    const events = target?.session?.snapshotEvents?.() ?? []
+    const summary = summarizeTurn(events, turn, nudge)
+    if (!shouldNudge(summary, nudge)) return
+    lastNudgedTurn.set(parentId, turn)
+    const withTurn = { ...summary, turn }
+    // A turn that already said why it skipped the dispatch gets no message:
+    // repeating it back is pure noise. The decision is still logged.
+    if (justifiedInTurn(events, turn, nudge.justifiedPatterns)) {
+      recordNudge(nudge, target, withTurn, 'justified')
+      return
+    }
+    steerText(target, renderNudge(nudge.text, withTurn))
+    recordNudge(nudge, target, withTurn)
+    lastDeliveredTurn.set(parentId, turn)
+  }
+
+  /** Install the single turn-stopping handler for one agent, at most once. */
+  const attach = (agent) => {
+    if (typeof agent?.ctx?.on !== 'function') return
+    if (agent.id === undefined || watched.has(agent.id)) return
+    watched.add(agent.id)
+    const isRootAgent = agent?.session?.header?.origin !== 'subagent'
+
+    const handle = ({ agent: scopedAgent, turn } = {}) => {
+      try {
+        const target = scopedAgent ?? agent
+        const parentId = target?.id ?? agent.id
+        const verdict = checkpoint.enabled
+          ? drain(parentId, target)
+          : { delivered: false, handled: false, readOnly: false, empty: true }
+        if (verdict.delivered) {
+          if (Number.isInteger(turn)) {
+            lastDeliveredTurn.set(parentId, turn)
+            lastCheckpointTurn.set(parentId, turn)
+          }
+          return
+        }
+        evaluateNudge(target, parentId, turn, isRootAgent)
+      } catch {
+        // Observation is advisory: never fail a turn on it.
+      }
+    }
+
+    const subscribe = () => agent.ctx.on('agent/turn-stopping', handle)
+    if (typeof agent.ctx.effect === 'function') agent.ctx.effect(subscribe)
     else subscribe()
   }
 
   ctx.on('agent/created', ({ agent }) => {
     const header = agent?.session?.header
-    if (header?.origin !== 'subagent') return
-    children.set(agent.id, {
-      parentId: header.parentSession,
-      label: readLabel(agent) ?? '未命名',
-      agent,
-    })
+    if (header?.origin === 'subagent') {
+      children.set(agent.id, {
+        parentId: header.parentSession,
+        label: readLabel(agent) ?? '未命名',
+        agent,
+      })
+    }
+    attach(agent)
   })
 
   ctx.on('subagent/end', (info) => {
+    if (!checkpoint.enabled) return
     const childId = info?.childId ?? info?.id
     const record = childId === undefined ? undefined : children.get(childId)
     if (record === undefined || reported.has(childId)) return
@@ -289,13 +322,13 @@ function registerCheckpoint(ctx, checkpoint) {
         pending.set(record.parentId, queue)
       }
       queue.set(childId, { label: record.label, agent: record.agent })
-      watch(parent, record.parentId)
+      attach(parent)
       return
     }
 
     // Fallback: a parent with no hook scope (e.g. a nested subagent as parent).
     // Judge and deliver at settle time, as 0.3.3 did.
-    if (!needsCheckpoint(parent, childId, record)) return
+    if (classify(parent, childId, record) !== 'delivered') return
     if (typeof parent.followup === 'function') parent.followup(userMessage(render(record, childId)))
   })
 }

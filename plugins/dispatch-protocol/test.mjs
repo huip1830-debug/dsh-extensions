@@ -688,6 +688,68 @@ test('renderNudge fills the placeholders and truncates a long file list', () => 
 })
 
 // ---------------------------------------------------------------------------
+// Checkpoint × nudge interaction (one coordinator, checkpoint first)
+
+test('a delivered checkpoint owns the turn so the same turn is not nudged', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('parent-20', [
+    call(1, 'write', { file_path: 'a.ts' }),
+    call(1, 'write', { file_path: 'b.ts' }),
+  ])
+  h.created(parent)
+  h.created(h.child('child-20', 'parent-20', '实现 Task 20', [call(1, 'write', { file_path: 'c.ts' })]))
+  h.ended({ childId: 'child-20', stopReason: 'completed' })
+
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 1, 'only the checkpoint message is delivered')
+  assert.match(parent.messages[0].text, /child-20/)
+  assert.match(parent.messages[0].text, /已完成/)
+  assert.doesNotMatch(parent.messages[0].text, /改了 2 个文件/)
+  assert.doesNotMatch(parent.messages[0].text, /派发 0 次/)
+})
+
+test('a skipped read-only checkpoint leaves the same turn free to nudge', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('parent-21', [
+    call(1, 'write', { file_path: 'a.ts' }),
+    call(1, 'write', { file_path: 'b.ts' }),
+  ])
+  h.created(parent)
+  h.created(h.child('child-21', 'parent-21', '勘察 Task 21', [
+    call(1, 'read', { file_path: 'a.ts' }),
+    call(1, 'grep', { pattern: 'checkpoint' }),
+  ]))
+  h.ended({ childId: 'child-21', stopReason: 'completed' })
+
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 1, 'the read-only checkpoint is skipped, the nudge fires')
+  assert.match(parent.messages[0].text, /改了 2 个文件/)
+  assert.match(parent.messages[0].text, /派发 0 次/)
+  assert.doesNotMatch(parent.messages[0].text, /child-21/)
+})
+
+test('a parent with no pending checkpoint is still nudged', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('parent-22', [
+    call(1, 'write', { file_path: 'a.ts' }),
+    call(1, 'write', { file_path: 'b.ts' }),
+  ])
+  h.created(parent)
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 1, 'the coordinator keeps the plain nudge working')
+  assert.match(parent.messages[0].text, /改了 2 个文件/)
+})
+
+// ---------------------------------------------------------------------------
 
 /** One committed `tool/call` record, shaped like the session log stores it. */
 function call(turn, name, args, id) {
