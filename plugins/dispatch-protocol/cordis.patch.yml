@@ -11,10 +11,13 @@
         # rules: []           # override the five defaults; non-empty string array
         # footer: ''          # override the closing paragraph (cost + exemption); '' drops it
         checkpoint:
-          enabled: true       # remind the parent when a child completes
+          enabled: true       # remind the parent when a child completes (judged at the parent's next turn-stopping)
           # text: ''          # overrides DEFAULT_CHECKPOINT; supports {childId} and {label}
         nudge:
-          enabled: true       # remind a turn that wrote files without delegating
+          enabled: true       # remind a turn that wrote files without delegating (silent on acceptance turns and the turn after a delivered checkpoint)
           threshold: 2        # >= this many distinct files (not calls) and 0 delegations
           # text: ''          # overrides DEFAULT_NUDGE_TEXT; supports {fileCount} {writes} {files} {turn}
-          # log: false        # default: %TEMP%/dispatch-protocol-nudge.jsonl
+          # writeTools: ['write', 'edit']        # tools counted as a file change (default write, edit)
+          # delegationTools: ['subagent']        # tools counted as a dispatch (default subagent, subagent_fork, workflow)
+          # justifiedPatterns: ['豁免']          # turn prose containing any of these silences the nudge
+          # log: false        # shared decision log (checkpoint + nudge); default %TEMP%/dispatch-protocol-decisions.jsonl, false disables both

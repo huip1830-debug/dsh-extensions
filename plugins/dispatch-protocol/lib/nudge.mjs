@@ -51,6 +51,11 @@ const MAX_LISTED_FILES = 5
 
 /**
  * Validate the `nudge` config section.
+ *
+ * `log` is the shared decision log for both mechanisms (checkpoint and nudge),
+ * keeping the historical `nudge.log` key: `false` turns all decision logging
+ * off, a non-empty string overrides the default `%TEMP%` path. The old
+ * `dispatch-protocol-nudge.jsonl` is no longer written.
  * @param source - the raw `nudge` object from the profile patch layer.
  * @returns the resolved section, with `log` already expanded to a path.
  */
@@ -89,7 +94,7 @@ export function resolveNudge(source = {}) {
     ? false
     : (typeof config.log === 'string' && config.log.trim() !== ''
       ? config.log
-      : join(tmpdir(), 'dispatch-protocol-nudge.jsonl'))
+      : join(tmpdir(), 'dispatch-protocol-decisions.jsonl'))
   if (log !== false && typeof log !== 'string') {
     throw new Error('dispatch-protocol: nudge.log must be a path or false')
   }

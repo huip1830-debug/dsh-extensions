@@ -76,11 +76,38 @@
 - **计数来源**：该回合已提交的 `tool/call` 事件。事件自带 `turn`，所以不需要任何跨回合状态，恢复的会话算出的数字与实时一致。
 - **失败不计数**：写调用的结局要看它的 `tool/result`——`isError === true` 的写入没有落盘，不计入 `writes`/`files`；没有 `callId` 或找不到结果的调用照旧计数（回合被打断时不能把写入抹掉）。
 - **触发条件**：本回合**去重文件数** ≥ `nudge.threshold`（默认 2；同一文件多次编辑只算 1）**且**派发调用（`subagent`/`subagent_fork`/`workflow`）为 0。
-- **动作**：给主控发一条 `{fileCount}`/`{writes}`/`{files}`/`{turn}` 渲染的提醒（形如「改了 4 个文件（9 次写入）」），并往 `nudge.log`（默认 `%TEMP%\dispatch-protocol-nudge.jsonl`，一行一条 JSON）记一笔账。
-- **已解释则静默（0.3.6 起）**：本回合的 `assistant/message` 正文里若已出现 `nudge.justifiedPatterns` 中的任一词（默认 `豁免` / `不派发` / `未派发` / `无需派发` / `不需要派发` / `直接做` / `一条命令验完` / `一处改动的` / `镜像面`），**不发消息**，只往日志记一行并带 `"suppressed":"justified"`。多文件写入是常态，模型常常在同一回合已经写清「为什么自己改」，再把问题复述一遍只会让会话窗口多一条噪音——实测 `session-a2e9f600` 的 turn 3：主控正文已写「4 个文件是同一处文案的 4 个镜像面…属于豁免」，提醒仍照样发出，用户只得到一条重复消息。判定只看 `assistant/message`（模型说的话），不看 `tool/result` 文本；只认本回合，别的回合解释过不算。
+- **动作**：给主控发一条 `{fileCount}`/`{writes}`/`{files}`/`{turn}` 渲染的提醒（形如「改了 4 个文件（9 次写入）」），并往决定日志（`nudge.log`，默认 `%TEMP%\dispatch-protocol-decisions.jsonl`，一行一条 JSON）记一笔 `"kind":"nudge"` 的决定。
+- **已解释则静默（0.3.6 起）**：本回合的 `assistant/message` 正文里若已出现 `nudge.justifiedPatterns` 中的任一词（默认 `豁免` / `不派发` / `未派发` / `无需派发` / `不需要派发` / `直接做` / `一条命令验完` / `一处改动的` / `镜像面`），**不发消息**，只往日志记一行 `"decision":"suppressed","reason":"justified"`。多文件写入是常态，模型常常在同一回合已经写清「为什么自己改」，再把问题复述一遍只会让会话窗口多一条噪音——实测 `session-a2e9f600` 的 turn 3：主控正文已写「4 个文件是同一处文案的 4 个镜像面…属于豁免」，提醒仍照样发出，用户只得到一条重复消息。判定只看 `assistant/message`（模型说的话），不看 `tool/result` 文本；只认本回合，别的回合解释过不算。
 - **不适用于子代理**：子代理本身不能再派发，其写操作已经记在父回合里。
 
 只数调用名，不解析副作用：`pwsh` 里 `Set-Content` 之类的写入落在口径之外（不算）；而 `write`/`edit` 按**结果**算——成功才计数，被策略拒绝或抛错的调用（`tool/result.isError === true`）不计。计数按去重路径：同一文件改多次只算 1 个文件。
+
+## 提醒让位（0.3.10 起）
+
+两个提醒由同一个 `agent/turn-stopping` 处理器按固定顺序判定：**先 checkpoint，后 nudge**，不依赖订阅顺序。同一回合同不同时发 checkpoint 与 nudge；nudge 每回合至多一条，checkpoint 每个未验收子代理一条。
+
+| 优先级 | 提醒 | 触发 | 让位/静默 |
+|---|---|---|---|
+| 1 | 完成检查点 | 子代理 `completed` + 父代理未验收 | 只读子代理；父代理已按汇报动过手 |
+| 2 | 漏派发提示 | ≥2 去重文件 + 0 派发 + 正文未解释 | 本回合是验收回合；上一回合（turn-1）刚投递过检查点（一回合宽限） |
+
+- **checkpoint 先占用回合**：本回合投递了 checkpoint 就不再评估 nudge。
+- **验收回合静默**：checkpoint 判 `handled`（父代理已按汇报动过手）时，本回合 nudge 不发——这回合本来就在验收，不是漏派。
+- **一回合宽限**：上一回合投递过 checkpoint，本回合 nudge 静默。已知代价：刚验收完确实漏派会少提醒一次，方向是「宁可少打扰」。
+- **checkpoint 自身被跳过**（只读/已验收）时，nudge 仍按自身条件判定；`read-only` 不占用回合。
+
+## 决定日志（0.3.10 起）
+
+checkpoint 与 nudge 的每次判定都写一行，被抑制的也写——否则日志分不清「没触发」和「触发后被静默」。默认 `%TEMP%\dispatch-protocol-decisions.jsonl`，`nudge.log` 键名保留：`false` 两个机制都不记，字符串则覆盖路径（checkpoint 与 nudge 写同一文件）。
+
+```json
+{"time":"...","session":"...","turn":36,"kind":"checkpoint|nudge","decision":"delivered|suppressed","reason":"justified|handled|read-only|grace","writes":3,"files":[...],"delegations":0}
+```
+
+- 公共字段：`time`、`session`、`turn`、`kind`、`decision`；`reason` 只在 `suppressed` 时出现。
+- checkpoint 行额外带 `childId`、`label`（每个 pending 子代理一行）；没有回合可用（无 hook 作用域的回退 `followup`）时 `turn` 为 `null`。
+- nudge 行额外带 `writes`、`files`、`delegations`。
+- **迁移**：旧 `%TEMP%\dispatch-protocol-nudge.jsonl` 不再写入，可以直接删除。
 
 ## 配置
 
@@ -92,13 +119,13 @@
 | `footer` | 收口段（成本与豁免） | 追加在规则之后；`''` 关闭该段 |
 | `checkpoint.enabled` | `true` | 子代理完成后是否给父代理发检查点 |
 | `checkpoint.text` | 内置模板 | 覆盖检查点文案，支持 `{childId}` / `{label}` |
-| `nudge.enabled` | `true` | 是否检查「漏派发」 |
+| `nudge.enabled` | `true` | 是否检查「漏派发」（验收回合与宽限回合仍会静默） |
 | `nudge.threshold` | `2` | 本回合去重文件数 ≥ 该值且 0 派发时提醒（正整数） |
 | `nudge.writeTools` | `['write','edit']` | 计入「改动」的工具名 |
 | `nudge.delegationTools` | `['subagent','subagent_fork','workflow']` | 计入「已派发」的工具名 |
 | `nudge.justifiedPatterns` | 见上（0.3.8 起 9 条） | 本回合正文命中任一即静默（子串匹配，NFKC 归一） |
 | `nudge.text` | 内置模板 | 覆盖提醒文案，支持 `{fileCount}` / `{writes}` / `{files}` / `{turn}` |
-| `nudge.log` | `%TEMP%\dispatch-protocol-nudge.jsonl` | 记账文件路径；`false` 关闭记账 |
+| `nudge.log` | `%TEMP%\dispatch-protocol-decisions.jsonl` | 决定日志（checkpoint 与 nudge 的 delivered/suppressed 各一行）；`false` 两个机制都不记 |
 
 非法配置（`order` 非有限数字、`rules` 为空/非数组、`footer`/`checkpoint.text` 非字符串、`nudge.threshold` 非正整数、工具名单为空数组、`nudge.justifiedPatterns` 为空数组或含空白串、`nudge.log` 既非路径也非 `false`）在插件加载时直接报错，不会静默降级。
 
@@ -119,11 +146,11 @@ dsh --profile probe headless "不要调用任何工具，只回答：你的系�
 
 预期：模型复述出「先勘察」「执行类派发」「验收要复跑」「提交权」「并行只读」五条。
 
-漏派发提示的真机口径：一个回合内连续改 2 个以上**去重文件**（同一文件多次编辑只算 1）且不派发、正文也没写不派发理由时，收尾时会多出一段以 `[dispatch-protocol]` 开头的提醒；`%TEMP%\dispatch-protocol-nudge.jsonl` 同时多一行 `{session, turn, writes, files, delegations}`；被静默的那次记的是同一行加 `"suppressed":"justified"`。
+漏派发提示的真机口径：一个回合内连续改 2 个以上**去重文件**（同一文件多次编辑只算 1）且不派发、正文也没写不派发理由时，收尾时会多出一段以 `[dispatch-protocol]` 开头的提醒；`%TEMP%\dispatch-protocol-decisions.jsonl` 同时多一行 `{"kind":"nudge","decision":"delivered","session":…,"turn":…,"writes":…,"files":[…]}`；被静默的那次是同一行改为 `"decision":"suppressed"` 并带 `reason`（`justified`/`handled`/`grace`）。
 
 **0.3.6 真机证据（2026-10-22，desktop 0.3.6）**：
 
-- 抑制路径：一个回合改 3 个文件、0 派发、正文含「不派发」→ 日志写 `"suppressed":"justified"`，会话 0 条提醒。对照同文件更早的 `turn:6`（0.3.5）：0 派发、15 次写入、**无** `suppressed` 字段，随后照常发出提醒。两行的差异就是 0.3.6 的全部作用。
+- 抑制路径：一个回合改 3 个文件、0 派发、正文含「不派发」→ 日志写 `"decision":"suppressed","reason":"justified"`（0.3.10 前的旧格式为 `"suppressed":"justified"`），会话 0 条提醒。对照同文件更早的 `turn:6`（0.3.5）：0 派发、15 次写入、**无**抑制字段，随后照常发出提醒。两行的差异就是 0.3.6 的全部作用。
 - 只读并行：同一条消息发出两个只读子代理，`childCreatedAt` 相差 1 ms、运行区间重叠 16.7 s（19.1 s 与 16.8 s 两个区间），两个都没有触发完成检查点。并行由模型在同一 assistant 消息里发两个 `subagent` 调用驱动，宿主不自动派生。
 - **口径提醒**：回合里只要有派发（`subagent`/`subagent_fork`/`workflow`），`shouldNudge` 直接为假，**既不进抑制判定也不写日志**——「没看到提醒」在这个前提下不能当作抑制生效的证据，这是真机上踩过一次的假阳性。
 
@@ -137,7 +164,7 @@ dsh --profile probe headless "不要调用任何工具，只回答：你的系�
 - **检查点只在未验收时花一步**：0.3.4 起 settle 只登记，回合收尾判定已验收就零消息、零额外步骤（比 0.3.2/0.3.3 的 settle 即发更省）；未验收才 `steer` 一条，花一步，与 nudge 同价。父代理没有 hook 作用域时仍回退为 settle 时 `followup`，行为同 0.3.3。
 - **触发看文件数、判定看调用名**：是否提醒按去重路径计（同一文件多次编辑算 1 个）；「哪些调用算改动」仍按工具名判断——`pwsh` 里的 `Set-Content`/`dotnet format` 等副作用不计；`write`/`edit` 以 `tool/result.isError` 为准，失败的不计（无结果可查时照算）。
 - **检查点的只读判定按调用名、尝试即算**：`write`/`edit` 只要出现在子代理的 `tool/call` 里就算执行类，**不解析 `tool/result`**——失败或被拒绝的写入也不豁免检查点。这与 nudge「成功才计数」的口径不同，是有意的保守方向：宁可多提醒一次，也不要漏掉真正的执行类子代理。
-- **记账在 TEMP 里**：`nudge.log` 默认落在系统临时目录，不随仓库版本化；要长期留档就把路径指到固定位置（或 `false` 关掉）。
+- **记账在 TEMP 里**：`nudge.log` 默认落在系统临时目录（`dispatch-protocol-decisions.jsonl`，checkpoint 与 nudge 共用），不随仓库版本化；要长期留档就把路径指到固定位置（或 `false` 全关）。旧 `dispatch-protocol-nudge.jsonl` 已不再写入。
 - **profile 插件不支持热加载**：装完必须重启 DSH，新会话才生效。
 - **update 失败会留下半残目录，且可能卡成 delete-pending**：`dsh plugin --profile desktop update` 先把 `node_modules/<pkg>` 整块 rename 掉；任一步失败就可能只剩一半文件，而失败时被打开的子目录（实测是 `lib/`）会进入 delete-pending —— 之后**连改父目录、删除、读 ACL 都 Access denied**，`diagnose-windows-sandbox-acl` 报 `VERDICT=UNREADABLE`、Restart Manager 返回 `ACCESS_DENIED`，只有**重启 Windows** 能清。2026-10-22 踩过一次（`AUDIT-2026-10-22.md` 第七节）。
   - 预防：**完全退出 DSH → update → 启动**；确认没有遗留的 `robocopy`/`pnpm` 子进程再跑（那次真正的持有者是一条被我挂住的 robocopy）。

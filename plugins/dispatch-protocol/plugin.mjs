@@ -15,6 +15,12 @@
 //      skip the dispatch?" is an observation, not an inference — counted from
 //      the committed `tool/call` log of that turn.
 //
+// The nudge yields to the checkpoint: a turn that delivered a checkpoint, or
+// that turned out to be an acceptance turn for a child report, or that directly
+// follows a delivered checkpoint (one-turn grace), is left alone. Every decision
+// — delivered or silenced — is appended to one shared decision log, so
+// "never fired" and "fired and was silenced" stay distinguishable.
+//
 // Why a plugin instead of AGENTS.md: AGENTS.md is shared with Codex, OpenCode
 // and Claude Code, where this DSH-specific delegation discipline does not
 // apply.
@@ -106,27 +112,32 @@ function steerText(agent, text) {
 }
 
 /**
- * Append one accounting line for a nudge decision.
+ * Append one accounting line for a reminder decision.
  *
- * Best-effort by design: a full disk or a bad path must never close a turn.
- * @param nudge - the resolved `nudge` section.
- * @param agent - the agent whose turn closed.
- * @param summary - `{ turn, writes, files, delegations }`.
- * @param suppressed - why no message was delivered, when it was suppressed.
+ * One line per decision, silenced ones included: the log is the only place that
+ * separates "never fired" from "fired and was silenced". Best-effort by design —
+ * a full disk or a bad path must never close a turn.
+ * @param log - the resolved decision-log path, or false when logging is off.
+ * @param agent - the agent the decision belongs to.
+ * @param payload - `{ turn, kind, decision, reason?, childId?, label?, writes?, files?, delegations? }`.
  */
-function recordNudge(nudge, agent, summary, suppressed) {
-  if (nudge.log === false) return
+function recordDecision(log, agent, payload) {
+  if (log === false) return
   try {
     const line = JSON.stringify({
       time: new Date().toISOString(),
       session: agent?.session?.id ?? agent?.id ?? null,
-      turn: summary.turn,
-      writes: summary.writes,
-      files: summary.files,
-      delegations: summary.delegations,
-      ...(suppressed === undefined ? {} : { suppressed }),
+      turn: payload.turn ?? null,
+      kind: payload.kind,
+      decision: payload.decision,
+      ...(payload.reason === undefined ? {} : { reason: payload.reason }),
+      ...(payload.childId === undefined ? {} : { childId: payload.childId }),
+      ...(payload.label === undefined ? {} : { label: payload.label }),
+      ...(payload.writes === undefined ? {} : { writes: payload.writes }),
+      ...(payload.files === undefined ? {} : { files: payload.files }),
+      ...(payload.delegations === undefined ? {} : { delegations: payload.delegations }),
     })
-    appendFileSync(nudge.log, `${line}\n`)
+    appendFileSync(log, `${line}\n`)
   } catch {
     // accounting must never break the host
   }
@@ -169,6 +180,10 @@ function registerReminders(ctx, nudge, checkpoint) {
   /** Agent ids whose single `agent/turn-stopping` handler is already installed. */
   const watched = new Set()
 
+  // One log for both mechanisms: `nudge.log` is the key (kept for compatibility),
+  // `false` silences checkpoint decisions too.
+  const decisionLog = nudge.log
+
   const lastDeliveredTurn = new Map()
   const lastCheckpointTurn = new Map()
   const lastNudgedTurn = new Map()
@@ -194,11 +209,15 @@ function registerReminders(ctx, nudge, checkpoint) {
 
   /**
    * Drain one parent's pending checkpoints and report the verdict for the turn.
+   *
+   * Every pending child produces exactly one decision line: delivered when
+   * steered, suppressed with `read-only` or `handled` otherwise.
    * @param parentId - the parent session id.
    * @param scopedAgent - the agent carried by the hook event, when present.
+   * @param turn - the turn being closed, for the decision log.
    * @returns `{ delivered, handled, readOnly, empty }`.
    */
-  const drain = (parentId, scopedAgent) => {
+  const drain = (parentId, scopedAgent, turn) => {
     const result = { delivered: false, handled: false, readOnly: false, empty: true }
     const queue = pending.get(parentId)
     if (queue === undefined) return result
@@ -212,14 +231,23 @@ function registerReminders(ctx, nudge, checkpoint) {
         const verdict = classify(parent, childId, record)
         if (verdict === 'read-only') {
           result.readOnly = true
+          recordDecision(decisionLog, parent, {
+            turn, kind: 'checkpoint', decision: 'suppressed', reason: 'read-only', childId, label: record.label,
+          })
           continue
         }
         if (verdict === 'handled') {
           result.handled = true
+          recordDecision(decisionLog, parent, {
+            turn, kind: 'checkpoint', decision: 'suppressed', reason: 'handled', childId, label: record.label,
+          })
           continue
         }
         steerText(parent, render(record, childId))
         result.delivered = true
+        recordDecision(decisionLog, parent, {
+          turn, kind: 'checkpoint', decision: 'delivered', childId, label: record.label,
+        })
       } catch {
         // Observation is advisory: never fail a turn on it.
       }
@@ -229,12 +257,20 @@ function registerReminders(ctx, nudge, checkpoint) {
 
   /**
    * Remind a root agent that closed a multi-write turn without dispatching.
+   *
+   * The nudge yields in this order: a checkpoint already delivered this turn
+   * (handled before the call, so nothing is logged twice), the turn is an
+   * acceptance turn for a child report (`handled`), the previous turn received a
+   * checkpoint (`grace`), or the turn's own prose already explained the skip.
+   * Each of the three logged silences is written only when the nudge condition
+   * itself holds, so a quiet ordinary turn adds no lines.
    * @param target - the agent whose turn is closing.
    * @param parentId - that agent's id.
    * @param turn - the turn being closed.
    * @param isRootAgent - whether the agent may be nudged at all.
+   * @param handled - whether a pending checkpoint judged this an acceptance turn.
    */
-  const evaluateNudge = (target, parentId, turn, isRootAgent) => {
+  const evaluateNudge = (target, parentId, turn, isRootAgent, handled) => {
     // Children cannot delegate, and their writes are already covered by the
     // parent's own turn — nudging them would only add noise.
     if (!nudge.enabled || !isRootAgent) return
@@ -245,14 +281,24 @@ function registerReminders(ctx, nudge, checkpoint) {
     if (!shouldNudge(summary, nudge)) return
     lastNudgedTurn.set(parentId, turn)
     const withTurn = { ...summary, turn }
+    if (handled) {
+      recordDecision(decisionLog, target, { ...withTurn, kind: 'nudge', decision: 'suppressed', reason: 'handled' })
+      return
+    }
+    // Known cost: a real miss right after an acceptance turn goes unreminded.
+    // The direction is deliberate — fewer interruptions over one lost nudge.
+    if (lastCheckpointTurn.get(parentId) === turn - 1) {
+      recordDecision(decisionLog, target, { ...withTurn, kind: 'nudge', decision: 'suppressed', reason: 'grace' })
+      return
+    }
     // A turn that already said why it skipped the dispatch gets no message:
     // repeating it back is pure noise. The decision is still logged.
     if (justifiedInTurn(events, turn, nudge.justifiedPatterns)) {
-      recordNudge(nudge, target, withTurn, 'justified')
+      recordDecision(decisionLog, target, { ...withTurn, kind: 'nudge', decision: 'suppressed', reason: 'justified' })
       return
     }
     steerText(target, renderNudge(nudge.text, withTurn))
-    recordNudge(nudge, target, withTurn)
+    recordDecision(decisionLog, target, { ...withTurn, kind: 'nudge', decision: 'delivered' })
     lastDeliveredTurn.set(parentId, turn)
   }
 
@@ -268,7 +314,7 @@ function registerReminders(ctx, nudge, checkpoint) {
         const target = scopedAgent ?? agent
         const parentId = target?.id ?? agent.id
         const verdict = checkpoint.enabled
-          ? drain(parentId, target)
+          ? drain(parentId, target, turn)
           : { delivered: false, handled: false, readOnly: false, empty: true }
         if (verdict.delivered) {
           if (Number.isInteger(turn)) {
@@ -277,7 +323,7 @@ function registerReminders(ctx, nudge, checkpoint) {
           }
           return
         }
-        evaluateNudge(target, parentId, turn, isRootAgent)
+        evaluateNudge(target, parentId, turn, isRootAgent, verdict.handled)
       } catch {
         // Observation is advisory: never fail a turn on it.
       }
@@ -327,8 +373,17 @@ function registerReminders(ctx, nudge, checkpoint) {
     }
 
     // Fallback: a parent with no hook scope (e.g. a nested subagent as parent).
-    // Judge and deliver at settle time, as 0.3.3 did.
-    if (classify(parent, childId, record) !== 'delivered') return
+    // Judge and deliver at settle time, as 0.3.3 did. No turn is known yet, so
+    // the decision line carries `turn: null`.
+    const verdict = classify(parent, childId, record)
+    recordDecision(decisionLog, parent, {
+      kind: 'checkpoint',
+      decision: verdict === 'delivered' ? 'delivered' : 'suppressed',
+      ...(verdict === 'delivered' ? {} : { reason: verdict }),
+      childId,
+      label: record.label,
+    })
+    if (verdict !== 'delivered') return
     if (typeof parent.followup === 'function') parent.followup(userMessage(render(record, childId)))
   })
 }

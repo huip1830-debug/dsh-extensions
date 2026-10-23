@@ -17,6 +17,11 @@ import * as plugin from './plugin.mjs'
 import { resolveConfig, DEFAULT_RULES } from './lib/config.mjs'
 import { renderNudge, resolveNudge, shouldNudge, summarizeTurn } from './lib/nudge.mjs'
 
+// Reminder behaviour is asserted from the harness messages. Decision logging
+// stays off so a test run never appends to the real `%TEMP%` decision log; the
+// tests that check log lines opt into an explicit path inside a temp dir.
+const quiet = { nudge: { log: false } }
+
 test('registers one prompt section with literal text and a stable order', () => {
   const h = harness()
   plugin.apply(h.ctx, {})
@@ -123,7 +128,7 @@ test('one closing paragraph states who does what and when a dispatch may be skip
 
 test('a completed child triggers exactly one checkpoint message to its parent', () => {
   const h = harness()
-  plugin.apply(h.ctx, {})
+  plugin.apply(h.ctx, quiet)
 
   const parent = h.parent('parent-1')
   const child = h.child('child-1', 'parent-1', '实现 Task 1', [call(1, 'write', { file_path: 'a.ts' })])
@@ -165,7 +170,7 @@ test('checkpoint messages can be disabled by config', () => {
 
 test('a parent that already acted on the child report is not reminded again', () => {
   const h = harness()
-  plugin.apply(h.ctx, {})
+  plugin.apply(h.ctx, quiet)
 
   const parent = h.main('parent-1', [splice('child-9'), call(1, 'read', { file_path: 'a.ts' })])
   const child = h.child('child-9', 'parent-1', '实现 Task 9', [
@@ -183,7 +188,7 @@ test('a parent that already acted on the child report is not reminded again', ()
 
 test('a parent that received a report but did nothing is still reminded', () => {
   const h = harness()
-  plugin.apply(h.ctx, {})
+  plugin.apply(h.ctx, quiet)
 
   const parent = h.main('parent-2', [splice('child-10')])
   const child = h.child('child-10', 'parent-2', '实现 Task 10', [
@@ -203,7 +208,7 @@ test('a parent that received a report but did nothing is still reminded', () => 
 
 test('a child that kept writing after the report is still reminded', () => {
   const h = harness()
-  plugin.apply(h.ctx, {})
+  plugin.apply(h.ctx, quiet)
 
   const parent = h.main('parent-3', [splice('child-11'), call(1, 'read', { file_path: 'a.ts' })])
   const child = h.child('child-11', 'parent-3', '实现 Task 11', [
@@ -221,7 +226,7 @@ test('a child that kept writing after the report is still reminded', () => {
 
 test('a read-only survey child does not trigger a checkpoint', () => {
   const h = harness()
-  plugin.apply(h.ctx, {})
+  plugin.apply(h.ctx, quiet)
 
   const parent = h.main('parent-4', [splice('child-12')])
   const child = h.child('child-12', 'parent-4', '勘察 Task 12', [
@@ -241,7 +246,7 @@ test('a read-only survey child does not trigger a checkpoint', () => {
 
 test('a child that called no tools at all does not trigger a checkpoint', () => {
   const h = harness()
-  plugin.apply(h.ctx, {})
+  plugin.apply(h.ctx, quiet)
 
   const parent = h.main('parent-5', [splice('child-13')])
   h.created(h.child('child-13', 'parent-5', '零工具子代理'))
@@ -255,7 +260,7 @@ test('a child that called no tools at all does not trigger a checkpoint', () => 
 
 test('a skipped read-only child stays deduplicated across repeated settlement events', () => {
   const h = harness()
-  plugin.apply(h.ctx, {})
+  plugin.apply(h.ctx, quiet)
 
   const parent = h.main('parent-6', [splice('child-14')])
   const child = h.child('child-14', 'parent-6', '勘察 Task 14', [call(1, 'read', { file_path: 'a.ts' })])
@@ -275,7 +280,7 @@ test('a checkpoint registered before the parent read the report cannot race the 
   // with no parent tool call yet, and the parent only reads the diff later.
   // Judging at settle time (0.3.3) emitted the checkpoint three events too soon.
   const h = harness()
-  plugin.apply(h.ctx, {})
+  plugin.apply(h.ctx, quiet)
 
   const parentEvents = [splice('child-15')]
   const parent = h.main('parent-15', parentEvents)
@@ -296,7 +301,7 @@ test('a checkpoint registered before the parent read the report cannot race the 
 
 test('a drained checkpoint is not delivered again on a later turn-stopping', () => {
   const h = harness()
-  plugin.apply(h.ctx, {})
+  plugin.apply(h.ctx, quiet)
 
   const parent = h.main('parent-16', [splice('child-16')])
   h.created(h.child('child-16', 'parent-16', '实现 Task 16', [
@@ -314,7 +319,7 @@ test('a drained checkpoint is not delivered again on a later turn-stopping', () 
 
 test('two pending checkpoints drain in one turn-stopping while the accepted one stays silent', () => {
   const h = harness()
-  plugin.apply(h.ctx, {})
+  plugin.apply(h.ctx, quiet)
 
   // child-17a's report is followed by a parent tool call; b and c are not.
   const parent = h.main('parent-17', [
@@ -405,7 +410,7 @@ test('a successful result does not suppress the write', () => {
 test('a multi-write turn without delegation is reminded exactly once', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-'))
   try {
-    const log = join(dir, 'nudge.jsonl')
+    const log = join(dir, 'decisions.jsonl')
     const h = harness()
     plugin.apply(h.ctx, { nudge: { log, threshold: 2 } })
 
@@ -428,6 +433,8 @@ test('a multi-write turn without delegation is reminded exactly once', () => {
     const lines = readFileSync(log, 'utf8').trim().split('\n')
     assert.equal(lines.length, 1)
     const record = JSON.parse(lines[0])
+    assert.equal(record.kind, 'nudge')
+    assert.equal(record.decision, 'delivered')
     assert.equal(record.turn, 1)
     assert.equal(record.writes, 2)
     assert.equal(record.delegations, 0)
@@ -513,7 +520,7 @@ test('a turn that delegated is never reminded', () => {
 test('a turn whose prose already explains the skip is not reminded', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-'))
   try {
-    const log = join(dir, 'nudge.jsonl')
+    const log = join(dir, 'decisions.jsonl')
     const h = harness()
     plugin.apply(h.ctx, { nudge: { log } })
 
@@ -527,7 +534,9 @@ test('a turn whose prose already explains the skip is not reminded', () => {
 
     assert.equal(agent.messages.length, 0, 'no reminder when the turn explained itself')
     const [line] = readFileSync(log, 'utf8').trim().split('\n').map(row => JSON.parse(row))
-    assert.equal(line.suppressed, 'justified', 'the suppression is still accounted for')
+    assert.equal(line.kind, 'nudge')
+    assert.equal(line.decision, 'suppressed', 'the suppression is still accounted for')
+    assert.equal(line.reason, 'justified')
     assert.equal(line.turn, 1)
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -618,7 +627,7 @@ test('a subagent is never nudged, even with many writes', () => {
 
 test('the nudge can be disabled without touching the checkpoint', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { enabled: false } })
+  plugin.apply(h.ctx, { nudge: { enabled: false, log: false } })
 
   const agent = h.main('session-6', [
     call(1, 'write', { file_path: 'a.txt' }),
@@ -635,7 +644,7 @@ test('the nudge can be disabled without touching the checkpoint', () => {
   assert.equal(parent.messages.length, 1, 'the checkpoint still runs')
 })
 
-test('a log path of false records nothing', () => {
+test('a log path of false records nothing for either mechanism', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-'))
   try {
     const h = harness()
@@ -649,6 +658,12 @@ test('a log path of false records nothing', () => {
     h.turnStopping(agent, 1)
 
     assert.equal(agent.messages.length, 1, 'the reminder still reaches the model')
+
+    const parent = h.parent('parent-7')
+    h.created(h.child('child-7', 'parent-7', '实现 Task 7', [call(1, 'write', { file_path: 'a.ts' })]))
+    h.ended({ childId: 'child-7', stopReason: 'completed' })
+    assert.equal(parent.messages.length, 1, 'the checkpoint still runs with logging off')
+    assert.equal(resolveNudge({ log: false }).log, false)
     assert.deepEqual(readdirSync(dir), [])
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -669,7 +684,8 @@ test('nudge config rejects values that would silently never fire', () => {
   const defaults = resolveNudge({})
   assert.equal(defaults.threshold, 2)
   assert.equal(defaults.enabled, true)
-  assert.match(defaults.log, /dispatch-protocol-nudge\.jsonl$/)
+  assert.match(defaults.log, /dispatch-protocol-decisions\.jsonl$/)
+  assert.equal(resolveNudge({ log: false }).log, false, 'false turns both mechanisms off')
 })
 
 test('renderNudge fills the placeholders and truncates a long file list', () => {
@@ -685,6 +701,123 @@ test('renderNudge fills the placeholders and truncates a long file list', () => 
   assert.match(text, /等 7 个/)
   assert.match(renderNudge('{files}', { writes: 0, files: [], turn: 1 }), /未记录路径/)
   assert.match(renderNudge('{fileCount}', { writes: 0, files: [], turn: 1 }), /^0$/)
+})
+
+// ---------------------------------------------------------------------------
+// Nudge yield (acceptance turn + one-turn grace) and the unified decision log
+
+test('an acceptance turn silences the nudge and logs both suppressed decisions', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log } })
+
+    const parent = h.main('parent-30', [
+      splice('child-30'),
+      call(1, 'read', { file_path: 'a.ts' }),
+      call(1, 'write', { file_path: 'b.ts' }),
+      call(1, 'write', { file_path: 'c.ts' }),
+    ])
+    h.created(h.child('child-30', 'parent-30', '实现 Task 30', [
+      call(1, 'write', { file_path: 'a.ts' }),
+      call(1, 'send_message', { agent_id: 'parent-30' }),
+    ]))
+    h.ended({ childId: 'child-30', stopReason: 'completed' })
+
+    h.turnStopping(parent, 1)
+
+    assert.equal(parent.messages.length, 0, 'the turn is an acceptance turn, not a missed dispatch')
+
+    const rows = readFileSync(log, 'utf8').trim().split('\n').map(row => JSON.parse(row))
+    const checkpoint = rows.find(row => row.kind === 'checkpoint')
+    assert.equal(checkpoint.decision, 'suppressed')
+    assert.equal(checkpoint.reason, 'handled')
+    assert.equal(checkpoint.childId, 'child-30')
+    assert.equal(checkpoint.label, '实现 Task 30')
+
+    const nudge = rows.find(row => row.kind === 'nudge')
+    assert.equal(nudge.decision, 'suppressed')
+    assert.equal(nudge.reason, 'handled')
+    assert.equal(nudge.writes, 2)
+    assert.deepEqual(nudge.files, ['b.ts', 'c.ts'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the turn right after a delivered checkpoint is a grace turn', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log } })
+
+    // Turn 1 has a report and no tool call, so the checkpoint is delivered.
+    const parentEvents = [splice('child-31')]
+    const parent = h.main('parent-31', parentEvents)
+    h.created(h.child('child-31', 'parent-31', '实现 Task 31', [call(1, 'write', { file_path: 'a.ts' })]))
+    h.ended({ childId: 'child-31', stopReason: 'completed' })
+
+    h.turnStopping(parent, 1)
+    assert.equal(parent.messages.length, 1, 'turn 1 delivers the checkpoint')
+    assert.match(parent.messages[0].text, /child-31/)
+
+    // Turn 2 is a genuine multi-write turn, but it directly follows the delivery.
+    parentEvents.push(
+      call(2, 'write', { file_path: 'b.ts' }),
+      call(2, 'write', { file_path: 'c.ts' }),
+    )
+    h.turnStopping(parent, 2)
+
+    assert.equal(parent.messages.length, 1, 'the grace turn is not nudged')
+    const rows = readFileSync(log, 'utf8').trim().split('\n').map(row => JSON.parse(row))
+    const nudge = rows.find(row => row.kind === 'nudge' && row.turn === 2)
+    assert.equal(nudge.decision, 'suppressed')
+    assert.equal(nudge.reason, 'grace')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('one explicit log path records delivered lines for both kinds', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log } })
+
+    const parent = h.main('parent-32', [splice('child-32')])
+    h.created(h.child('child-32', 'parent-32', '实现 Task 32', [call(1, 'write', { file_path: 'a.ts' })]))
+    h.ended({ childId: 'child-32', stopReason: 'completed' })
+    h.turnStopping(parent, 1)
+
+    const solo = h.main('parent-33', [
+      call(1, 'write', { file_path: 'x.ts' }),
+      call(1, 'write', { file_path: 'y.ts' }),
+    ])
+    h.created(solo)
+    h.turnStopping(solo, 1)
+
+    assert.equal(parent.messages.length, 1, 'the checkpoint still delivers')
+    assert.equal(solo.messages.length, 1, 'the nudge still delivers when nothing yields it')
+
+    const rows = readFileSync(log, 'utf8').trim().split('\n').map(row => JSON.parse(row))
+    const checkpoint = rows.find(row => row.kind === 'checkpoint')
+    assert.equal(checkpoint.decision, 'delivered')
+    assert.equal(checkpoint.childId, 'child-32')
+    assert.equal(checkpoint.label, '实现 Task 32')
+    assert.equal(checkpoint.session, 'parent-32')
+
+    const nudge = rows.find(row => row.kind === 'nudge')
+    assert.equal(nudge.decision, 'delivered')
+    assert.equal(nudge.session, 'parent-33')
+    assert.equal(nudge.delegations, 0)
+    assert.deepEqual(nudge.files, ['x.ts', 'y.ts'])
+    assert.equal(rows.length, 2, 'one line per decision')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 // ---------------------------------------------------------------------------
