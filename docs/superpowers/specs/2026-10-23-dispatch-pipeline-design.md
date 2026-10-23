@@ -169,6 +169,13 @@ batch = 白名单（互斥文件集）+ 唯一集成命令 + 子代理集合（0
   - `review.by` 非空；若 `children` 存在，`review.by` 必须是其成员；`review.verdict === "PASS"`（或 `acceptedRisk === true` + `acceptNote`）；
   - 至少一条 `scope === "integration"`、`kind === "process-exit"`、`code === 0`、`by === "dispatcher-rerun"`（或 `cmdlet-success` + `success === true`）；
   - `verdict.behavior === "pass"`（`acceptedRisk` 时允许 fail）。
+- **边界口径（2026-10-23 裁决）**：
+  - `review` 对象始终必填；`acceptedRisk` 只放宽 verdict（FAIL 可接受）与 `behavior`（fail 可接受），不豁免评审人；
+  - 单子代理批次可保留真实 `child`；`children.length > 1` 时 `child` 必须为 `batch:<batchId>`；
+  - `gate` 缺 batchId / 查无此行 exit 1；重复键已在 `check` 报错时 gate 直接 FAIL；
+  - `replay` 不参与 gate（P1 只记录）；
+  - `by` 对 `process-exit` 与 `cmdlet-success` 都必须是 `dispatcher-rerun`；
+  - 可选字段 `null`/`undefined` 视为未提供；`review.sandbox/notes` 存在时只校验 string 类型。
 - 第一阶段不自动生成台账行；行仍由主控写，`gate` 只校验。
 
 ## 8. 成本模型
