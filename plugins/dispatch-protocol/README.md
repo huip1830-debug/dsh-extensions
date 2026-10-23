@@ -1,6 +1,6 @@
 # dispatch-protocol
 
-> 当前部署：desktop **0.3.5**；probe 为 `link:` → 直接吃工作区。改动后的发布顺序固定为：提交推送 → `dsh plugin --profile desktop update dispatch-protocol` → 重启 DSH → 台账/本行记一笔。没走完不算发布。
+> 部署状态不在本文档硬编码：desktop 的实际版本以 profile 安装为准（`dsh plugin --profile desktop list` 或 `profiles/desktop/node_modules/dispatch-protocol/package.json`）；probe 为 `link:` → 直接吃工作区。发布顺序固定为：提交推送 → `dsh plugin --profile desktop update dispatch-protocol` → 重启 DSH → 台账记一笔。没走完不算发布。
 
 把「派发纪律」常驻注入 DSH。三个机制，都不拦截任何调用：
 
