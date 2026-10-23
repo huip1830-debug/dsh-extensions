@@ -882,6 +882,24 @@ test('a parent with no pending checkpoint is still nudged', () => {
   assert.match(parent.messages[0].text, /改了 2 个文件/)
 })
 
+test('the checkpoint queue is keyed by the parent session id, not the agent id', () => {
+  // Production hands the plugin an agent handle whose `id` and `session.id` are
+  // not the same string, while `session.header.parentSession` is a session id.
+  // The settlement queue must use the same key the handler later drains with.
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('agent-40', [], {}, 'session-40')
+  h.created(parent)
+  h.created(h.child('child-40', 'session-40', '实现 Task 40', [call(1, 'write', { file_path: 'a.ts' })]))
+  h.ended({ childId: 'child-40', stopReason: 'completed' })
+
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 1, 'the pending queue is keyed by the session id')
+  assert.match(parent.messages[0].text, /child-40/)
+})
+
 // ---------------------------------------------------------------------------
 
 /** One committed `tool/call` record, shaped like the session log stores it. */
@@ -966,15 +984,19 @@ function harness() {
         },
       }
     },
-    /** A live top-level agent with its own hook scope and session log. */
-    main(id, sessionEvents = [], header = {}) {
+    /**
+     * A live top-level agent with its own hook scope and session log.
+     * `sessionId` defaults to `id`; pass a distinct value to model a host where
+     * the agent handle and the session it belongs to are not the same string.
+     */
+    main(id, sessionEvents = [], header = {}, sessionId = id) {
       const messages = []
       const hooks = new Map()
       const agent = {
         id,
         messages,
         session: {
-          id,
+          id: sessionId,
           header: { origin: header.origin, parentSession: header.parentSession, delegationDepth: header.origin === 'subagent' ? 1 : 0 },
           snapshotEvents: () => sessionEvents,
         },
@@ -994,7 +1016,7 @@ function harness() {
         followup: record(messages),
       }
       agentHooks.set(agent, hooks)
-      agents.set(id, agent)
+      agents.set(sessionId, agent)
       return agent
     },
     created(agent) {

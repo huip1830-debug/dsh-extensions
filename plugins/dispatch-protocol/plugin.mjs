@@ -265,7 +265,7 @@ function registerReminders(ctx, nudge, checkpoint) {
    * Each of the three logged silences is written only when the nudge condition
    * itself holds, so a quiet ordinary turn adds no lines.
    * @param target - the agent whose turn is closing.
-   * @param parentId - that agent's id.
+   * @param parentId - that agent's session id.
    * @param turn - the turn being closed.
    * @param isRootAgent - whether the agent may be nudged at all.
    * @param handled - whether a pending checkpoint judged this an acceptance turn.
@@ -305,14 +305,16 @@ function registerReminders(ctx, nudge, checkpoint) {
   /** Install the single turn-stopping handler for one agent, at most once. */
   const attach = (agent) => {
     if (typeof agent?.ctx?.on !== 'function') return
-    if (agent.id === undefined || watched.has(agent.id)) return
-    watched.add(agent.id)
+    // Canonical key: the settlement queue is keyed by the parent *session* id
+    // (`session.header.parentSession`), which is not the agent handle id.
+    const parentId = agent?.session?.id ?? agent?.id
+    if (parentId === undefined || watched.has(parentId)) return
+    watched.add(parentId)
     const isRootAgent = agent?.session?.header?.origin !== 'subagent'
 
     const handle = ({ agent: scopedAgent, turn } = {}) => {
       try {
         const target = scopedAgent ?? agent
-        const parentId = target?.id ?? agent.id
         const verdict = checkpoint.enabled
           ? drain(parentId, target, turn)
           : { delivered: false, handled: false, readOnly: false, empty: true }
