@@ -21,6 +21,57 @@ export const DEFAULT_DELEGATION_TOOLS = ['subagent', 'subagent_fork', 'workflow'
 export const DEFAULT_WRITE_TOOLS = ['write', 'edit']
 
 /**
+ * Shell command fragments that mutate files or the repo tree (0.4.0).
+ *
+ * The write-tools list cannot see a `pwsh` deletion: sample session-82db5b7d's
+ * W-5 removed dead files with `Remove-Item` and zero `write`/`edit` calls, and
+ * was judged read-only. This pattern is the shared fix for both the nudge
+ * counter and the checkpoint's read-only verdict. It is deliberately
+ * over-inclusive (a mutation verb in an unexecuted branch still counts) — the
+ * cost of a false positive is one silencable reminder, the cost of a false
+ * negative is a silently unverified write batch. Build/test/db commands
+ * (`dotnet build`, `npx jest`, `prisma migrate`) are intentionally absent:
+ * they touch artifacts, not the reviewed source set.
+ */
+export const DEFAULT_PWSH_MUTATION_PATTERN = /\b(Remove-Item|Set-Content|Out-File|Add-Content|Clear-Content|New-Item|Copy-Item|Move-Item|Rename-Item|ri|del|erase|ren|rename|move|copy|mkdir|rmdir|rd|tee)\b|(?<![\d&])>{1,2}(?![&=\d])|\bgit\s+(apply|checkout|restore|commit|merge|rebase|cherry-pick|rm|mv|clean)\b/i
+
+/**
+ * Decide whether one committed tool call touched a file.
+ *
+ * `write`/`edit` always count; `pwsh` counts only when the command carries a
+ * mutation verb or an output redirect. Attempted-but-refused calls still count
+ * for the checkpoint's read-only verdict (defensive direction), so callers
+ * that care about results must filter those before asking.
+ * @param name - the tool name from `tool/call`.
+ * @param argsJson - the JSON-encoded arguments string the log stores.
+ * @param writeTools - the resolved write-tool list.
+ * @param mutationPattern - the shell-mutation pattern.
+ * @returns true when the call attempted a file mutation.
+ */
+export function callTouchesFile(name, argsJson, writeTools = DEFAULT_WRITE_TOOLS, mutationPattern = DEFAULT_PWSH_MUTATION_PATTERN) {
+  if (typeof name !== 'string') return false
+  if (writeTools.includes(name)) return true
+  if (name !== 'pwsh') return false
+  const command = readCommand(argsJson)
+  return command !== undefined && mutationPattern.test(command)
+}
+
+/**
+ * Read the shell command out of a tool call's arguments.
+ * @param raw - the JSON-encoded arguments string the log stores.
+ * @returns the command, or undefined when the call names none.
+ */
+function readCommand(raw) {
+  if (typeof raw !== 'string') return undefined
+  try {
+    const command = JSON.parse(raw)?.command
+    return typeof command === 'string' && command !== '' ? command : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * The one model-facing reminder. Delivered at most once per turn, so a model
  * that answers it with more edits cannot re-trigger it in the same turn.
  *
@@ -119,6 +170,8 @@ export function summarizeTurn(events, turn, config) {
   const writes = []
   const files = []
   let delegations = 0
+  let shellWrites = 0
+  let failedWrites = 0
 
   for (const event of log) {
     if (event?.type !== 'tool/call') continue
@@ -131,18 +184,28 @@ export function summarizeTurn(events, turn, config) {
       delegations += 1
       continue
     }
-    if (!config.writeTools.includes(tool)) continue
+    if (!config.writeTools.includes(tool) && tool !== 'pwsh') continue
     // A refused write never touched the file: skip it. A call with no id, or
     // with no result event, stays counted — a missing result must not erase a
     // write.
-    if (failedCallIds.has(data.callId)) continue
+    if (failedCallIds.has(data.callId)) {
+      failedWrites += 1
+      continue
+    }
 
-    writes.push(tool)
-    const path = readPath(data.arguments)
-    if (path !== undefined && !files.includes(path)) files.push(path)
+    if (config.writeTools.includes(tool)) {
+      writes.push(tool)
+      const path = readPath(data.arguments)
+      if (path !== undefined && !files.includes(path)) files.push(path)
+      continue
+    }
+    // `pwsh` counts only when the command mutates files or the repo tree —
+    // builds and read-only queries must not mark a survey turn as a write turn.
+    const command = readCommand(data.arguments)
+    if (command !== undefined && DEFAULT_PWSH_MUTATION_PATTERN.test(command)) shellWrites += 1
   }
 
-  return { writes: writes.length, files, delegations }
+  return { writes: writes.length, files, shellWrites, failedWrites, delegations }
 }
 
 /**
@@ -185,13 +248,15 @@ function readPath(raw) {
  * Decide whether this turn looks like a skipped dispatch.
  *
  * `threshold` counts distinct files, not write calls: editing one file three
- * times stays inside the small-change exemption.
+ * times stays inside the small-change exemption. Shell mutations carry no
+ * reliable path, so each counts as one anonymous file (0.4.0).
  * @param summary - `summarizeTurn(...)` output.
  * @param config - the resolved `nudge` section.
  * @returns true when the turn touched enough distinct files and delegated nothing.
  */
 export function shouldNudge(summary, config) {
-  return summary.files.length >= config.threshold && summary.delegations === 0
+  const touched = summary.files.length + (summary.shellWrites ?? 0)
+  return touched >= config.threshold && summary.delegations === 0
 }
 
 /**
@@ -231,21 +296,26 @@ export function justifiedInTurn(events, turn, patterns) {
  * @returns the message body.
  */
 export function renderNudge(template, summary) {
+  const fileCount = summary.files.length + (summary.shellWrites ?? 0)
   return template
-    .replaceAll('{fileCount}', String(summary.files.length))
-    .replaceAll('{writes}', String(summary.writes))
-    .replaceAll('{files}', formatFiles(summary.files))
+    .replaceAll('{fileCount}', String(fileCount))
+    .replaceAll('{writes}', String(summary.writes + (summary.shellWrites ?? 0)))
+    .replaceAll('{files}', formatFiles(summary.files, summary.shellWrites ?? 0))
     .replaceAll('{turn}', String(summary.turn))
 }
 
 /**
  * Join paths for the reminder, capping the list so one long path cannot double
- * the message size.
+ * the message size. Shell mutations have no reliable path and are reported as
+ * a count (0.4.0).
  * @param files - distinct paths written this turn.
+ * @param shellWrites - pwsh mutation commands this turn.
  * @returns a comma-separated list, plus a "+N" suffix when truncated.
  */
-function formatFiles(files) {
-  if (files.length === 0) return '未记录路径'
+function formatFiles(files, shellWrites = 0) {
+  const shellNote = shellWrites > 0 ? `另有 ${shellWrites} 条 shell 变更命令` : ''
+  if (files.length === 0) return shellNote || '未记录路径'
   const shown = files.slice(0, MAX_LISTED_FILES).join(', ')
-  return files.length > MAX_LISTED_FILES ? `${shown} 等 ${files.length} 个` : shown
+  const base = files.length > MAX_LISTED_FILES ? `${shown} 等 ${files.length} 个` : shown
+  return shellNote ? `${base}，${shellNote}` : base
 }

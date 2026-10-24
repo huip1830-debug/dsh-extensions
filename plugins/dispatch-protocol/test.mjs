@@ -15,7 +15,7 @@ import { join } from 'node:path'
 
 import * as plugin from './plugin.mjs'
 import { resolveConfig, DEFAULT_RULES } from './lib/config.mjs'
-import { renderNudge, resolveNudge, shouldNudge, summarizeTurn } from './lib/nudge.mjs'
+import { callTouchesFile, renderNudge, resolveNudge, shouldNudge, summarizeTurn } from './lib/nudge.mjs'
 
 // Reminder behaviour is asserted from the harness messages. Decision logging
 // stays off so a test run never appends to the real `%TEMP%` decision log; the
@@ -33,7 +33,7 @@ test('registers one prompt section with literal text and a stable order', () => 
   assert.equal(section.interpolate, false, '{{…}} in project text must stay literal')
 })
 
-test('the default text states all five dispatch rules', () => {
+test('the default text states all six dispatch rules', () => {
   const h = harness()
   plugin.apply(h.ctx, {})
   const text = h.sections[0].text
@@ -53,6 +53,9 @@ test('the default text states all five dispatch rules', () => {
   assert.match(text, /契约在派发前定死/, 'parallel implementation requires frozen contracts')
   assert.match(text, /共享产物/, 'shared build outputs stay serial')
   assert.match(text, /单文件/, 'the closing paragraph states the exemption')
+  assert.match(text, /合并判级/, '0.4.0: a change set cannot be split into normal batches to dodge review')
+  assert.match(text, /重开评审|重开受影响切片/, '0.4.0: post-review changes re-enter review')
+  assert.match(text, /拆批方案或一行不派发理由/, '0.4.0: implementation plans must name the batches or the skip reason')
 })
 
 test('configured rules replace the default text', () => {
@@ -339,9 +342,11 @@ test('two pending checkpoints drain in one turn-stopping while the accepted one 
 
   h.turnStopping(parent, 1)
 
-  assert.equal(parent.messages.length, 2, 'one message per unaccepted child, never merged')
+  // 0.4.0: the unaccepted children share one aggregated wave message.
+  assert.equal(parent.messages.length, 1, 'one aggregated message for the unaccepted wave')
+  assert.match(parent.messages[0].text, /本波次 2 个子代理/)
   assert.match(parent.messages[0].text, /child-17b/)
-  assert.match(parent.messages[1].text, /child-17c/)
+  assert.match(parent.messages[0].text, /child-17c/)
   assert.doesNotMatch(parent.messages.map(message => message.text).join(''), /child-17a/)
 })
 
@@ -901,6 +906,267 @@ test('the checkpoint queue is keyed by the parent session id, not the agent id',
 })
 
 // ---------------------------------------------------------------------------
+// 0.4.0 — shared file-touch detection (pwsh mutations count)
+
+test('callTouchesFile sees pwsh mutations and ignores read-only shell work', () => {
+  const cmd = command => JSON.stringify({ command })
+
+  assert.equal(callTouchesFile('write', '{}'), true)
+  assert.equal(callTouchesFile('edit', '{}'), true)
+  assert.equal(callTouchesFile('pwsh', cmd('Remove-Item dead.cs -Force')), true)
+  assert.equal(callTouchesFile('pwsh', cmd('Set-Content a.txt "x"')), true)
+  assert.equal(callTouchesFile('pwsh', cmd('git commit -m "x"')), true)
+  assert.equal(callTouchesFile('pwsh', cmd('Write-Output "x" > out.txt')), true, 'a redirect to a file mutates')
+
+  assert.equal(callTouchesFile('pwsh', cmd('git status --short')), false)
+  assert.equal(callTouchesFile('pwsh', cmd('Get-ChildItem -Recurse')), false)
+  assert.equal(callTouchesFile('pwsh', cmd('dotnet build 2>&1 | Select-Object -Last 5')), false, 'builds touch artifacts, not the reviewed set')
+  assert.equal(callTouchesFile('pwsh', cmd('npx jest --silent 2>&1')), false, 'stderr merges are not redirects')
+  assert.equal(callTouchesFile('pwsh', cmd('npx prisma migrate deploy')), false)
+  assert.equal(callTouchesFile('pwsh', 'not-json'), false)
+  assert.equal(callTouchesFile('read', '{}'), false)
+})
+
+test('a turn with two pwsh deletions and no delegations is nudged', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('parent-50', [
+    call(1, 'pwsh', { command: 'Remove-Item dead-a.cs -Force' }),
+    call(1, 'pwsh', { command: 'Remove-Item dead-b.cs -Force' }),
+  ])
+  h.created(parent)
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 1)
+  assert.match(parent.messages[0].text, /改了 2 个文件/)
+  assert.match(parent.messages[0].text, /另有 2 条 shell 变更命令/)
+})
+
+test('read-only and failed pwsh commands do not feed the nudge counter', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('parent-51', [
+    call(1, 'pwsh', { command: 'Remove-Item maybe.cs' }, 'call-51-del'),
+    result(1, 'call-51-del', true),
+    call(1, 'pwsh', { command: 'git status --short' }),
+    call(1, 'pwsh', { command: 'dotnet test 2>&1 | Select-Object -Last 5' }),
+  ])
+  h.created(parent)
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 0, 'one failed deletion + read-only shell work stays under the threshold')
+})
+
+test('a child that only deleted files via pwsh is execution-class, not read-only', () => {
+  // session-82db5b7d W-5: dead-code removal with zero write/edit calls was
+  // judged read-only and the checkpoint never fired.
+  const h = harness()
+  plugin.apply(h.ctx, quiet)
+
+  const parent = h.parent('parent-52')
+  h.created(h.child('child-52', 'parent-52', '清理死代码', [
+    call(1, 'pwsh', { command: 'Remove-Item dead.cs -Force' }),
+  ]))
+  h.ended({ childId: 'child-52', stopReason: 'completed' })
+
+  assert.equal(parent.messages.length, 1, 'the checkpoint fires for a pwsh-only write batch')
+  assert.match(parent.messages[0].text, /child-52/)
+})
+
+test('a child whose pwsh work was read-only stays a read-only survey', () => {
+  const h = harness()
+  plugin.apply(h.ctx, quiet)
+
+  const parent = h.parent('parent-53')
+  h.created(h.child('child-53', 'parent-53', '勘察日志', [
+    call(1, 'pwsh', { command: 'git log --oneline -5' }),
+    call(1, 'pwsh', { command: 'dotnet build 2>&1 | Select-Object -Last 3' }),
+  ]))
+  h.ended({ childId: 'child-53', stopReason: 'completed' })
+
+  assert.equal(parent.messages.length, 0, 'no diff to read, no command to re-run — silence')
+})
+
+// ---------------------------------------------------------------------------
+// 0.4.0 — one checkpoint message per wave, one decision line per child
+
+test('a wave of finished children earns one aggregated checkpoint message', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-wave-'))
+  const log = join(dir, 'decisions.jsonl')
+  try {
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log } })
+
+    const parent = h.main('parent-54', [])
+    h.created(parent)
+    for (const id of ['child-54a', 'child-54b', 'child-54c']) {
+      h.created(h.child(id, 'parent-54', `实现 ${id}`, [call(1, 'write', { file_path: `${id}.ts` })]))
+      h.ended({ childId: id, stopReason: 'completed' })
+    }
+
+    h.turnStopping(parent, 1)
+
+    assert.equal(parent.messages.length, 1, 'three finished children, one message')
+    assert.match(parent.messages[0].text, /本波次 3 个子代理/)
+    assert.match(parent.messages[0].text, /child-54a/)
+    assert.match(parent.messages[0].text, /child-54c/)
+
+    const rows = readFileSync(log, 'utf8').trim().split('\n').map(row => JSON.parse(row))
+    assert.equal(rows.filter(row => row.kind === 'checkpoint' && row.decision === 'delivered').length, 3,
+      'accounting stays per child even though the message is aggregated')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a single deliverable child keeps the per-child checkpoint text', () => {
+  const h = harness()
+  plugin.apply(h.ctx, quiet)
+
+  const parent = h.parent('parent-55')
+  h.created(h.child('child-55', 'parent-55', '实现 Task 55', [call(1, 'write', { file_path: 'a.ts' })]))
+  h.ended({ childId: 'child-55', stopReason: 'completed' })
+
+  assert.equal(parent.messages.length, 1)
+  assert.match(parent.messages[0].text, /子代理 child-55（实现 Task 55）已完成/)
+  assert.doesNotMatch(parent.messages[0].text, /本波次/)
+})
+
+// ---------------------------------------------------------------------------
+// 0.4.0 — deferred nudge for interrupted turns (N2)
+
+test('an unevaluated previous turn is nudged when the next turn closes', () => {
+  // session-82db5b7d T5: 43 edits / 14 files / 0 dispatches, closed by the
+  // user's interruption — the turn-stopping hook never ran for it.
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-deferred-'))
+  const log = join(dir, 'decisions.jsonl')
+  try {
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log } })
+
+    const parent = h.main('parent-56', [
+      call(4, 'read', { file_path: 'a.ts' }),
+      call(5, 'edit', { file_path: 'x.ts' }),
+      call(5, 'edit', { file_path: 'y.ts' }),
+      call(6, 'read', { file_path: 'z.ts' }),
+    ])
+    h.created(parent)
+
+    h.turnStopping(parent, 4) // a quiet turn, evaluated normally
+    assert.equal(parent.messages.length, 0)
+    // Turn 5 is interrupted: no turn-stopping fires for it.
+    h.turnStopping(parent, 6)
+
+    assert.equal(parent.messages.length, 1, 'the interrupted turn 5 is judged when turn 6 closes')
+    assert.match(parent.messages[0].text, /改了 2 个文件/)
+
+    const rows = readFileSync(log, 'utf8').trim().split('\n').map(row => JSON.parse(row))
+    const nudgeRow = rows.find(row => row.kind === 'nudge')
+    assert.equal(nudgeRow.decision, 'delivered')
+    assert.equal(nudgeRow.turn, 5, 'the row names the missed turn, not the closing one')
+    assert.equal(nudgeRow.deferred, true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a freshly attached session does not retro-nudge its backlog', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('parent-57', [
+    call(1, 'edit', { file_path: 'a.ts' }),
+    call(1, 'edit', { file_path: 'b.ts' }),
+    call(2, 'edit', { file_path: 'c.ts' }),
+    call(2, 'edit', { file_path: 'd.ts' }),
+    call(3, 'read', { file_path: 'x.ts' }),
+  ])
+  h.created(parent)
+  h.turnStopping(parent, 3)
+
+  assert.equal(parent.messages.length, 0,
+    'turns 1-2 predate the first evaluation and are left alone; turn 3 is quiet')
+})
+
+test('a deferred delivery suppresses the current turn, which is picked up next time', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('parent-58', [
+    call(1, 'read', { file_path: 'a.ts' }),
+    call(2, 'edit', { file_path: 'a.ts' }),
+    call(2, 'edit', { file_path: 'b.ts' }),
+    call(3, 'edit', { file_path: 'c.ts' }),
+    call(3, 'edit', { file_path: 'd.ts' }),
+    call(4, 'read', { file_path: 'x.ts' }),
+  ])
+  h.created(parent)
+
+  h.turnStopping(parent, 1) // quiet, evaluated
+  // Turn 2 interrupted (no stopping); turn 3 closes with its own miss pending.
+  h.turnStopping(parent, 3)
+  assert.equal(parent.messages.length, 1, 'turn 2 is judged when turn 3 closes')
+  assert.match(parent.messages[0].text, /a\.ts/)
+
+  h.turnStopping(parent, 4)
+  assert.equal(parent.messages.length, 2, 'turn 3 was deferred by one turn, not swallowed')
+  assert.match(parent.messages[1].text, /c\.ts/)
+})
+
+// ---------------------------------------------------------------------------
+// 0.4.0 — per-turn observation rows (G1/G7 evidence floor)
+
+test('a root turn that wrote files appends one observation row', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-observe-'))
+  try {
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log: false } })
+
+    const parent = h.main('parent-59', [
+      call(1, 'edit', { file_path: 'a.ts' }),
+      call(1, 'pwsh', { command: 'Remove-Item dead.cs' }),
+      call(1, 'subagent', { description: '实现 X' }),
+      call(2, 'read', { file_path: 'b.ts' }),
+    ], {}, 'session-59', dir)
+    h.created(parent)
+
+    h.turnStopping(parent, 1)
+    h.turnStopping(parent, 2)
+
+    const file = join(dir, 'dispatch', 'runs', 'session-59.jsonl')
+    const rows = readFileSync(file, 'utf8').trim().split('\n').map(row => JSON.parse(row))
+    assert.equal(rows.length, 1, 'only the writing/delegating turn leaves a row')
+    assert.equal(rows[0].turn, 1)
+    assert.equal(rows[0].session, 'session-59')
+    assert.equal(rows[0].writes, 1)
+    assert.deepEqual(rows[0].files, ['a.ts'])
+    assert.equal(rows[0].shellWrites, 1)
+    assert.equal(rows[0].delegations, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('observation is off for child agents, missing cwd, and explicit disable', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-observe-off-'))
+  try {
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log: false }, observation: { enabled: false } })
+
+    const parent = h.main('parent-60', [call(1, 'edit', { file_path: 'a.ts' })], {}, 'session-60', dir)
+    h.created(parent)
+    h.turnStopping(parent, 1)
+
+    assert.throws(() => readFileSync(join(dir, 'dispatch', 'runs', 'session-60.jsonl'), 'utf8'),
+      'a disabled observation section writes nothing')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
 
 /** One committed `tool/call` record, shaped like the session log stores it. */
 function call(turn, name, args, id) {
@@ -988,8 +1254,9 @@ function harness() {
      * A live top-level agent with its own hook scope and session log.
      * `sessionId` defaults to `id`; pass a distinct value to model a host where
      * the agent handle and the session it belongs to are not the same string.
+     * `cwd` feeds the 0.4.0 observation rows (absent = observation skips).
      */
-    main(id, sessionEvents = [], header = {}, sessionId = id) {
+    main(id, sessionEvents = [], header = {}, sessionId = id, cwd) {
       const messages = []
       const hooks = new Map()
       const agent = {
@@ -997,6 +1264,7 @@ function harness() {
         messages,
         session: {
           id: sessionId,
+          cwd,
           header: { origin: header.origin, parentSession: header.parentSession, delegationDepth: header.origin === 'subagent' ? 1 : 0 },
           snapshotEvents: () => sessionEvents,
         },

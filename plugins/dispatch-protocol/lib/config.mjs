@@ -15,6 +15,7 @@ export const DEFAULT_RULES = [
   '验收要复跑：子代理声称跑过的命令，派发方必须独立复跑并留存退出码。并行写批次与契约面改动（schema/类型/路由/权限/迁移）完成后另派只读评审：输入只有需求原文、冻结契约、diff 与集成结果，逐条给 PASS|FAIL + 文件:行号；不得采信实现者的自述或其测试通过，全 PASS 须说明每条例子的验证方式；评审可给建议但不得改文件，裁决归派发方。未复跑不得标记完成。',
   '提交权归派发方：子代理不得 commit / push / reset / clean，除非派发中显式授权；派发前先记录目标文件的既有未提交改动，不得覆盖，也不得计入本次成果。',
   '并行只读，互斥并行写：只读勘察能拆成 ≥2 个互不依赖的子问题（不同目录/不同接口/不同文档）时，在同一条消息里并行发出，不要一个一个等；实施也能并行，但白名单必须按文件/模块互斥（同文件、同模块的写仍串行），schema/类型/路由/barrel/lockfile 这类契约在派发前定死，且子代理不得并发跑共享产物的全量构建或测试（同 dist、同缓存目录、同端口一律串行）；大改动需要各自完整构建时拆独立 worktree。',
+  '变更集判级与评审闭环：同一需求的所有批次合并判级——任一批次命中并行写或契约面，整个需求按 gated 处理，不得按子代理切分绕过评审；评审通过后任何后续改动（含派发方自修）须把受影响切片重开评审；实现类任务开工前，任务清单必须显式包含拆批方案或一行不派发理由。',
 ]
 
 /**
@@ -32,6 +33,14 @@ export const DEFAULT_FOOTER = '成本与豁免：主控模型贵、判断强，�
 
 /** The checkpoint reminder sent to the parent when a child completes. */
 export const DEFAULT_CHECKPOINT = '[dispatch-protocol] 子代理 {childId}（{label}）已完成。标记完成前：读它的 diff，并独立复跑它声称跑过的那条命令；结果记入台账。'
+
+/**
+ * The checkpoint reminder for a wave that finished several children (0.4.0).
+ * One message per wave instead of one per child: in an 8-way fan-out the
+ * per-child form delivered N steers in one turn (constraint C violation in
+ * spirit). `{labels}` joins up to five child labels.
+ */
+export const DEFAULT_WAVE_CHECKPOINT = '[dispatch-protocol] 本波次 {count} 个子代理已完成（{labels}）。标记完成前：逐个读 diff，并独立复跑它们声称跑过的命令；结果记入台账。'
 
 /**
  * Validate and render the configured rules into one section body.
@@ -58,9 +67,27 @@ export function resolveConfig(config = {}) {
   const checkpoint = {
     enabled: checkpointSource.enabled !== false,
     text: checkpointSource.text ?? DEFAULT_CHECKPOINT,
+    waveText: checkpointSource.waveText ?? DEFAULT_WAVE_CHECKPOINT,
   }
   if (typeof checkpoint.text !== 'string' || checkpoint.text.trim() === '') {
     throw new Error('dispatch-protocol: checkpoint.text must be a non-empty string')
+  }
+  if (typeof checkpoint.waveText !== 'string' || checkpoint.waveText.trim() === '') {
+    throw new Error('dispatch-protocol: checkpoint.waveText must be a non-empty string')
+  }
+
+  // Per-turn observation rows (0.4.0): every root-agent turn that wrote files
+  // or delegated appends one machine-readable line, so "who did what" survives
+  // context compression. Observation is not a gate: rows are never enforced,
+  // and a full disk or a bad path must never close a turn.
+  const observationSource = source.observation ?? {}
+  const observation = {
+    enabled: observationSource.enabled !== false,
+    // A directory name relative to the session cwd; `false` disables entirely.
+    dir: observationSource.dir === undefined ? 'dispatch/runs' : observationSource.dir,
+  }
+  if (observation.dir !== false && (typeof observation.dir !== 'string' || observation.dir.trim() === '')) {
+    throw new Error('dispatch-protocol: observation.dir must be a non-empty string or false')
   }
 
   const numbered = rules.map((rule, index) => `${index + 1}. ${rule}`).join('\n')
@@ -76,5 +103,5 @@ export function resolveConfig(config = {}) {
   // `nudge.threshold` must fail at load time, not silently never fire.
   const nudge = resolveNudge(source.nudge)
 
-  return { enabled: source.enabled !== false, order, rules, footer, text, checkpoint, nudge }
+  return { enabled: source.enabled !== false, order, rules, footer, text, checkpoint, observation, nudge }
 }

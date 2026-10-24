@@ -44,7 +44,7 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 | `injectDelegationDefaults` | 否 | — | 默认 `true`。在 `tools/execute` 阶段把默认路由写进委派参数，使 descriptor / 首请求 / 冷恢复三者一致；设 `false` 退回纯 request 层 pin |
 | `force` | 否 | — | `true` = 一律覆盖，连显式选择也 pin（回到 v5 之前的"强制"行为） |
 | `depth` | 否 | — | 只处理委派深度等于该值的子 agent |
-| `roles` | 否 | — | 按委派 `description` 前缀分档路由的数组；每项含 `match`（前缀，大小写不敏感）、`provider`、`model`，可选 `reasoningEffort`、`sandbox`。首个命中生效；未命中回落到 `provider`/`model`；委派调用里显式传的路由仍然优先 |
+| `roles` | 否 | — | 按委派 `description` 前缀分档路由的数组；每项含 `match`（前缀，大小写不敏感）、`provider`、`model`，可选 `reasoningEffort`、`sandbox`。首个命中生效；未命中回落到 `provider`/`model`；委派调用里显式传的路由仍然优先。**注意前缀按字面匹配**：中文 description（如「评审后端改动」）不会命中 `Survey`/`Review` 这类英文前缀——三样本评审（`docs/reviews/2026-10-23-dispatch-pipeline-review.md` G8）里全部评审/勘察子代理因此以 `danger-full-access` 运行。用中文 label 的派发方应在角色表里配对应中文前缀（如 `评审`/`勘察`/`只读`），或约定英文 label |
 
 「界面可改」= 插件页配置卡片可编辑（见下节「GUI 配置」），这四个字段在 Config schema 里标了 `.volatile()`，settings 系统只允许界面写 volatile 路径，所以 `roles` 等其余字段**从机制上**不可能被界面覆盖。
 
