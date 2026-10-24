@@ -1,6 +1,7 @@
 # 派发管线小版本升级方案（0.3.10 → 0.4.0）
 
 > 日期：2026-10-24
+> 状态：**已实施**（`53d2023`，dispatch-protocol 0.4.0；P1 角色表落在 desktop profile 的 `cordis.patch.yml`，不在本仓库）。P1–P6 全部交付，测试 58/58 绿。
 > 依据：`docs/reviews/2026-10-23-dispatch-pipeline-review.md` §8 自审计的处置清单
 > 边界（小版本 = 不动这些）：不改 DSH 核心系统提示词；不新增插件；不做运行时拦截；不动 `subagent-model-pin` 代码；`gate` 强制与 `~/.dsh/dispatch/` 工具链恢复留给下一版。
 > 已核实的实现事实（决定方案形态）：
