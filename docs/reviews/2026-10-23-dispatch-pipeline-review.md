@@ -1,5 +1,7 @@
 # 派发管线设计评审：用两次真实全栈改造做压力测试
 
+> **接续入口**：换设备或新会话继续验证，先读 `docs/superpowers/2026-10-25-dispatch-pipeline-continuation.md`（接续手册：当前状态、恢复步骤、复核流程、0.4.1 候选、下一版分水岭）。
+
 > 评审对象：`docs/superpowers/specs/2026-10-23-dispatch-pipeline-design.md`（下称“设计”）
 > 第一样本：`session-970205ec-62bb-48f3-94f1-d0679bf349a2`（`G:\www\ziyou\scale-03`，2026-10-23 14:25–17:16）
 > 第二样本：`session-ad1c4f49-a8e6-4b74-ac0f-43787f0880c7`（同一仓库，“1.0 流程”，2026-10-23 17:27–18:30）
