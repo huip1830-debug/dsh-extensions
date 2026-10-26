@@ -21,7 +21,8 @@ export const DEFAULT_DELEGATION_TOOLS = ['subagent', 'subagent_fork', 'workflow'
 export const DEFAULT_WRITE_TOOLS = ['write', 'edit']
 
 /**
- * Shell command fragments that mutate files or the repo tree (0.4.0).
+ * Shell command fragments that mutate files or the repo tree (0.4.0; redirect
+ * lookbehind and git `-C` widened in 0.4.1).
  *
  * The write-tools list cannot see a `pwsh` deletion: sample session-82db5b7d's
  * W-5 removed dead files with `Remove-Item` and zero `write`/`edit` calls, and
@@ -32,8 +33,34 @@ export const DEFAULT_WRITE_TOOLS = ['write', 'edit']
  * negative is a silently unverified write batch. Build/test/db commands
  * (`dotnet build`, `npx jest`, `prisma migrate`) are intentionally absent:
  * they touch artifacts, not the reviewed source set.
+ *
+ * 0.4.1 (I5): the redirect branch now also ignores a `>` that follows `=`, `-`
+ * or `?`, so `=>`, `->` and generics such as `<string?>` no longer read as
+ * output redirects (`2>&1` was already excluded by the `\d`/`&` guards).
+ * Accepted limit: a bare generic `<T>` still matches, because its `>` follows a
+ * letter — none of the three reviewed samples used that shape.
+ * 0.4.1 (I3): the git branch accepts an optional `-C <path>` (bare word or
+ * single/double quoted). `git -C <path> commit` used to slip past
+ * `\bgit\s+commit` (S6 t6) and was counted nowhere.
  */
-export const DEFAULT_PWSH_MUTATION_PATTERN = /\b(Remove-Item|Set-Content|Out-File|Add-Content|Clear-Content|New-Item|Copy-Item|Move-Item|Rename-Item|ri|del|erase|ren|rename|move|copy|mkdir|rmdir|rd|tee)\b|(?<![\d&])>{1,2}(?![&=\d])|\bgit\s+(apply|checkout|restore|commit|merge|rebase|cherry-pick|rm|mv|clean)\b/i
+export const DEFAULT_PWSH_MUTATION_PATTERN = /\b(Remove-Item|Set-Content|Out-File|Add-Content|Clear-Content|New-Item|Copy-Item|Move-Item|Rename-Item|ri|del|erase|ren|rename|move|copy|mkdir|rmdir|rd|tee)\b|(?<![\d&=\-?])>{1,2}(?![&=\d])|\bgit\s+(?:-C\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?(apply|checkout|restore|commit|merge|rebase|cherry-pick|rm|mv|clean)\b/i
+
+/**
+ * The same shell-mutation shape minus the `commit` verb — the nudge counter's
+ * tier of the 0.4.1 (I3) split.
+ *
+ * Commit rights belong to the dispatcher (rule 4), so the dispatcher's own
+ * `git commit` must not push a turn over the nudge threshold; four observed
+ * false positives: sample four T3, S5 t34, S6 t13 and S7 t2. The checkpoint's
+ * read-only verdict keeps the full pattern above: a child that commits is
+ * execution-class and is not exempt from review.
+ *
+ * Accepted cost: a commit-only turn now reports no observation row (shellWrites
+ * stays 0, so `observeTurn` early-returns). Commit evidence lives in git history;
+ * the observation row only tracks working-tree content changes. `git checkout --
+ * <file>` still counts, because restoring a working-tree file is a content change.
+ */
+export const DEFAULT_PWSH_NUDGE_SHELL_PATTERN = /\b(Remove-Item|Set-Content|Out-File|Add-Content|Clear-Content|New-Item|Copy-Item|Move-Item|Rename-Item|ri|del|erase|ren|rename|move|copy|mkdir|rmdir|rd|tee)\b|(?<![\d&=\-?])>{1,2}(?![&=\d])|\bgit\s+(?:-C\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?(apply|checkout|restore|merge|rebase|cherry-pick|rm|mv|clean)\b/i
 
 /**
  * Decide whether one committed tool call touched a file.
@@ -78,8 +105,12 @@ function readCommand(raw) {
  * A turn whose own prose already justifies the skip is suppressed before this
  * text is ever rendered, so the wording no longer hedges ("若超出豁免…"): the
  * absence of an explanation is exactly what earned it.
+ *
+ * 0.4.1: `{fileCount}`/`{writes}` name working-tree files only; shell changes
+ * keep their own count inside `{files}` (see `renderNudge`/`formatFiles`), so a
+ * commit-only turn cannot render as "写了 N 个文件".
  */
-export const DEFAULT_NUDGE_TEXT = '[dispatch-protocol] 本回合改了 {fileCount} 个文件（{writes} 次写入）：{files}。派发 0 次，也没有说明理由。要么一行给出不派发的理由，要么改为派发。'
+export const DEFAULT_NUDGE_TEXT = '[dispatch-protocol] 本回合写入 {fileCount} 个文件（{writes} 次）：{files}。派发 0 次，也没有说明理由。要么一行给出不派发的理由，要么改为派发。'
 
 /**
  * Substrings that count as "this turn already explained itself".
@@ -162,9 +193,11 @@ export function resolveNudge(source = {}) {
  * @param events - `session.snapshotEvents()`.
  * @param turn - the turn being closed.
  * @param config - the resolved `nudge` section.
- * @returns `{ writes, files, delegations }` for that turn.
+ * @param shellPattern - shell-mutation pattern for `shellWrites`; defaults to
+ *   the nudge tier, which excludes `git commit` (0.4.1).
+ * @returns `{ writes, files, shellWrites, failedWrites, delegations }` for that turn.
  */
-export function summarizeTurn(events, turn, config) {
+export function summarizeTurn(events, turn, config, shellPattern = DEFAULT_PWSH_NUDGE_SHELL_PATTERN) {
   const log = events ?? []
   const failedCallIds = collectFailedCallIds(log)
   const writes = []
@@ -201,8 +234,11 @@ export function summarizeTurn(events, turn, config) {
     }
     // `pwsh` counts only when the command mutates files or the repo tree —
     // builds and read-only queries must not mark a survey turn as a write turn.
+    // 0.4.1: the nudge tier leaves `git commit` out (dispatch-owner's own
+    // commit is not a working-tree change); the optional 4th argument restores
+    // the full pattern.
     const command = readCommand(data.arguments)
-    if (command !== undefined && DEFAULT_PWSH_MUTATION_PATTERN.test(command)) shellWrites += 1
+    if (command !== undefined && shellPattern.test(command)) shellWrites += 1
   }
 
   return { writes: writes.length, files, shellWrites, failedWrites, delegations }
@@ -249,7 +285,8 @@ function readPath(raw) {
  *
  * `threshold` counts distinct files, not write calls: editing one file three
  * times stays inside the small-change exemption. Shell mutations carry no
- * reliable path, so each counts as one anonymous file (0.4.0).
+ * reliable path, so each counts as one anonymous file (0.4.0); 0.4.1 keeps the
+ * same arithmetic but on the nudge tier, where `git commit` no longer counts.
  * @param summary - `summarizeTurn(...)` output.
  * @param config - the resolved `nudge` section.
  * @returns true when the turn touched enough distinct files and delegated nothing.
@@ -296,10 +333,13 @@ export function justifiedInTurn(events, turn, patterns) {
  * @returns the message body.
  */
 export function renderNudge(template, summary) {
-  const fileCount = summary.files.length + (summary.shellWrites ?? 0)
+  // 0.4.1 (I3): fileCount and writes count working-tree files only. Shell
+  // mutations carry no reliable path and keep their own count inside `{files}`
+  // (`formatFiles`), so the two numbers never absorb a `git commit`.
+  const fileCount = summary.files.length
   return template
     .replaceAll('{fileCount}', String(fileCount))
-    .replaceAll('{writes}', String(summary.writes + (summary.shellWrites ?? 0)))
+    .replaceAll('{writes}', String(summary.writes))
     .replaceAll('{files}', formatFiles(summary.files, summary.shellWrites ?? 0))
     .replaceAll('{turn}', String(summary.turn))
 }

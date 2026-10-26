@@ -30,7 +30,7 @@
 1. `git clone`（或 pull）本仓库；插件依赖经 profile 的 `package.json` 指向 GitHub，无需单独发布 npm 包。
 2. **profile 配置不随仓库走**：把 `~/.dsh/profiles/desktop/cordis.patch.yml` 里的 `subagent-model-pin.roles` 段（含 `评审`/`勘察`/`只读` 中文前缀角色）拷到目标设备同一文件。**⚠ 2026-10-26 勘误**：本机（G:\ 设备）该文件 roles 段实测只剩英文 `Survey`/`Review`（mtime 10-26 10:06），中文前缀已丢——10-26 三个样本只读沙箱 0/40 即源于此（评审主文档 §10.3-P1）。修复时注意 I1 修订：**不要**直接给「评审」前缀配 read-only（S7 有「评审修复批」这类执行批 label，会被钉死）；只读类 label 应先约定可机械判定的标记（如「（只读）」后缀）再配角色。修复后必须新开会话验证。
 3. 发布（每次插件更新都要走）：完全退出 DSH（托盘也退，否则 EPERM）→ `dsh plugin --profile desktop update dispatch-protocol` → 重启 DSH → **新开会话**才生效（插件不热加载、角色白名单按会话冻结）。
-4. 核验安装：`profiles/desktop/node_modules/dispatch-protocol/package.json` 的 version 与仓库一致；与仓库逐文件 `Compare-Object` 一致。
+4. 核验安装（0.4.1 起用脚本，替代手工比对）：`node plugins/dispatch-protocol/scripts/verify-install.mjs`——四项全 PASS（installed 目录/版本一致/逐文件一致/profile roles 含只读+勘察）且退出码 0 才算装好。
 
 ## 4. 继续做验证：操作流程
 
@@ -78,12 +78,12 @@ Get-Content <任务仓库>\dispatch\runs\<会话id>.jsonl
 
 | # | 问题 | 建议修法 | 优先级 |
 |---|---|---|---|
-| P1 | **本机 profile 中文角色整段丢失**（mtime 10-26 10:06），三样本只读沙箱 0/40；换设备/重发即漂移且无任何校验能发现 | ① 修复本机 roles（注意先定只读 label 约定，勿直接配「评审」前缀——S7「评审修复批」教训）；② 0.4.1 加**安装核验**：update 后 diff profile roles 与仓库基线，或插件启动探测并记决定日志 | **最高**（G8 缺口复现中） |
-| I1 | `复审` label 不命中角色表（前缀按字面匹配） | **修订**：label 只影响 subagent-model-pin 沙箱收窄，不参与 checkpoint 判定；修法从「加一个词」改为「只读类 label 固定可机械判定标记（如『（只读）』后缀）+ profile 校验」 | 并入 P1 |
+| P1 | **本机 profile 中文角色整段丢失**（mtime 10-26 10:06），三样本只读沙箱 0/40；换设备/重发即漂移且无任何校验能发现 | ① ~~修复本机 roles~~ **已修**（2026-10-26：cordis.patch.yml 加 `只读`/`勘察` 两个 read-only 角色；「评审」不配前缀，约定见同文件注释与 0.4.1 插件 footer）；② 安装核验 **0.4.1 已实现**：`plugins/dispatch-protocol/scripts/verify-install.mjs`（installed 版本/逐文件 diff/profile roles 四项，发布流程必跑） | **最高**（G8 缺口复现中） |
+| I1 | `复审` label 不命中角色表（前缀按字面匹配） | **修订**：label 只影响 subagent-model-pin 沙箱收窄，不参与 checkpoint 判定；修法从「加一个词」改为「只读类 label 一律以『只读』/『勘察』开头」——**已随 0.4.1 footer 与 profile 注释落地约定** | 已实现（待发布） |
 | I2 | 重启/恢复丢失内存 pending 队列 → 检查点静默缺席且无日志 | pending 队列随决定日志落盘、恢复时重建；或记为已知边界 | 中 |
-| I3 | nudge 把 `git commit`、归档型 `Copy-Item/Move-Item` 计为文件变更（已 4 例：样本四 T3、主会话分析回合、S5 t34、S6 t13、S7 t2）；**新维度**：`git -C <path> commit` 漏计（S6 t6）；仓库外变更（%TEMP%/JDK/SDK）全计入；文案把 shell 计入「文件数」 | **两档拆分**：检查点只读判定保留全量变更动词；nudge 计数只计工作区内容变更（Set-Content/Out-File/重定向/Remove-Item），或 shell 变更仅在该回合零 `write`/`edit` 时计入；git 动词统一匹配 `git (-C \S+)? <verb>` 或提交权回合豁免；文案区分「文件」与「shell 变更」 | 建议修 |
-| I4 | nudge steer 导致同回合观测行重复（10-26 坐实：7 对重复行与 7 次 steer 一一对应，决定日志不重复） | 观测行按 `(session, turn)` 去重 | 低 |
-| I5 | **（新）checkpoint read-only 判定的重定向正则把 C# 语法当写盘**：`=>`（`=` 前 `>` 后，lookbehind 未排除 `=`）、`->`、泛型 `<string?>`；S7 复审子代理 0 写却被判非只读 → delivered；S5 另有 4 个真只读评审因此 reason=handled（决策日志 reason 是行为口径，不能当覆盖率用） | 两档拆分时 read-only 判定只认 write/edit + 真实变更动词；或重定向分支要求 `>` 前为行首/空白且后接路径；补 test.mjs 反例（现有只测 `git log`/`2>&1`） | 建议修（已真实误投递 1 次） |
+| I3 | nudge 把 `git commit`、归档型 `Copy-Item/Move-Item` 计为文件变更（已 4 例：样本四 T3、主会话分析回合、S5 t34、S6 t13、S7 t2）；**新维度**：`git -C <path> commit` 漏计（S6 t6）；仓库外变更（%TEMP%/JDK/SDK）全计入；文案把 shell 计入「文件数」 | **0.4.1 已实现**：两档拆分（checkpoint 全量 / nudge 档 git 动词去 commit——提交权归派发方）；git 分支支持 `-C <path>`（裸词/引号）；文案分离「N 个文件（M 次）」与「另有 K 条 shell 变更」；接受代价：纯 commit 回合无观测行（git 历史承担证据） | 已实现（待发布） |
+| I4 | nudge steer 导致同回合观测行重复（10-26 坐实：7 对重复行与 7 次 steer 一一对应，决定日志不重复） | **0.4.1 已实现**：observeTurn 按 `(session, turn)` 去重，保留首行 | 已实现（待发布） |
+| I5 | **（新）checkpoint read-only 判定的重定向正则把 C# 语法当写盘**：`=>`（`=` 前 `>` 后，lookbehind 未排除 `=`）、`->`、泛型 `<string?>`；S7 复审子代理 0 写却被判非只读 → delivered；S5 另有 4 个真只读评审因此 reason=handled（决策日志 reason 是行为口径，不能当覆盖率用） | **0.4.1 已实现**：重定向分支 lookbehind 加 `=`/`-`/`?`；test.mjs 补了反例用例。已知残留（0.4.1 评审注记，0.5.0 收口）：裸泛型 `<T>`/`<string>` 仍命中；`2>file`/`1>file` 因 `\d` lookbehind 漏计；`git --no-pager commit` 不命中 | 已实现（待发布） |
 | I6 | **（新）handled 判定偏松**：parentAlreadyHandled 只要「报告后任意一次 tool/call」即成立（S6 t9 靠 todo_write 判 handled、当回合未验收）；反向 S6 t10 拦下真实「未验收即收官」一次 | 并入 0.5.0/G1：升级为「验证类命令 + 台账记录」机器校验，0.4.1 不打补丁 | 划归 0.5.0 |
 | I7 | **（新，结构性）**nudge 在收尾消息前注入，`justifiedInTurn` 看不到 steer 后补写的理由 → 提示即答场景提醒必发一次（S7 seq=127/128） | 可选：第二 stopping 对「已补理由」回合补一条 `suppressed: justified-after` 日志（不改投递） | 低 |
 | I8 | **（新，次要）**子代理不经 send_message 直接 finish 时 handled 的 marker 永不命中（S7 5949ee67） | 与 I5 叠加才致 delivered，单修其一即可；一并记录 | 低 |

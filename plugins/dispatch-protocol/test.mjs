@@ -15,7 +15,10 @@ import { join } from 'node:path'
 
 import * as plugin from './plugin.mjs'
 import { resolveConfig, DEFAULT_RULES } from './lib/config.mjs'
-import { callTouchesFile, renderNudge, resolveNudge, shouldNudge, summarizeTurn } from './lib/nudge.mjs'
+import {
+  callTouchesFile, DEFAULT_PWSH_MUTATION_PATTERN, DEFAULT_PWSH_NUDGE_SHELL_PATTERN,
+  renderNudge, resolveNudge, shouldNudge, summarizeTurn,
+} from './lib/nudge.mjs'
 
 // Reminder behaviour is asserted from the harness messages. Decision logging
 // stays off so a test run never appends to the real `%TEMP%` decision log; the
@@ -127,6 +130,17 @@ test('one closing paragraph states who does what and when a dispatch may be skip
   assert.doesNotMatch(dropped.sections[0].text, /成本与豁免/)
 
   assert.throws(() => resolveConfig({ footer: 42 }), /footer/)
+})
+
+test('the footer states the read-only label convention', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+  const text = h.sections[0].text
+
+  assert.match(text, /只读类子代理（评审\/复审\/勘察）的 label 一律以「只读」或「勘察」开头/,
+    '0.4.1: the label prefix is what the role table matches')
+  assert.match(text, /执行类批次的 label 不得以这两个词开头/, 'the exclusion keeps execution batches out of the read-only roles')
+  assert.match(text, /角色表按此前缀收窄沙箱与路由/, 'the sentence names the mechanism the prefix feeds')
 })
 
 test('a completed child triggers exactly one checkpoint message to its parent', () => {
@@ -430,9 +444,8 @@ test('a multi-write turn without delegation is reminded exactly once', () => {
 
     assert.equal(agent.messages.length, 1, 'the nudge costs one step, once per turn')
     assert.match(agent.messages[0].text, /派发 0 次/)
-    assert.match(agent.messages[0].text, /改了 2 个文件/)
-    assert.match(agent.messages[0].text, /2 次写入/)
-    assert.match(agent.messages[0].text, /x\.xaml/)
+    assert.match(agent.messages[0].text, /写入 2 个文件/, '0.4.1: fileCount is the distinct-file count')
+    assert.match(agent.messages[0].text, /（2 次）：x\.xaml, y\.xaml/, '0.4.1: writes and the file list carry no shell count')
     assert.equal(agent.messages[0].role, 'user', 'the provider requires a user-role message')
 
     const lines = readFileSync(log, 'utf8').trim().split('\n')
@@ -478,8 +491,8 @@ test('enough distinct files are reminded even when each is written once', () => 
   h.turnStopping(agent, 1)
 
   assert.equal(agent.messages.length, 1)
-  assert.match(agent.messages[0].text, /改了 4 个文件/)
-  assert.match(agent.messages[0].text, /4 次写入/)
+  assert.match(agent.messages[0].text, /写入 4 个文件/)
+  assert.match(agent.messages[0].text, /（4 次）：a\.txt, b\.txt, c\.txt, d\.txt/)
 })
 
 test('a single write keeps the small-change exemption and is not reminded', () => {
@@ -708,6 +721,18 @@ test('renderNudge fills the placeholders and truncates a long file list', () => 
   assert.match(renderNudge('{fileCount}', { writes: 0, files: [], turn: 1 }), /^0$/)
 })
 
+test('renderNudge keeps shell changes out of the file and write counts', () => {
+  const template = 'c={fileCount} w={writes} f={files}'
+
+  // S7 t2 shape: one file plus one git commit used to render "改了 2 个文件".
+  assert.equal(renderNudge(template, { files: ['spec.md'], writes: 1, shellWrites: 1, turn: 2 }),
+    'c=1 w=1 f=spec.md，另有 1 条 shell 变更命令')
+
+  // S5 t34 shape: shell-only — zero files, zero writes, shell note only.
+  assert.equal(renderNudge(template, { files: [], writes: 0, shellWrites: 2, turn: 34 }),
+    'c=0 w=0 f=另有 2 条 shell 变更命令')
+})
+
 // ---------------------------------------------------------------------------
 // Nudge yield (acceptance turn + one-turn grace) and the unified decision log
 
@@ -845,7 +870,7 @@ test('a delivered checkpoint owns the turn so the same turn is not nudged', () =
   assert.equal(parent.messages.length, 1, 'only the checkpoint message is delivered')
   assert.match(parent.messages[0].text, /child-20/)
   assert.match(parent.messages[0].text, /已完成/)
-  assert.doesNotMatch(parent.messages[0].text, /改了 2 个文件/)
+  assert.doesNotMatch(parent.messages[0].text, /写入 2 个文件/)
   assert.doesNotMatch(parent.messages[0].text, /派发 0 次/)
 })
 
@@ -867,7 +892,7 @@ test('a skipped read-only checkpoint leaves the same turn free to nudge', () => 
   h.turnStopping(parent, 1)
 
   assert.equal(parent.messages.length, 1, 'the read-only checkpoint is skipped, the nudge fires')
-  assert.match(parent.messages[0].text, /改了 2 个文件/)
+  assert.match(parent.messages[0].text, /写入 2 个文件/)
   assert.match(parent.messages[0].text, /派发 0 次/)
   assert.doesNotMatch(parent.messages[0].text, /child-21/)
 })
@@ -884,7 +909,7 @@ test('a parent with no pending checkpoint is still nudged', () => {
   h.turnStopping(parent, 1)
 
   assert.equal(parent.messages.length, 1, 'the coordinator keeps the plain nudge working')
-  assert.match(parent.messages[0].text, /改了 2 个文件/)
+  assert.match(parent.messages[0].text, /写入 2 个文件/)
 })
 
 test('the checkpoint queue is keyed by the parent session id, not the agent id', () => {
@@ -939,8 +964,83 @@ test('a turn with two pwsh deletions and no delegations is nudged', () => {
   h.turnStopping(parent, 1)
 
   assert.equal(parent.messages.length, 1)
-  assert.match(parent.messages[0].text, /改了 2 个文件/)
+  assert.match(parent.messages[0].text, /写入 0 个文件（0 次）/, '0.4.1: shell-only means zero files and zero writes')
   assert.match(parent.messages[0].text, /另有 2 条 shell 变更命令/)
+})
+
+test('the redirect branch ignores arrows, generics and stderr merges', () => {
+  const cmd = command => JSON.stringify({ command })
+
+  assert.equal(callTouchesFile('pwsh', cmd('"$rev => $($x)"')), false, '0.4.1: => is an arrow, not a redirect')
+  assert.equal(callTouchesFile('pwsh', cmd('Write-Output "$a -> $b"')), false, '0.4.1: -> is an arrow, not a redirect')
+  assert.equal(callTouchesFile('pwsh', cmd('List<string?> items')), false, '0.4.1: a generic close is not a redirect')
+  assert.equal(callTouchesFile('pwsh', cmd('dotnet build 2>&1')), false, '2>&1 merges stderr, it does not write a file')
+  assert.equal(callTouchesFile('pwsh', cmd('git status --short')), false)
+})
+
+test('git -C and a chained git commit are counted as mutations', () => {
+  const cmd = command => JSON.stringify({ command })
+
+  assert.equal(callTouchesFile('pwsh', cmd('echo hi > out.txt')), true, 'a redirect to a real file mutates')
+  assert.equal(callTouchesFile('pwsh', cmd('git add -A; git commit -m x')), true, 'a chained commit is a mutation')
+  assert.equal(callTouchesFile('pwsh', cmd('git -C G:\\www\\ziyou\\dsh-extensions commit -m x')), true,
+    'S6 t6: git -C <path> commit used to escape the pattern')
+  assert.equal(callTouchesFile('pwsh', cmd('git -C "G:\\some path" commit -m x')), true, 'a quoted -C path is matched too')
+  assert.equal(callTouchesFile('pwsh', cmd('Remove-Item x')), true)
+})
+
+test('a git commit counts for the checkpoint but not for the nudge tier', () => {
+  const config = resolveNudge({})
+  const commit = JSON.stringify({ command: 'git commit -m "x"' })
+  const events = [
+    call(1, 'pwsh', { command: 'git commit -m "x"' }),
+    call(1, 'write', { file_path: 'spec.md' }),
+  ]
+
+  // Checkpoint tier: a child that commits is execution-class, not read-only.
+  assert.equal(callTouchesFile('pwsh', commit), true)
+
+  // Nudge tier: the dispatcher's own commit must not push the turn over.
+  const summary = summarizeTurn(events, 1, config)
+  assert.equal(summary.writes, 1)
+  assert.equal(summary.shellWrites, 0, 'a commit is not a working-tree change for the nudge counter')
+  assert.equal(shouldNudge(summary, config), false, 'one file + one commit stays inside the exemption')
+
+  // The optional 4th argument restores the full mutation pattern (checkpoint tier).
+  const full = summarizeTurn(events, 1, config, DEFAULT_PWSH_MUTATION_PATTERN)
+  assert.equal(full.shellWrites, 1)
+  assert.equal(shouldNudge(full, config), true, 'the full tier would have counted the commit')
+})
+
+test('the nudge shell pattern keeps the other git mutations but drops commit', () => {
+  assert.equal(DEFAULT_PWSH_NUDGE_SHELL_PATTERN.test('git commit -m x'), false)
+  assert.equal(DEFAULT_PWSH_NUDGE_SHELL_PATTERN.test('git -C G:\\repo commit -m x'), false)
+  assert.equal(DEFAULT_PWSH_MUTATION_PATTERN.test('git commit -m x'), true)
+  assert.equal(DEFAULT_PWSH_NUDGE_SHELL_PATTERN.test('git checkout -- a.md'), true,
+    'restoring a working-tree file is a content change')
+  assert.equal(DEFAULT_PWSH_NUDGE_SHELL_PATTERN.test('git -C G:\\repo checkout -- a.md'), true)
+  assert.equal(DEFAULT_PWSH_NUDGE_SHELL_PATTERN.test('echo hi > out.txt'), true)
+})
+
+test('a commit-only or single-file commit turn no longer crosses the nudge threshold', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const commitOnly = h.main('session-61', [
+    call(1, 'pwsh', { command: 'git add -A; git commit -m "x"' }),
+    call(1, 'pwsh', { command: 'git -C G:\\repo commit -m "x"' }),
+  ])
+  h.created(commitOnly)
+  h.turnStopping(commitOnly, 1)
+  assert.equal(commitOnly.messages.length, 0, 'two commits are not two changed files')
+
+  const singleFile = h.main('session-62', [
+    call(1, 'pwsh', { command: 'git commit -m "x"' }),
+    call(1, 'edit', { file_path: 'spec.md' }),
+  ])
+  h.created(singleFile)
+  h.turnStopping(singleFile, 1)
+  assert.equal(singleFile.messages.length, 0, 'S7 t2: one file + one commit stays inside the single-file exemption')
 })
 
 test('read-only and failed pwsh commands do not feed the nudge counter', () => {
@@ -1060,7 +1160,7 @@ test('an unevaluated previous turn is nudged when the next turn closes', () => {
     h.turnStopping(parent, 6)
 
     assert.equal(parent.messages.length, 1, 'the interrupted turn 5 is judged when turn 6 closes')
-    assert.match(parent.messages[0].text, /改了 2 个文件/)
+    assert.match(parent.messages[0].text, /写入 2 个文件/)
 
     const rows = readFileSync(log, 'utf8').trim().split('\n').map(row => JSON.parse(row))
     const nudgeRow = rows.find(row => row.kind === 'nudge')
@@ -1166,9 +1266,54 @@ test('observation is off for child agents, missing cwd, and explicit disable', (
   }
 })
 
-// ---------------------------------------------------------------------------
+test('one (session, turn) is observed once even when a steer runs another step', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-observe-dedupe-'))
+  try {
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log: false } })
 
-/** One committed `tool/call` record, shaped like the session log stores it. */
+    const parent = h.main('parent-63', [
+      call(1, 'edit', { file_path: 'a.ts' }),
+      call(1, 'edit', { file_path: 'b.ts' }),
+    ], {}, 'session-63', dir)
+    h.created(parent)
+
+    h.turnStopping(parent, 1) // delivers the nudge, then appends the row
+    h.turnStopping(parent, 1) // the post-steer step closes the same turn again
+
+    assert.equal(parent.messages.length, 1, 'the nudge itself still fires exactly once')
+    const file = join(dir, 'dispatch', 'runs', 'session-63.jsonl')
+    const rows = readFileSync(file, 'utf8').trim().split('\n').map(row => JSON.parse(row))
+    assert.equal(rows.length, 1, '0.4.1: the second turn-stopping for the same turn adds no row')
+    assert.equal(rows[0].turn, 1)
+    assert.deepEqual(rows[0].files, ['a.ts', 'b.ts'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a commit-only turn leaves no observation row', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-observe-commit-'))
+  try {
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log: false } })
+
+    const parent = h.main('parent-64', [
+      call(1, 'pwsh', { command: 'git commit -m "x"' }),
+    ], {}, 'session-64', dir)
+    h.created(parent)
+    h.turnStopping(parent, 1)
+
+    // Accepted cost of the two-tier split: the commit is not a working-tree
+    // change, so the row is absent; commit evidence lives in git history.
+    assert.throws(() => readFileSync(join(dir, 'dispatch', 'runs', 'session-64.jsonl'), 'utf8'),
+      'a commit-only turn writes no observation row')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
 function call(turn, name, args, id) {
   return { type: 'tool/call', data: { turn, step: 1, callId: id ?? `call-${turn}-${name}`, name, arguments: JSON.stringify(args ?? {}) } }
 }

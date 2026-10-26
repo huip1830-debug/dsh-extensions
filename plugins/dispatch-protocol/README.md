@@ -38,6 +38,18 @@
 4. **回合观测行**（G1/G7 的证据地板）：根代理回合有写或有派发时，往 `<cwd>/dispatch/runs/<sessionId>.jsonl` 追加一行（时间/回合/文件集/写入数/shell 变更数/委派数）。**观测不是门禁**：不回读、不阻断、写盘失败静默。`observation.enabled: false` 或 `observation.dir: false` 关闭。
 
 
+## 0.4.1 变更
+
+补丁版，依据三样本复核 §10.3（I3/I4/I5 + 只读 label 约定）：
+
+1. **漏派发两档拆分**（I3）：`summarizeTurn` 的 shell 计数改用新导出的 `DEFAULT_PWSH_NUDGE_SHELL_PATTERN`——与全量变更正则同构，但 git 动词去掉 `commit`。**提交权归派发方**（规则 4），主控自己的 `git commit` 不应把回合推过 nudge 阈值（四例实证：样本四 T3、S5 t34、S6 t13、S7 t2）。检查点的只读判定仍用全量正则（`callTouchesFile` 不变）：子代理做 commit 属执行类，不豁免；`git checkout -- <file>` 仍计入（还原工作区文件是内容变更）。代价：纯 `git commit` 回合不再产生观测行，提交证据由 git 历史承担。
+2. **文案口径分离**（I3）：`{fileCount}`/`{writes}` 只数工作区文件，不再把 shell 变更折进这两个数；shell 仍以「另有 N 条 shell 变更命令」附在文件清单后（`formatFiles` 不变）。S7 t2 形态渲染为「写入 1 个文件（1 次）：`<spec>`，另有 1 条 shell 变更命令」，S5 t34 形态为「写入 0 个文件（0 次）：另有 2 条 shell 变更命令」。阈值语义不变（`files.length + shellWrites`，nudge 档）。
+3. **观测行按 `(session, turn)` 去重**（I4）：steer 让同一回合多跑一步、`turn-stopping` 二次触发，三样本的 7 对重复行与 steer 一一对应。保留首行（自然回合收尾时的快照），丢弃 steer 后那行；若该步真产生新写/派发，属下一回合口径的已知取舍。
+4. **git 匹配补 `-C <path>`**（I5 扩展）：`git -C <path> commit` 此前漏计（S6 t6），现支持裸词与单/双引号路径。重定向分支的 lookbehind 加 `=`/`-`/`?`，`=>`、`->`、`<string?>` 不再误报；裸 `<T>` 仍命中（accepted limit，三样本未出现）。
+5. **footer 只读 label 约定**：只读类子代理（评审/复审/勘察）的 label 一律以「只读」或「勘察」开头（如「只读评审：…」），执行类批次的 label 不得以这两个词开头。`subagent-model-pin` 是按 label 字面前缀匹配的；**这条本身不改沙箱**，profile 角色表由派发方另改。
+6. **安装核验脚本** `scripts/verify-install.mjs`：检查 installed 目录存在、版本与仓库一致、文件逐字节一致、`cordis.patch.yml` 的 `roles:` 段含只读/勘察前缀；每项输出 `[PASS]`/`[FAIL]`，全 PASS 退出 0，任一 FAIL 退出 1（检测到漂移即正确）。
+
+
 收口段回答的是「谁来做、什么可以直接做、想不清怎么办」：
 
 - **成本**：主控贵而强、子代理便宜 → 多文件机械活默认派发，主控只留决策、例外、验收、提交；
@@ -87,12 +99,12 @@
 - **触发点**：`agent/turn-stopping`（serial，回合即将收尾、`turn/end` 提交之前）。这里 `steer` 会让本回合再跑一步，因此提醒只花一步，且**每回合最多一次**（按回合号去重，模型回一句「收到」后继续改文件也不会再触发）。
 - **计数来源**：该回合已提交的 `tool/call` 事件。事件自带 `turn`，所以不需要任何跨回合状态，恢复的会话算出的数字与实时一致。
 - **失败不计数**：写调用的结局要看它的 `tool/result`——`isError === true` 的写入没有落盘，不计入 `writes`/`files`；没有 `callId` 或找不到结果的调用照旧计数（回合被打断时不能把写入抹掉）。
-- **触发条件**：本回合**去重文件数** ≥ `nudge.threshold`（默认 2；同一文件多次编辑只算 1）**且**派发调用（`subagent`/`subagent_fork`/`workflow`）为 0。
-- **动作**：给主控发一条 `{fileCount}`/`{writes}`/`{files}`/`{turn}` 渲染的提醒（形如「改了 4 个文件（9 次写入）」），并往决定日志（`nudge.log`，默认 `%TEMP%\dispatch-protocol-decisions.jsonl`，一行一条 JSON）记一笔 `"kind":"nudge"` 的决定。
+- **触发条件**：本回合**去重文件数 + shell 变更数** ≥ `nudge.threshold`（默认 2；同一文件多次编辑只算 1；0.4.1 起 nudge 档不把 `git commit` 算作 shell 变更）**且**派发调用（`subagent`/`subagent_fork`/`workflow`）为 0。
+- **动作**：给主控发一条 `{fileCount}`/`{writes}`/`{files}`/`{turn}` 渲染的提醒（0.4.1 口径，形如「写入 4 个文件（9 次）：…」；纯 shell 回合为「写入 0 个文件（0 次）：另有 2 条 shell 变更命令」），并往决定日志（`nudge.log`，默认 `%TEMP%\dispatch-protocol-decisions.jsonl`，一行一条 JSON）记一笔 `"kind":"nudge"` 的决定。
 - **已解释则静默（0.3.6 起）**：本回合的 `assistant/message` 正文里若已出现 `nudge.justifiedPatterns` 中的任一词（默认 `豁免` / `不派发` / `未派发` / `无需派发` / `不需要派发` / `直接做` / `一条命令验完` / `一处改动的` / `镜像面`），**不发消息**，只往日志记一行 `"decision":"suppressed","reason":"justified"`。多文件写入是常态，模型常常在同一回合已经写清「为什么自己改」，再把问题复述一遍只会让会话窗口多一条噪音——实测 `session-a2e9f600` 的 turn 3：主控正文已写「4 个文件是同一处文案的 4 个镜像面…属于豁免」，提醒仍照样发出，用户只得到一条重复消息。判定只看 `assistant/message`（模型说的话），不看 `tool/result` 文本；只认本回合，别的回合解释过不算。
 - **不适用于子代理**：子代理本身不能再派发，其写操作已经记在父回合里。
 
-只数调用名，不解析副作用：`pwsh` 里 `Set-Content` 之类的写入落在口径之外（不算）；而 `write`/`edit` 按**结果**算——成功才计数，被策略拒绝或抛错的调用（`tool/result.isError === true`）不计。计数按去重路径：同一文件改多次只算 1 个文件。
+`write`/`edit` 按**结果**算——成功才计数，被策略拒绝或抛错的调用（`tool/result.isError === true`）不计；`pwsh` 命中变更正则才算 shell 变更（0.4.0 起；0.4.1 起 nudge 档不含 `git commit`，checkpoint 档仍含）。计数按去重路径：同一文件改多次只算 1 个文件。
 
 ## 提醒让位（0.3.10 起）
 
@@ -132,7 +144,7 @@ checkpoint 与 nudge 的每次判定都写一行，被抑制的也写——否�
 | `checkpoint.enabled` | `true` | 子代理完成后是否给父代理发检查点 |
 | `checkpoint.text` | 内置模板 | 覆盖检查点文案，支持 `{childId}` / `{label}` |
 | `nudge.enabled` | `true` | 是否检查「漏派发」（验收回合与宽限回合仍会静默） |
-| `nudge.threshold` | `2` | 本回合去重文件数 ≥ 该值且 0 派发时提醒（正整数） |
+| `nudge.threshold` | `2` | 本回合去重文件数 + shell 变更数 ≥ 该值且 0 派发时提醒（正整数；0.4.1 起 nudge 档不计 `git commit`） |
 | `nudge.writeTools` | `['write','edit']` | 计入「改动」的工具名 |
 | `nudge.delegationTools` | `['subagent','subagent_fork','workflow']` | 计入「已派发」的工具名 |
 | `nudge.justifiedPatterns` | 见上（0.3.8 起 9 条） | 本回合正文命中任一即静默（子串匹配，NFKC 归一） |

@@ -29,7 +29,7 @@ export const DEFAULT_RULES = [
  * model: mechanical volume belongs to children, judgement belongs to the main
  * agent. Uncertainty is a reason to batch, never a reason to keep it all.
  */
-export const DEFAULT_FOOTER = '成本与豁免：主控模型贵、判断强，子代理便宜、适合机械执行。单文件且纯文案/配置/测试接线的改动可以直接做，但须先读原文并在回复里给出改动与验证证据；其余多文件机械活（同模式批量改写、大范围只读检索、跑长命令收输出）默认派给子代理，主控只留方案取舍、边界判断、例外文件、验收复跑与提交。步骤一时穷举不出来就拆批：先派只读勘察批次问清不确定项，再派实现批次；实现批次按互斥文件切分，能并行的同一条消息发出，契约先定死。可多批陆续派发，不许整包留给自己。缺计划类 skill 时，先写「每条 = 一个决策点或一批派发」的任务清单，再据此决定派发，不得据缺 skill 跳过派发判断。'
+export const DEFAULT_FOOTER = '成本与豁免：主控模型贵、判断强，子代理便宜、适合机械执行。单文件且纯文案/配置/测试接线的改动可以直接做，但须先读原文并在回复里给出改动与验证证据；其余多文件机械活（同模式批量改写、大范围只读检索、跑长命令收输出）默认派给子代理，主控只留方案取舍、边界判断、例外文件、验收复跑与提交。步骤一时穷举不出来就拆批：先派只读勘察批次问清不确定项，再派实现批次；实现批次按互斥文件切分，能并行的同一条消息发出，契约先定死。可多批陆续派发，不许整包留给自己。缺计划类 skill 时，先写「每条 = 一个决策点或一批派发」的任务清单，再据此决定派发，不得据缺 skill 跳过派发判断。只读类子代理（评审/复审/勘察）的 label 一律以「只读」或「勘察」开头（如「只读评审：…」）——角色表按此前缀收窄沙箱与路由，执行类批次的 label 不得以这两个词开头。'
 
 /** The checkpoint reminder sent to the parent when a child completes. */
 export const DEFAULT_CHECKPOINT = '[dispatch-protocol] 子代理 {childId}（{label}）已完成。标记完成前：读它的 diff，并独立复跑它声称跑过的那条命令；结果记入台账。'

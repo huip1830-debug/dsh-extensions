@@ -187,6 +187,8 @@ function registerReminders(ctx, nudge, checkpoint, observation) {
   const lastNudgedTurn = new Map()
   /** parentId → last turn number that went through nudge evaluation (0.4.0). */
   const lastEvaluatedTurn = new Map()
+  /** parentId → last turn number that already produced one observation row (0.4.1). */
+  const lastObservedTurn = new Map()
 
   const render = (record, childId) => checkpoint.text
     .replaceAll('{childId}', childId)
@@ -348,6 +350,15 @@ function registerReminders(ctx, nudge, checkpoint, observation) {
    * @param isRootAgent - child turns are covered by the parent's rows.
    */
   const observeTurn = (target, parentId, turn, isRootAgent) => {
+    // One row per (session, turn) (0.4.1, I4). A `steer` makes the same turn run
+    // another step, so `turn-stopping` fires again for a turn that was already
+    // observed; all 7 duplicate pairs in the three samples line up one-to-one
+    // with a steer (review §10.3-I4). The extra step is the model answering the
+    // reminder, not new evidence, so the first row — the natural turn-end
+    // snapshot — is kept and the post-steer one is dropped. Known tradeoff: if
+    // that extra step really writes or delegates, the row does not record it;
+    // it is accounted for under the next turn.
+    if (lastObservedTurn.get(parentId) === turn) return
     if (!observation.enabled || observation.dir === false || !isRootAgent) return
     if (!Number.isInteger(turn)) return
     try {
@@ -369,6 +380,7 @@ function registerReminders(ctx, nudge, checkpoint, observation) {
         failedWrites: summary.failedWrites,
         delegations: summary.delegations,
       })}\n`)
+      lastObservedTurn.set(parentId, turn)
     } catch {
       // observation must never break the host
     }
