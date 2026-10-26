@@ -1,0 +1,404 @@
+=== 1. subagent 派发（按时间） ===
+
+[2026/10/26 10:11:26 T1 seq=41] subagent desc="审查采购入库推送链路" model=- provider=-
+  brief_chars=1117
+  prompt_head=你是代码审查员，仓库根目录 G:\www\ziyou\scale-03（Node.js + Express 5 + Prisma + PostgreSQL 后端）。只读审查，禁止修改任何文件，禁止执行写入命令（可用 git show/git diff/read/grep 等只读操作）。 【现状】近三天（commit bb943b8..48cb93b）该项目做了"白条打级直入（废弃生猪入场）"大改造及后续修复。详见 G:\www\ziyou\scale-03\dispatch\2026-10-26-review-3days-situation.md（先读它）。本批次你负责【A1 采购入库推送链路
+
+[2026/10/26 10:11:26 T1 seq=42] subagent desc="审查打级分割成本链路" model=- provider=-
+  brief_chars=1103
+  prompt_head=你是代码审查员，仓库根目录 G:\www\ziyou\scale-03（Node.js + Express 5 + Prisma + PostgreSQL 后端）。只读审查，禁止修改任何文件，禁止执行写入命令（可用 git show/git diff/read/grep 等只读操作）。 【现状】近三天（commit bb943b8..48cb93b）该项目做了"白条打级直入（废弃生猪入场）"与"分割加工场景合并重构（领料+入库合一，批次级口径）"等大改造。详见 G:\www\ziyou\scale-03\dispatch\2026-10-26-review-3days-situation.md
+
+[2026/10/26 10:11:26 T1 seq=43] subagent desc="审查仓库选择后端链路" model=- provider=-
+  brief_chars=1337
+  prompt_head=你是代码审查员，仓库根目录 G:\www\ziyou\scale-03（Node.js + Express 5 + Prisma + PostgreSQL 后端）。只读审查，禁止修改任何文件，禁止执行写入命令（可用 git show/git diff/read/grep 等只读操作）。 【现状】近三天（commit bb943b8..48cb93b）该项目做了"白条打级直入"改造（fb40cba 等）与"场景化仓库选择（秤端可切换 + 场景默认仓库 + 采购入库按仓拆单）"（c39c838）。详见 G:\www\ziyou\scale-03\dispatch\2026-10-26-review
+
+[2026/10/26 10:11:26 T1 seq=44] subagent desc="审查设备常用品类全栈" model=- provider=-
+  brief_chars=1260
+  prompt_head=你是代码审查员，仓库根目录 G:\www\ziyou\scale-03（后端 Node.js + Express 5 + Prisma；管理后台 Vue 3 + Element Plus）。只读审查，禁止修改任何文件，禁止执行写入命令（可用 git show/git diff/read/grep 等只读操作）。 【现状】最近提交 48cb93b "feat: 按秤设备常用品类与品类快速搜索（分割入库/销售出库/盘点三场景）"为每台秤设备维护常用品类，后端+管理后台+WPF 全栈改动。设计文档 docs/superpowers/specs/2026-10-25-device-favorite-i
+
+[2026/10/26 10:11:26 T1 seq=45] subagent desc="审查WPF打级打印生命周期" model=- provider=-
+  brief_chars=1635
+  prompt_head=你是代码审查员，仓库根目录 G:\www\ziyou\scale-03，本批次审查 scale-net/（.NET 8 + WPF 电子秤客户端）。只读审查，禁止修改任何文件，禁止执行写入命令（可用 git show/git diff/read/grep 等只读操作）。 【现状】近三天（commit bb943b8..48cb93b）秤端做了"打级入口改造（废弃入场场景 d8574e2）"、"分割场景合并（ccf9da1 删除 Splitting 场景）"、"批号标签打印（ae4a9b6）"、"打级单价录入修复（5b36f91）"、"单实例退出崩溃修复（9a1e93d）"。详见 G:\www\
+
+[2026/10/26 10:11:26 T1 seq=46] subagent desc="审查WPF仓库选择常用品类" model=- provider=-
+  brief_chars=2131
+  prompt_head=你是代码审查员，仓库根目录 G:\www\ziyou\scale-03，本批次审查 scale-net/（.NET 8 + WPF 电子秤客户端）。只读审查，禁止修改任何文件，禁止执行写入命令（可用 git show/git diff/read/grep 等只读操作）。 【现状】近三天秤端新增两大特性：c39c838 "场景化仓库选择（秤端可切换 + 场景默认仓库 + 采购入库按仓拆单）"与 48cb93b "按秤设备常用品类与品类快速搜索（分割入库/销售出库/盘点三场景）"。契约文档 docs/specs/2026-10-24-scene-warehouse-contract.md、设计文档
+
+[2026/10/26 10:37:42 T5 seq=243] subagent desc="B1 修复采购入库推送" model=- provider=-
+  brief_chars=1723
+  prompt_head=你是实现工程师，仓库根 G:\www\ziyou\scale-03（后端 Node.js + Express 5 + Prisma，TS）。先读 G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的 FC-1 契约与背景，再读审查报告 dispatch/2026-10-26-review-3days-report.md 的 S2/M1/M2/M3 节了解问题细节。 【现状】purchaseInboundPushService.ts 存在：①retry 路由预置 PENDING 后失败不回滚，行卡死且前端 PENDING 无按钮（rout
+
+[2026/10/26 10:37:42 T5 seq=244] subagent desc="B2 作废守卫与迁移回填" model=- provider=-
+  brief_chars=1910
+  prompt_head=你是实现工程师，仓库根 G:\www\ziyou\scale-03（后端 Node.js + Express 5 + Prisma，TS）。先读 G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的 FC-2 契约，再读审查报告 dispatch/2026-10-26-review-3days-report.md 的 S5 与 S1 节了解问题细节。 【现状】①POST /api/carcass/void 只查采购入库 SUCCESS（carcass.ts:439-445），不查 CarcassBatch.status / ErpPro
+
+[2026/10/26 10:37:42 T5 seq=245] subagent desc="B3 修复设备常用品类口径" model=- provider=-
+  brief_chars=1576
+  prompt_head=你是实现工程师，仓库根 G:\www\ziyou\scale-03（后端 Express 5 + Prisma；管理后台 Vue 3 + Element Plus）。先读 G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的 FC-3 契约，再读审查报告 dispatch/2026-10-26-review-3days-report.md 的 M11/M12 节了解问题细节。 【现状】①后台「常用品类」弹窗可选范围是全量启用商品（DeviceFavoritesDialog.vue:217 用 scenesApi.listProducts
+
+[2026/10/26 10:37:42 T5 seq=246] subagent desc="W1 单价区单击守卫" model=- provider=-
+  brief_chars=1872
+  prompt_head=你是实现工程师，仓库根 G:\www\ziyou\scale-03（scale-net 为 .NET 8 + WPF，C#）。先读 G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的 FC-4 契约，再读审查报告 dispatch/2026-10-26-review-3days-report.md 的 S3 节了解问题细节。 【现状】打级场景触屏「点一下单价区」会直接提交整笔记录：GradingViewModel.cs:209-218 的 PriceButtonCommand 在打级中 IsUnitPriceInputActive 恒
+
+[2026/10/26 10:37:42 T5 seq=247] subagent desc="W2 sceneDefaults 键名修复" model=- provider=-
+  brief_chars=1898
+  prompt_head=你是实现工程师，仓库根 G:\www\ziyou\scale-03（scale-net 为 .NET 8，C#）。先读 G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的 FC-5 契约，再读审查报告 dispatch/2026-10-26-review-3days-report.md 的 S4 节了解问题细节。 【现状】后端 GET /api/warehouses/options 的 sceneDefaults 实际下发键名为 SNAKE_UPPER：GRADING/OFFAL/BYPRODUCT/SALES_OUTBOUND/SP
+
+[2026/10/26 10:37:42 T5 seq=248] subagent desc="W3 WPF竞态盘点常用修复" model=- provider=-
+  brief_chars=2776
+  prompt_head=你是实现工程师，仓库根 G:\www\ziyou\scale-03（scale-net 为 .NET 8 + WPF，C#）。先读 G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的 FC-6 契约，再读审查报告 dispatch/2026-10-26-review-3days-report.md 的 M16/M17/M18 与 M11（常用品类口径）节了解问题细节。 【现状】 ①M16：SplitProductInboundViewModel.cs 构造期 `_ = LoadWarehouseAsync()`（:222）fire-a
+
+[2026/10/26 10:51:06 T9 seq=414] subagent desc="评审后端修复FC-1/2/3" model=- provider=-
+  brief_chars=1469
+  prompt_head=你是独立评审员（只读），仓库根 G:\www\ziyou\scale-03。不得修改任何文件、不得 commit，只做审查并给裁决。 【输入】 1. 需求原文：G:\www\ziyou\scale-03\dispatch\2026-10-26-review-3days-report.md 的 S1/S2/S5、M1/M2/M3、M11/M12 节 2. 冻结契约：G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的 FC-1（采购入库推送）、FC-2（作废守卫+迁移回填）、FC-3（设备常用品类） 3. diff：工作区未提交改动，用 
+
+[2026/10/26 10:51:06 T9 seq=415] subagent desc="评审WPF修复FC-4/5/6" model=- provider=-
+  brief_chars=1781
+  prompt_head=你是独立评审员（只读），仓库根 G:\www\ziyou\scale-03。不得修改任何文件、不得 commit，只做审查并给裁决。 【输入】 1. 需求原文：G:\www\ziyou\scale-03\dispatch\2026-10-26-review-3days-report.md 的 S3、S4、M11（WPF 侧）、M16/M17/M18 节 2. 冻结契约：G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的 FC-4（单价区守卫）、FC-5（sceneDefaults 键名）、FC-6（竞态/盘点/常用回退） 3. dif
+
+[2026/10/26 11:11:23 T12 seq=591] subagent desc="P1 推送链路收紧金额口径" model=- provider=-
+  brief_chars=1652
+  prompt_head=你是实现工程师，仓库根 G:\www\ziyou\scale-03（后端 Express 5 + Prisma，TS）。先读 G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的「第二轮 FC-7」契约；背景细节见 dispatch/2026-10-26-review-3days-report.md 的 M4/M5 与评审遗留 2/3。注意：本文件刚经历第一轮修复（retry 回滚/PUSHING 回收/跨仓守卫/红冲出口/快照回写已在代码中），你是在其上增量修改，先读当前代码。 【任务】按 FC-7 实现（契约已冻结，不得偏离）： 1
+
+[2026/10/26 11:11:23 T12 seq=592] subagent desc="P2 打级成本口径修复" model=- provider=-
+  brief_chars=2147
+  prompt_head=你是实现工程师，仓库根 G:\www\ziyou\scale-03（后端 Express 5 + Prisma，TS）。先读 G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的「第二轮 FC-8」契约；背景细节见 dispatch/2026-10-26-review-3days-report.md 的 M6/M8/M9/M10（A2 批发现）。注意：carcass.ts/batchService.ts 刚经历第一轮修复（/void 已推 T+ 守卫 isProductionPushed 已在代码中），先读当前代码。 【任务】按 FC-
+
+[2026/10/26 11:11:23 T12 seq=593] subagent desc="P3 后台前端闭环" model=- provider=-
+  brief_chars=1385
+  prompt_head=你是实现工程师，仓库根 G:\www\ziyou\scale-03（管理后台 Vue 3 + Element Plus + TS）。先读 G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的「第二轮 FC-9」契约。背景：第一轮后端已让 `POST /api/purchase-inbound/:id/redflush` 接受「FAILED 且 poVoucherId 非空」的行并可能返回 `data.warning`，但后台 UI 无入口（PurchaseInbound.vue:430 附近 FAILED 只映射「重推」）。 【任务】按
+
+[2026/10/26 11:11:23 T12 seq=594] subagent desc="P4 WPF收尾三项" model=- provider=-
+  brief_chars=2018
+  prompt_head=你是实现工程师，仓库根 G:\www\ziyou\scale-03（scale-net 为 .NET 8 + WPF，C#）。先读 G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的「第二轮 FC-10」契约。背景：第一轮已修 Stocktake 的 RefreshVisibleItems 实例引用早退（StocktakeViewModel.cs:671-673）与三场景零交集落回（SceneFavoritesState.HasVisibleFavorites / Filter）；WPF 评审遗留 P1/P4 与「零交集落回提示条」。
+
+[2026/10/26 11:30:37 T18 seq=751] subagent desc="二轮评审后端FC-7/8/9" model=- provider=-
+  brief_chars=1756
+  prompt_head=你是独立评审员（只读），仓库根 G:\www\ziyou\scale-03。不得修改任何文件、不得 commit。 【输入】 1. 冻结契约：G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的「第二轮 FC-7（推送链路收紧+金额口径）、FC-8（打级/成本口径）、FC-9（后台前端闭环）」 2. 需求背景：dispatch/2026-10-26-review-3days-report.md 的 M4/M5/M6/M8/M9/M10 + 第一轮评审遗留 1/2/3 3. diff：`git diff -- backend/`（只看 b
+
+[2026/10/26 11:30:37 T18 seq=752] subagent desc="二轮评审WPF FC-10" model=- provider=-
+  brief_chars=1185
+  prompt_head=你是独立评审员（只读），仓库根 G:\www\ziyou\scale-03。不得修改任何文件、不得 commit。 【输入】 1. 冻结契约：G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的「第二轮 FC-10（WPF 收尾三项）」 2. 需求背景：第一轮 WPF 评审遗留 P1（Split 实例脱钩）、P4（前置断言）、零交集落回提示条 3. diff：`git diff -- scale-net/`（本轮增量 6 文件：SplitProductInboundViewModel.cs、StocktakeViewModel.cs、S
+
+[2026/10/26 11:59:47 T21 seq=881] subagent desc="R1 后端边界补齐" model=- provider=-
+  brief_chars=1722
+  prompt_head=你是实现工程师，仓库根 G:\www\ziyou\scale-03（后端 Express 5 + Prisma，TS）。先读 G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的「第三轮 FC-11」契约。注意：这些文件刚经历两轮修复（retry/守卫/金额同式/weight round2/unitPrice 上限/封批 costSnapshotWarnings 已在代码中），先读当前代码。 【任务】按 FC-11 实现（契约已冻结，不得偏离）： 1. null 单价注记+用例：purchaseInboundPushService.ts
+
+[2026/10/26 11:59:47 T21 seq=882] subagent desc="R2 后台前端打磨" model=- provider=-
+  brief_chars=1274
+  prompt_head=你是实现工程师，仓库根 G:\www\ziyou\scale-03（管理后台 Vue 3 + Element Plus + TS）。先读 G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的「第三轮 FC-12」契约。背景：DeviceFavoritesDialog.vue 刚经历两轮修复（保留分组、outOfScene 默认不勾选）；后端封批响应已透出 `costSnapshotWarnings: string[]`（routes/carcass.ts 封批 200 响应）。 【任务】按 FC-12 实现（契约已冻结，不得偏离）： 1
+
+[2026/10/26 11:59:47 T21 seq=883] subagent desc="R3 WPF健壮性收尾" model=- provider=-
+  brief_chars=1847
+  prompt_head=你是实现工程师，仓库根 G:\www\ziyou\scale-03（scale-net 为 .NET 8 + WPF，C#）。先读 G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的「第三轮 FC-13」契约。背景：第二轮刚实现零交集落回提示（SceneFavoritesState.FallbackOccurred 事件 → Split/Stocktake VM 订阅 → NotifyAction）；评审遗留：Stocktake 占位换单双弹、VM 销毁后 in-flight 弹框、Filter 副作用隐晦。 【任务】按 FC-13 
+
+[2026/10/26 12:05:36 T21 seq=915] subagent desc="R4a 秤端前缀握手" model=- provider=-
+  brief_chars=1622
+  prompt_head=你是实现工程师，仓库根 G:\www\ziyou\scale-03（scale-net 为 .NET 8 + WPF，C#）。先读 G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的「FC-14 前缀权威握手」契约（用户已裁决方案：409 权威前缀握手）。 【背景】供应商简码在 T+ 修改后经档案同步落本地；当天已存在旧前缀 CarcassBatch 时，服务端打级提交将改为返回 **409 + `data.authoritativeBatchPrefix`**（既有流转单真实前缀，文案「该供应商当日已存在流转单，批次前缀以服务端为准
+
+[2026/10/26 12:06:37 T22 seq=938] subagent desc="R4b 后端前缀握手" model=- provider=-
+  brief_chars=1719
+  prompt_head=你是实现工程师，仓库根 G:\www\ziyou\scale-03（后端 Express 5 + Prisma，TS）。先读 G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的「FC-14 前缀权威握手」契约（用户已裁决：409 权威前缀握手）。注意：carcass.ts/batchService.ts 刚经历三轮修复（M10 简码校验三处、/void 守卫、weight round2、金额上限、封批幂等 warnings 已在代码中），先读当前代码。 【任务】按 FC-14 第 1 条实现（契约已冻结，不得偏离）： 1. **byS
+
+[2026/10/26 12:20:54 T27 seq=1105] subagent desc="三轮评审后端FC-11/12/14" model=- provider=-
+  brief_chars=1362
+  prompt_head=你是独立评审员（只读），仓库根 G:\www\ziyou\scale-03。不得修改任何文件、不得 commit。 【输入】 1. 冻结契约：G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的「第三轮 FC-11（后端边界补齐）、FC-12（后台前端打磨）、FC-14（前缀权威握手，含裁决 B：byPrefix 命中放行）」 2. diff：`git diff -- backend/` 3. 集成结果（派发方复跑留存退出码）：backend build exit 0、Jest 38 套件 997 用例 exit 0、admin-spa
+
+[2026/10/26 12:20:54 T27 seq=1106] subagent desc="三轮评审WPF FC-13/14" model=- provider=-
+  brief_chars=1423
+  prompt_head=你是独立评审员（只读），仓库根 G:\www\ziyou\scale-03。不得修改任何文件、不得 commit。 【输入】 1. 冻结契约：G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md 的「第三轮 FC-13（WPF 健壮性）、FC-14（前缀权威握手，秤端侧第 2/3 条 + 派发方裁决：最多 2 次重试全自动三段闭环）」 2. diff：`git diff -- scale-net/`（本轮增量：SceneFavoritesState.cs、StocktakeViewModel.cs、SplitProductInboundVi
+
+[2026/10/26 12:38:01 T30 seq=1235] subagent desc="F1切片重审" model=- provider=-
+  brief_chars=1275
+  prompt_head=你是独立评审员（只读），仓库根 G:\www\ziyou\scale-03。不得修改任何文件、不得 commit。 【背景】三轮评审（FC-11/12/14）已通过，但发现 F1 反序并发缺口：byScope 判定原本比较「复用单前缀 vs 当前 shortCode」，新字典秤先建单时旧字典秤不触发 409 握手、落到 batchNo.startsWith 400 进「需处理」。派发方裁决修复：byScope 改为「请求前缀 ≠ 复用单前缀」即抛 BatchPrefixAuthorityError。 【输入】 1. 契约原文：dispatch/2026-10-26-fix-plan.md「FC
+
+
+=== 2. write/edit 按回合与提醒前后分布 ===
+
+T1/before-reminder: 1 次写/改，涉及 1 个文件
+   1x G:\www\ziyou\scale-03\dispatch\2026-10-26-review-3days-situation.md
+
+T4/before-reminder: 1 次写/改，涉及 1 个文件
+   1x G:\www\ziyou\scale-03\dispatch\2026-10-26-review-3days-report.md
+
+T5/before-reminder: 1 次写/改，涉及 1 个文件
+   1x G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md
+
+T9/before-reminder: 2 次写/改，涉及 2 个文件
+   1x G:\www\ziyou\scale-03\scale-net\src\ScaleApp.WPF\Scenarios\SalesOutbound\SalesOutboundViewModel.cs
+   1x G:\www\ziyou\scale-03\scale-net\tests\ScaleApp.WPF.Tests\Scenarios\SalesOutboundViewModelTests.cs
+
+T11/before-reminder: 16 次写/改，涉及 5 个文件
+   8x G:\www\ziyou\scale-03\docs\agent\wpf.md
+   4x G:\www\ziyou\scale-03\docs\agent\backend.md
+   2x G:\www\ziyou\scale-03\docs\agent\admin-spa.md
+   1x G:\www\ziyou\scale-03\docs\superpowers\specs\2026-10-23-carcass-grading-entry-design.md
+   1x G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md
+
+T12/before-reminder: 1 次写/改，涉及 1 个文件
+   1x G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md
+
+T19/before-reminder: 1 次写/改，涉及 1 个文件
+   1x G:\www\ziyou\scale-03\docs\agent\wpf.md
+
+T20/before-reminder: 6 次写/改，涉及 3 个文件
+   3x G:\www\ziyou\scale-03\docs\agent\backend.md
+   2x G:\www\ziyou\scale-03\docs\agent\admin-spa.md
+   1x G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md
+
+T21/before-reminder: 2 次写/改，涉及 1 个文件
+   2x G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md
+
+T24/before-reminder: 1 次写/改，涉及 1 个文件
+   1x G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md
+
+T28/before-reminder: 1 次写/改，涉及 1 个文件
+   1x G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md
+
+T29/before-reminder: 5 次写/改，涉及 3 个文件
+   2x G:\www\ziyou\scale-03\docs\agent\backend.md
+   2x G:\www\ziyou\scale-03\docs\agent\wpf.md
+   1x G:\www\ziyou\scale-03\docs\superpowers\specs\2026-10-23-carcass-grading-entry-design.md
+
+T31/before-reminder: 1 次写/改，涉及 1 个文件
+   1x G:\www\ziyou\scale-03\dispatch\2026-10-26-fix-plan.md
+
+
+=== 3. pwsh 命令分类 ===
+
+-- git (7) --
+[T1 2026/10/26 10:07:52] git log --since="3 days ago" --stat --oneline
+[T1 2026/10/26 10:08:34] git status --short; git log -1 --format="%H %ci"
+[T28 2026/10/26 12:29:31] git diff --stat -- backend/admin-spa/components.d.ts; git diff -- backend/admin-spa/components.d.ts | Select-Object -First 10
+[T33 2026/10/26 13:30:58] git status --porcelain -uall; "---"; git log --oneline -2; "---"; git branch --show-current; git remote -v
+[T34 2026/10/26 13:31:20] git checkout -- backend/admin-spa/components.d.ts; git status --porcelain -uall | Measure-Object | Select-Object -ExpandProperty Count
+[T34 2026/10/26 13:31:45] git add -A; git commit -m @' fix: 三日代码审查问题修复（推送状态机/金额口径/作废守卫/秤端健壮性） 审查 bb943b8..48cb93b 的 5 严重+19 中项分三轮修复（dispatch/2026-10-26-fix-plan.md）： 后端： - 采购入库推送状态机：retry 失败回写 FAILED、PUSHING 10min 条件回收、跨仓守卫 （含
+[T34 2026/10/26 13:32:01] git push origin main 2>&1; "PUSH_EXIT=$LASTEXITCODE"; git log --oneline -1; git status --porcelain
+
+-- ledger/gate/snapshot (0) --
+
+-- test/build (17) --
+[T1 2026/10/26 10:11:26] npm run build 2>&1 | Select-Object -Last 30
+[T1 2026/10/26 10:11:26] dotnet build 2>&1 | Select-Object -Last 30
+[T1 2026/10/26 10:11:55] npm run prisma:generate 2>&1 | Select-Object -Last 5; if ($LASTEXITCODE -eq 0) { npm run build 2>&1 | Select-Object -Last 15 }
+[T1 2026/10/26 10:12:00] dotnet test 2>&1 | Select-Object -Last 15
+[T1 2026/10/26 10:12:14] npm test 2>&1 | Select-Object -Last 40
+[T9 2026/10/26 10:49:09] npm run build 2>&1 | Select-Object -Last 5; "BUILD_EXIT=$LASTEXITCODE"
+[T9 2026/10/26 10:49:19] npm test 2>&1 | Select-Object -Last 8; "TEST_EXIT=$LASTEXITCODE"
+[T9 2026/10/26 10:49:39] dotnet build 2>&1 | Select-Object -Last 8; "BUILD_EXIT=$LASTEXITCODE"
+[T9 2026/10/26 10:49:58] dotnet test 2>&1 | Select-Object -Last 10; "TEST_EXIT=$LASTEXITCODE"
+[T11 2026/10/26 11:00:18] npm run build 2>&1 | Select-Object -Last 8; "SPA_BUILD_EXIT=$LASTEXITCODE"
+[T18 2026/10/26 11:28:43] npm run build 2>&1 | Select-Object -Last 3; "BUILD_EXIT=$LASTEXITCODE"; npm test 2>&1 | Select-Object -Last 6; "TEST_EXIT=$LASTEXITCODE"
+[T18 2026/10/26 11:29:12] dotnet build 2>&1 | Select-Object -Last 4; "BUILD_EXIT=$LASTEXITCODE"; dotnet test 2>&1 | Select-Object -Last 8; "TEST_EXIT=$LASTEXITCODE"
+[T18 2026/10/26 11:29:46] npm run build 2>&1 | Select-Object -Last 3; "SPA_BUILD_EXIT=$LASTEXITCODE"
+[T25 2026/10/26 12:15:39] npm run build 2>&1 | Select-Object -Last 2; "BUILD_EXIT=$LASTEXITCODE"; npm test 2>&1 | Select-Object -Last 6; "TEST_EXIT=$LASTEXITCODE"
+[T25 2026/10/26 12:15:57] npm run build 2>&1 | Select-Object -Last 3; "SPA_BUILD_EXIT=$LASTEXITCODE"
+[T27 2026/10/26 12:19:53] dotnet build 2>&1 | Select-Object -Last 4; "BUILD_EXIT=$LASTEXITCODE"; dotnet test 2>&1 | Select-Object -Last 8; "TEST_EXIT=$LASTEXITCODE"
+[T30 2026/10/26 12:37:24] npm run build 2>&1 | Select-Object -Last 2; "BUILD_EXIT=$LASTEXITCODE"; npm test 2>&1 | Select-Object -Last 6; "TEST_EXIT=$LASTEXITCODE"
+
+-- other (0) --
+
+
+=== 4. workspace/changes 事件 ===
+[2026/10/26 10:13:08] {"turn":1}
+[2026/10/26 10:25:32] {"turn":4}
+[2026/10/26 10:38:10] {"turn":5}
+[2026/10/26 10:42:27] {"turn":6}
+[2026/10/26 10:45:09] {"turn":8}
+[2026/10/26 10:51:25] {"turn":9}
+[2026/10/26 11:06:43] {"turn":11}
+[2026/10/26 11:06:55] {"turn":11}
+[2026/10/26 11:11:56] {"turn":12}
+[2026/10/26 11:18:31] {"turn":13}
+[2026/10/26 11:19:28] {"turn":14}
+[2026/10/26 11:21:37] {"turn":15}
+[2026/10/26 11:24:39] {"turn":16}
+[2026/10/26 11:40:33] {"turn":19}
+[2026/10/26 11:46:17] {"turn":20}
+[2026/10/26 11:46:26] {"turn":20}
+[2026/10/26 12:05:59] {"turn":21}
+[2026/10/26 12:12:07] {"turn":24}
+[2026/10/26 12:16:25] {"turn":25}
+[2026/10/26 12:30:19] {"turn":28}
+[2026/10/26 12:33:37] {"turn":29}
+[2026/10/26 12:47:02] {"turn":31}
+
+
+=== 5. 每回合最后一条 assistant 文本（尾部 500 字符） ===
+
+--- T1 结束前最后文本 ---
+6 个审查代理仍在运行中，等待它们完成通知后汇总审查报告。
+
+**当前进展小结**：
+
+| 验收项 | 结果 |
+|--------|------|
+| 后端 `tsc` 编译 | ✅ 通过（复跑发现本地 Prisma Client 过期，重新 generate 后 exit 0） |
+| 后端 Jest | ✅ 38 套件 / 940 用例全部通过 |
+| `dotnet build` | ✅ 0 错误（1 个 CS1998 测试代码警告） |
+| `dotnet test` | ✅ 172+451+431 = 1054 用例全部通过 |
+| 工作区状态 | 干净，HEAD = 48cb93b（2026-10-25 22:05） |
+
+编译与测试全绿说明近三天提交在「类型正确 + 既有测试覆盖的行为」层面是可靠的。6 个只读审查代理（A1 采购入库推送、A2 打级/分割/成本、A3 仓库选择后端、B 设备常用品类全栈、C WPF 打级/打印、D WPF 仓库/常用品类）正在并行深挖逻辑错误与边界问题，完成后我会汇总按严重度分级的最终审查报告。
+
+--- T2 结束前最后文本 ---
+ → 重推被「明细变化守卫」拦死，红冲又只允许 SUCCESS/VOID_FAILED 状态 → 该维度**既不能推也不能红冲**，系统内无自愈路径，只能去 T+ 手工删单或改库（[purchaseInboundPushService.ts:715-736](backend/src/services/erpPush/purchaseInboundPushService.ts#L715-L736)、[:985-988](backend/src/services/erpPush/purchaseInboundPushService.ts#L985-L988)）
+- **[严重] S2**：与 A3-S1 同根因（快照 null + 动态回退），A1 进一步确认 `isPurchasePushSucceeded` 锁定校验也会因此失效——已推日期的打级/外购在配置变更后**又允许提交与作废**
+- **[中等] M1/M2**：retry 预置 PENDING 后失败不回滚（前端 PENDING 无任何按钮）；PUSHING 无超时自愈（进程中断后永久卡死，旧链路的 10 分钟回收保护没带上）
+- **[中等] M3**：红冲「查无原单→直接置 VOIDED」在 ExternalCode 新旧格式漂移时静默成功，T+ 原单未冲销
+- **[中等] M4/M5**：PO 与入库单「元/斤→元/kg」舍入精度不一致（toFixed(2) vs toFixed(6)）；本地 Σ逐条金额 与 T+ 行重量×单价口径不同，可超对账 0.05 容差误报
+- **[中等] M6**：a29a3af 想修的「明细按行号精确映射」实际只实现了一半（quantity/price 解析后从未用于校验），且新建分支零测试覆盖
+
+只剩 **A2（打级/分割/成本）** 一批运行中，返回后即出最终汇总报告。
+
+--- T3 结束前最后文本 ---
+A1 已正式收尾。五批完成，只剩 **A2（打级/分割/成本链路）** 仍在运行——它负责的 [carcass.ts](backend/src/routes/carcass.ts)、[batchService.ts](backend/src/services/batchService.ts)、[costAllocationService.ts](backend/src/services/costAllocationService.ts)、[splitConsumption.ts](backend/src/services/splitConsumption.ts) 是这次改动中成本/批号口径最核心的部分。
+
+A2 返回后我将输出最终汇总报告，目前已确认的跨批共性根因有两个，最终会合并处置建议：
+
+1. **「快照 null + 动态回退」仓库维度漂移**（A1-S2 / A3-S1 / A3-M1 三处独立发现同一根因）：影响二次推送、作废锁定、销货红冲、分割续推四个面
+2. **「常用 ∩ 场景字典」口径不一致**（B-M1 / D-F3）：后端可选全量商品、秤端按交集显示，零交集时默认空白视图
+
+--- T4 结束前最后文本 ---
+审查完成。报告已存档到 `dispatch/` 目录（该目录已被 .gitignore 忽略，不会污染仓库）。如需我针对某个严重项出修复方案或直接开工修复（按拆批派发流程），告诉我优先处理哪几项即可。
+
+--- T5 结束前最后文本 ---
+6 个实现批已全部并行派出（白名单互斥：B1/B2/B3 后端可各自跑窄测试，W1/W2/W3 禁止构建由我方统一串行复跑）：
+
+| 批次 | 内容 | 状态 |
+|------|------|------|
+| B1 | 采购入库推送：retry 回滚、PUSHING 10 分钟回收、跨仓守卫、FAILED+poVoucherId 红冲出口、快照回写 | 🔄 |
+| B2 | /void 封批守卫（按你的裁决：已推 T+ 禁止作废）+ 迁移回填称重记录仓库 | 🔄 |
+| B3 | 常用品类：PUT 按场景校验、停用可保存、弹窗按场景过滤+停用项保留 | 🔄 |
+| W1 | 单价区单击守卫（HasUnitPriceBuffer） | 🔄 |
+| W2 | sceneDefaults 键名 JsonPropertyName + 真实 JSON 单测 | 🔄 |
+| W3 | 分割开批竞态、盘点清空残留/实例脱钩、常用零交集落回全部 | 🔄 |
+
+全部返回后我将：① 串行复跑 backend build+test、dotnet build+test 集成验收；② 派只读评审按 FC-1..FC-6 逐条核 diff；③ 评审通过后统一更新 docs/agent 文档与 spec 登记（S5 裁决、发布清单补全量 ref 同步提醒）。
+
+--- T6 结束前最后文本 ---
+B2 已正式收尾。当前进度：**W2 ✅、B2 ✅**；B1（采购入库推送）、B3（常用品类）、W1（单价区守卫）、W3（WPF 竞态/盘点/常用）四批仍在运行。全部返回后进入集成复跑。
+
+--- T7 结束前最后文本 ---
+W1 已正式收尾。进度：**W1 ✅、W2 ✅、B2 ✅**；B1、B3、W3 三批运行中。W3 完成后我会先自修 SalesOutbound 单价区副本（W1 裁决项 2），再统一集成复跑。
+
+--- T8 结束前最后文本 ---
+B1 已正式收尾（裁决项均已确认接受）。进度：**B1 ✅、B2 ✅、W1 ✅、W2 ✅**；剩 **B3（常用品类）、W3（WPF 竞态/盘点/常用）** 两批运行中。
+
+--- T9 结束前最后文本 ---
+当前状态汇总：
+
+| 阶段 | 状态 |
+|------|------|
+| 6 个实现批（FC-1 ~ FC-6） | ✅ 全部完成，各自窄验证通过 |
+| 派发方自修（SalesOutbound 单价区副本 + 测试） | ✅ 完成 |
+| 集成复跑（backend build/jest、dotnet build/test） | ✅ 全绿，退出码已留存 |
+| 契约面只读评审（后端 R1 / WPF R2 并行） | 🔄 运行中 |
+| docs/agent 文档与 spec 登记 | ⏳ 评审通过后执行 |
+
+评审裁决返回后：若全 PASS → 更新文档并交付总结；若有 FAIL → 按返工项重开对应切片修复并重审。
+
+--- T10 结束前最后文本 ---
+WPF 评审 **全 PASS 通过**（10/10 契约点，白名单无越界，无新引入高/中问题；P1–P6 为非阻断建议）。重点核查项均确认：Byproduct 误吞用例已完整恢复（36 insertions/0 deletions）、缓冲非空确认路径未误伤、M16/M18 语义正确、diff 新增 12 条测试与 1054+12=1066 自洽。
+
+等后端评审（FC-1/2/3）返回后执行文档更新。
+
+--- T11 结束前最后文本 ---
+一行不派发理由：本轮 5 个文件全部是**文档同步与遗留登记**（backend/wpf/admin-spa 三份 agent 文档 + spec 裁决登记 + fix-plan 收尾），每处改动都依赖只有主控持有的上下文（六批评审结论、用户三项裁决、各批偏差裁决），属于「方案取舍与边界判断」而非机械改写；且文档间无并行写收益、无验证命令可跑，逐处均已先读原文并给出改动证据，故按豁免直接执行。
+
+--- T12 结束前最后文本 ---
+第二轮 4 批已并行派出（白名单互斥，规则同第一轮）：
+
+| 批次 | 覆盖遗留项 | 内容 |
+|------|-----------|------|
+| P1 | 遗留 2/3 + M4/M5 | PUSHING 回收条件更新、跨仓守卫纳入 FAILED+PO 行、PO 单价 6 位小数、快照金额与 T+ 同式 |
+| P2 | M6/M8/M9/M10 | 三场景 weight 舍入同源 + 单价上限、空分摊对象告警、快照版本并发重试、batchPrefix 简码校验 |
+| P3 | 遗留 1 + 提示项 | FAILED+PO 行「红冲」按钮、redflush warning 展示、场景外保留项默认不勾选 |
+| P4 | 遗留 4/5 + 提示项 | 分割入库实例引用早退、测试前置断言、零交集落回提示 |
+
+全部返回后按同一流程收尾：集成复跑 → 只读评审 → 文档同步。
+
+--- T13 结束前最后文本 ---
+P3 已接到文案分叉的补充任务正在执行（running）；P1、P2、P4 也在运行中。等四批全部返回后统一集成复跑。
+
+--- T14 结束前最后文本 ---
+P3 已正式收尾。剩余 P1、P2、P4 三批运行中，返回后即进入集成复跑。
+
+--- T15 结束前最后文本 ---
+P1 已承接 summary 口径统一的补充任务（running）；P2、P4 仍在运行。继续等待。
+
+--- T16 结束前最后文本 ---
+P4 已正式收尾（裁决均已确认）。剩 P1（summary 口径统一补充）、P2（打级/成本口径）两批运行中。
+
+--- T17 结束前最后文本 ---
+本地无运行中的后台任务，仅等 P1 补充完成。收到其回报后立即开始集成复跑（backend build/test → dotnet build/test → admin-spa build），随后派二轮只读评审。
+
+--- T18 结束前最后文本 ---
+二轮集成验收与评审状态：
+
+| 阶段 | 状态 |
+|------|------|
+| P1 推送链路收紧+金额口径（含 summary 统一） | ✅ 56 用例 exit 0 |
+| P2 打级/成本口径 | ✅ 305 用例 exit 0 |
+| P3 后台前端闭环（含文案分叉） | ✅ SFC 自查 exit 0 |
+| P4 WPF 收尾 | ✅ 编译要素自查 |
+| **集成复跑（我独立执行）** | ✅ backend 983/983、dotnet 1068/1068、admin-spa build，全部 exit 0 |
+| 二轮只读评审（后端 FC-7/8/9 + WPF FC-10） | 🔄 两批并行运行中 |
+
+评审通过后做最后的文档同步（backend.md 金额口径/状态机收紧、admin-spa.md 红冲按钮、wpf.md 落回提示）即全部收官。
+
+--- T19 结束前最后文本 ---
+wpf.md 已同步。等后端评审（FC-7/8/9）返回后更新 backend.md / admin-spa.md 并做最终收尾。
+
+--- T20 结束前最后文本 ---
+一行不派发理由：本回合 3 个文件均为评审通过后的**文档同步与结果登记**（backend.md/admin-spa.md 契约点注记、fix-plan 二轮结果与遗留清单），内容完全取自两位评审员的裁决原文与我已作出的裁决结论——逐处先读原文、改动已在回复中给出证据；契约实现与验证均已派发完成（本需求累计派发 10 批：P1–P4 实现 + 两批评审），文档收尾属主控职责的裁决登记，无机械批量可派。
+
+--- T21 结束前最后文本 ---
+当前并行运行：**R1**（后端边界补齐）、**R3**（WPF 健壮性）、**R4a**（秤端 409 前缀握手）；R2 在补类型上移。R1 落定后串行派 **R4b**（后端 409 握手，同文件互斥）。
+
+--- T22 结束前最后文本 ---
+R1 已正式收尾，R4b 已派出。当前运行中：R2（类型上移补充）、R3（WPF 健壮性）、R4a（秤端握手）、R4b（后端握手）。
+
+--- T23 结束前最后文本 ---
+确认仅剩 R4a、R4b 两批在跑（前后端 409 前缀握手）。返回后进入第三轮集成复跑与评审。
+
+--- T24 结束前最后文本 ---
+R4a（秤端握手）与 R4b（后端握手，已获 B 裁决继续）运行中，无其它待办。两批返回后：集成复跑 → 三轮只读评审 → 文档收尾。
+
+--- T25 结束前最后文本 ---
+本地无运行中任务，R4a 是唯一在途工作。收到回报后立即复跑 dotnet build/test 并派三轮评审。
+
+--- T26 结束前最后文本 ---
+等待 R4a 的三段闭环补充完成。
+
+--- T27 结束前最后文本 ---
+第三轮集成与评审状态：
+
+| 阶段 | 状态 |
+|------|------|
+| R1 后端边界补齐 | ✅ 334 用例 exit 0 |
+| R2 后台前端打磨 + 类型上移 | ✅ tsc/SFC exit 0 |
+| R3 WPF 健壮性 | ✅ 语法+要素自查 |
+| R4a/R4b 409 前缀握手（全自动三段闭环） | ✅ 127 用例 exit 0 / 要素自查 |
+| **集成复跑（留存退出码）** | ✅ backend **997/997**、dotnet **1080/1080**、admin-spa build |
+| 三轮只读评审（后端 + WPF 并行） | 🔄 运行中 |
+
+评审通过后做最终文档同步（FC-14 握手协议需登记到 backend.md/wpf.md/spec）即全部收官。
+
+--- T28 结束前最后文本 ---
+本地无运行中任务，唯一在途是后端三轮评审代理。返回后完成最终文档收尾。
+
+--- T29 结束前最后文本 ---
+无其它待办，静候 R4b 回报后即执行：窄测试复跑 → F1 切片重审 → 最终收尾报告。
+
+--- T30 结束前最后文本 ---
+已设置 10 分钟兜底提醒。当前全部工作只剩 F1 切片重审一项在途。
+
+--- T31 结束前最后文本 ---
+全部完成。如需提交代码（建议按三轮分三个 commit 或一次提交）、或继续处理低优观察项，随时告诉我。
+
+--- T33 结束前最后文本 ---
+两个任务都处理。先提交推送（你已明确授权）：
+
+--- 最终回合尾部文本 ---
+一行不派发理由：本回合仅执行 git 提交与推送——按派发纪律第 4 条「提交权归派发方」，commit/push 本就不允许派给子代理；2 次文件写入为还原零内容差异的构建产物 `components.d.ts`（保持工作区干净），无实现内容，无可派发项。

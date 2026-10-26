@@ -1,8 +1,8 @@
 # 派发管线验证接续手册
 
-> 日期：2026-10-25
+> 日期：2026-10-25（2026-10-26 更新）
 > 用途：新开会话或换设备后继续做派发管线的真实任务验证。**只读这一份即可开工**；细节按链接跳。
-> 当前状态：dispatch-protocol **0.4.0** 已发布到 desktop profile 并完成首个真实任务验证（第四样本）。
+> 当前状态：dispatch-protocol **0.4.0** 已完成**七个**真实会话样本验证（10-26 新增 S5 批量审查 df9232a1 / S6 新项目从0 170c0b2d / S7 细节优化 ca836591，复核结论见评审主文档 §10）。机制方向全部正确（34/34 观测行、单文件静默、评审后重评多轮闭环）；**但发现 P1 配置回归：本机 profile 角色表丢失中文前缀，三样本只读沙箱 0/40**（见 §3.2 勘误与 §5 新增 I5–I8）。0.4.1 清单已扩到 I3/I4/I5 + 安装核验。
 
 ## 1. 一句话现状
 
@@ -28,7 +28,7 @@
 ## 3. 换设备/新环境恢复步骤
 
 1. `git clone`（或 pull）本仓库；插件依赖经 profile 的 `package.json` 指向 GitHub，无需单独发布 npm 包。
-2. **profile 配置不随仓库走**：把 `~/.dsh/profiles/desktop/cordis.patch.yml` 里的 `subagent-model-pin.roles` 段（含 `评审`/`勘察`/`只读` 中文前缀角色）拷到目标设备同一文件。
+2. **profile 配置不随仓库走**：把 `~/.dsh/profiles/desktop/cordis.patch.yml` 里的 `subagent-model-pin.roles` 段（含 `评审`/`勘察`/`只读` 中文前缀角色）拷到目标设备同一文件。**⚠ 2026-10-26 勘误**：本机（G:\ 设备）该文件 roles 段实测只剩英文 `Survey`/`Review`（mtime 10-26 10:06），中文前缀已丢——10-26 三个样本只读沙箱 0/40 即源于此（评审主文档 §10.3-P1）。修复时注意 I1 修订：**不要**直接给「评审」前缀配 read-only（S7 有「评审修复批」这类执行批 label，会被钉死）；只读类 label 应先约定可机械判定的标记（如「（只读）」后缀）再配角色。修复后必须新开会话验证。
 3. 发布（每次插件更新都要走）：完全退出 DSH（托盘也退，否则 EPERM）→ `dsh plugin --profile desktop update dispatch-protocol` → 重启 DSH → **新开会话**才生效（插件不热加载、角色白名单按会话冻结）。
 4. 核验安装：`profiles/desktop/node_modules/dispatch-protocol/package.json` 的 version 与仓库一致；与仓库逐文件 `Compare-Object` 一致。
 
@@ -74,14 +74,26 @@ Get-Content <任务仓库>\dispatch\runs\<会话id>.jsonl
 
 复核完一个会话：取证快照（timeline/evidence/users + observation-rows.jsonl）存 `docs/reviews/evidence/<sessionId>/`，复核结论作为新的一节追加到评审主文档（格式参照 §9），提交推送。**证据不要只留在会话里**（G7 的教训：样本 1/2 的会话证据随设备切换不可复跑）。
 
-## 5. 0.4.1 候选清单（第四样本 §9.3 + 后续实证）
+## 5. 0.4.1 候选清单（第四样本 §9.3 + 10-26 三样本实证，评审主文档 §10.3）
 
 | # | 问题 | 建议修法 | 优先级 |
 |---|---|---|---|
-| I1 | `复审` label 不命中角色表（前缀按字面匹配） | profile 角色表加 `复审`，或约定只读类 label 一律以「评审/勘察/只读」开头 | 零代码，顺手做 |
+| P1 | **本机 profile 中文角色整段丢失**（mtime 10-26 10:06），三样本只读沙箱 0/40；换设备/重发即漂移且无任何校验能发现 | ① 修复本机 roles（注意先定只读 label 约定，勿直接配「评审」前缀——S7「评审修复批」教训）；② 0.4.1 加**安装核验**：update 后 diff profile roles 与仓库基线，或插件启动探测并记决定日志 | **最高**（G8 缺口复现中） |
+| I1 | `复审` label 不命中角色表（前缀按字面匹配） | **修订**：label 只影响 subagent-model-pin 沙箱收窄，不参与 checkpoint 判定；修法从「加一个词」改为「只读类 label 固定可机械判定标记（如『（只读）』后缀）+ profile 校验」 | 并入 P1 |
 | I2 | 重启/恢复丢失内存 pending 队列 → 检查点静默缺席且无日志 | pending 队列随决定日志落盘、恢复时重建；或记为已知边界 | 中 |
-| I3 | nudge 把 `git commit`、归档型 `Copy-Item/Move-Item` 计为文件变更（已两次边界误报：样本四 T3、主会话分析回合） | **两档拆分**：检查点只读判定保留全量变更动词；nudge 计数只计工作区内容变更（Set-Content/Out-File/重定向/Remove-Item），或 shell 变更仅在该回合零 `write`/`edit` 时计入 | 建议修 |
-| I4 | nudge steer 导致同回合观测行重复 | 观测行按 `(session, turn)` 去重 | 低 |
+| I3 | nudge 把 `git commit`、归档型 `Copy-Item/Move-Item` 计为文件变更（已 4 例：样本四 T3、主会话分析回合、S5 t34、S6 t13、S7 t2）；**新维度**：`git -C <path> commit` 漏计（S6 t6）；仓库外变更（%TEMP%/JDK/SDK）全计入；文案把 shell 计入「文件数」 | **两档拆分**：检查点只读判定保留全量变更动词；nudge 计数只计工作区内容变更（Set-Content/Out-File/重定向/Remove-Item），或 shell 变更仅在该回合零 `write`/`edit` 时计入；git 动词统一匹配 `git (-C \S+)? <verb>` 或提交权回合豁免；文案区分「文件」与「shell 变更」 | 建议修 |
+| I4 | nudge steer 导致同回合观测行重复（10-26 坐实：7 对重复行与 7 次 steer 一一对应，决定日志不重复） | 观测行按 `(session, turn)` 去重 | 低 |
+| I5 | **（新）checkpoint read-only 判定的重定向正则把 C# 语法当写盘**：`=>`（`=` 前 `>` 后，lookbehind 未排除 `=`）、`->`、泛型 `<string?>`；S7 复审子代理 0 写却被判非只读 → delivered；S5 另有 4 个真只读评审因此 reason=handled（决策日志 reason 是行为口径，不能当覆盖率用） | 两档拆分时 read-only 判定只认 write/edit + 真实变更动词；或重定向分支要求 `>` 前为行首/空白且后接路径；补 test.mjs 反例（现有只测 `git log`/`2>&1`） | 建议修（已真实误投递 1 次） |
+| I6 | **（新）handled 判定偏松**：parentAlreadyHandled 只要「报告后任意一次 tool/call」即成立（S6 t9 靠 todo_write 判 handled、当回合未验收）；反向 S6 t10 拦下真实「未验收即收官」一次 | 并入 0.5.0/G1：升级为「验证类命令 + 台账记录」机器校验，0.4.1 不打补丁 | 划归 0.5.0 |
+| I7 | **（新，结构性）**nudge 在收尾消息前注入，`justifiedInTurn` 看不到 steer 后补写的理由 → 提示即答场景提醒必发一次（S7 seq=127/128） | 可选：第二 stopping 对「已补理由」回合补一条 `suppressed: justified-after` 日志（不改投递） | 低 |
+| I8 | **（新，次要）**子代理不经 send_message 直接 finish 时 handled 的 marker 永不命中（S7 5949ee67） | 与 I5 叠加才致 delivered，单修其一即可；一并记录 | 低 |
+| D1 | **（纪律层，非插件）**批次在跑时派发方又改冻结契约文件（S7 T6，48s 重叠） | 操作纪律条目：批次在跑时冻结文件不再改；必要时复审 brief 注明最终口径 | 文档 |
+
+### 10-26 三样本复核归档
+
+- 复核结论：评审主文档 §10（判据表/对比数字/I1–I8 实证更新）。
+- 证据：`docs/reviews/evidence/session-{df9232a1…,170c0b2d…,ca836591…}/`（各含主会话 jsonl/timeline/evidence/users + observation-rows.jsonl + decisions.jsonl + review-report.md）；跨样本现状文件 `docs/reviews/evidence/2026-10-26-tri-sample-status.md`（§7 有复核后更正）。
+- I5 正则复现脚本：`tmp/verify-i5c.mjs`（用插件真实导出正则；tmp 不入库，需要时按 §10.3-I5 描述重建）。
 
 ## 6. 下一版（0.5.0）的分水岭
 

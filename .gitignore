@@ -8,3 +8,9 @@ desktop.ini
 
 # Node (tests are dependency-free; this only guards accidental installs)
 node_modules/
+
+# Local working files (session decode artifacts; archived evidence lives in docs/reviews/evidence/)
+tmp/
+
+# dispatch-protocol observation rows for sessions run in this repo (evidence snapshots archived per-session)
+dispatch/

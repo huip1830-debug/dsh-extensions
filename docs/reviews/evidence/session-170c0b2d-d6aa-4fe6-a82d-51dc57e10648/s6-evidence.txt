@@ -1,0 +1,365 @@
+=== 1. subagent 派发（按时间） ===
+
+[2026/10/26 10:43:49 T7 seq=192] subagent desc="B1 搭建 mobile-app 脚手架" model=- provider=-
+  brief_chars=3304
+  prompt_head=你是执行类子代理，负责为商品图像识别 Demo 搭建 Vue3+Capacitor 移动 App 工程脚手架。只允许做本派发清单内的事；遇到清单外信息或现状与描述不符，停止并报告 NEEDS_CONTEXT，不得自行扩大范围。禁止任何 git 提交/推送操作。 【现状】 - 工作区根目录：G:\www\ziyou\ocr\ocr-01（git 仓库，已有提交；其中 1.png/2.png/3.png/dispatch/ 目录/《海外移动端OCR识别方案-项目文档.md》为既有未跟踪文件，**禁止读取后修改或删除，一律不碰**）。 - 设计文档（必读）：G:\www\ziyou\ocr\ocr-
+
+[2026/10/26 10:55:04 T8 seq=247] subagent desc="B2 识别模块 TDD 实现" model=- provider=-
+  brief_chars=2412
+  prompt_head=你是执行类子代理，负责实现商品识别 Demo 的识别核心模块（matcher + vectorStore），必须走 TDD（先写失败测试→看失败→最小实现→看通过）。只做清单内的事；清单外信息或现状不符时停报 NEEDS_CONTEXT。禁止任何 git 操作。禁止修改 package.json / pnpm-lock.yaml（不新增任何依赖）。 【现状】 - 工程：G:\www\ziyou\ocr\ocr-01\mobile-app（Vue3+Vite+Capacitor，pnpm，依赖已装好：vitest 3.2.7、localforage 1.10.0、typescript 5.9.3
+
+[2026/10/26 10:55:04 T8 seq=248] subagent desc="B3 TFLite 原生插件与模型脚本" model=- provider=-
+  brief_chars=3717
+  prompt_head=你是执行类子代理，负责实现商品识别 Demo 的 TFLite 原生 Capacitor 插件（Android/Kotlin）与模型下载脚本。只做清单内的事；清单外信息或现状不符时停报 NEEDS_CONTEXT。禁止任何 git 操作。禁止修改 mobile-app/package.json 与 pnpm-lock.yaml（应用侧接入由派发方在集成阶段做）。 【现状】 - 工程：G:\www\ziyou\ocr\ocr-01\mobile-app（Vue3+Vite+Capacitor 7.6.9，pnpm，依赖已装）。android/ 原生工程**尚未生成**（集成阶段由派发方 npx 
+
+[2026/10/26 10:55:04 T8 seq=249] subagent desc="B4 三个业务视图实现" model=- provider=-
+  brief_chars=3285
+  prompt_head=你是执行类子代理，负责实现商品识别 Demo 的三个视图页面（整文件替换占位）。只做清单内的事；清单外信息或现状不符时停报 NEEDS_CONTEXT。禁止任何 git 操作。禁止新增依赖（不碰 package.json/pnpm-lock.yaml），只能用已装的 @capacitor/camera、@capacitor/core、vue、vue-router 与 Tailwind v4。 【现状】 - 工程：G:\www\ziyou\ocr\ocr-01\mobile-app（Vue3 <script setup> + Vite + hash 路由，路由 /enroll /recogniz
+
+[2026/10/26 11:28:42 T11 seq=632] subagent desc="只读评审：对照 spec 逐条验收" model=- provider=-
+  brief_chars=3128
+  prompt_head=你是只读评审子代理。对"第一期商品图像识别 Demo"的实现做独立验收。**禁止修改任何文件，禁止 git 写操作，不得采信实现者自述**——一切结论以你亲自读到的代码与下文集成结果为准。 【需求原文（唯一权威）】 G:\www\ziyou\ocr\ocr-01\docs\superpowers\specs\2026-10-26-phase1-recognition-demo-design.md 【冻结契约】 G:\www\ziyou\ocr\ocr-01\mobile-app\src\recognition\contracts.ts 【实现范围（diff 面，全部为新文件）】 - mobil
+
+
+=== 2. write/edit 按回合与提醒前后分布 ===
+
+T2/before-reminder: 8 次写/改，涉及 1 个文件
+   8x G:\www\ziyou\ocr\ocr-01\海外移动端OCR识别方案-项目文档.md
+
+T6/before-reminder: 1 次写/改，涉及 1 个文件
+   1x G:\www\ziyou\ocr\ocr-01\docs\superpowers\specs\2026-10-26-phase1-recognition-demo-design.md
+
+T8/before-reminder: 4 次写/改，涉及 4 个文件
+   1x G:\www\ziyou\ocr\ocr-01\mobile-app\src\recognition\contracts.ts
+   1x G:\www\ziyou\ocr\ocr-01\mobile-app\src\recognition\matcher.ts
+   1x G:\www\ziyou\ocr\ocr-01\mobile-app\src\recognition\vectorStore.ts
+   1x G:\www\ziyou\ocr\ocr-01\mobile-app\src\recognition\extractor.ts
+
+T11/before-reminder: 19 次写/改，涉及 8 个文件
+   5x G:\www\ziyou\ocr\ocr-01\mobile-app\android\variables.gradle
+   4x G:\www\ziyou\ocr\ocr-01\mobile-app\android\build.gradle
+   2x G:\www\ziyou\ocr\ocr-01\mobile-app\scripts\fetch-model.mjs
+   2x G:\www\ziyou\ocr\ocr-01\mobile-app\android\app\capacitor.build.gradle
+   2x G:\www\ziyou\ocr\ocr-01\mobile-app\android\app\src\main\AndroidManifest.xml
+   2x G:\www\ziyou\ocr\ocr-01\mobile-app\plugins\feature-extractor\android\build.gradle
+   1x G:\www\ziyou\ocr\ocr-01\mobile-app\package.json
+   1x G:\www\ziyou\ocr\ocr-01\mobile-app\android\gradle\wrapper\gradle-wrapper.properties
+
+T12/before-reminder: 9 次写/改，涉及 3 个文件
+   4x G:\www\ziyou\ocr\ocr-01\mobile-app\src\views\BenchView.vue
+   4x G:\www\ziyou\ocr\ocr-01\mobile-app\README.md
+   1x G:\www\ziyou\ocr\ocr-01\AGENTS.md
+
+T13/before-reminder: 1 次写/改，涉及 1 个文件
+   1x G:\www\ziyou\ocr\ocr-01\mobile-app\src\views\BenchView.vue
+
+
+=== 3. pwsh 命令分类 ===
+
+-- git (5) --
+[T4 2026/10/26 10:31:23] git -C G:\www\ziyou\ocr\ocr-01 log --oneline -5 2>&1; git -C G:\www\ziyou\ocr\ocr-01 status --short 2>&1
+[T6 2026/10/26 10:38:32] git -C G:\www\ziyou\ocr\ocr-01 add docs/superpowers/specs/2026-10-26-phase1-recognition-demo-design.md; git -C G:\www\ziyou\ocr\ocr-01 commit -m "docs: 第一期识别验证 Demo 设计文档（路线A：Capacitor+TFLite薄插件）"; git
+[T10 2026/10/26 11:00:02] cd G:\www\ziyou\ocr\ocr-01; git status --short | Select-Object -First 30; "---"; git diff --stat
+[T13 2026/10/26 11:36:55] cd G:\www\ziyou\ocr\ocr-01; git add mobile-app AGENTS.md .gitignore; git status --short | Select-Object -First 40; "---检查排除项---"; git status --short | Select-String -Pattern "model.tflite|android/" | 
+[T13 2026/10/26 11:37:08] cd G:\www\ziyou\ocr\ocr-01; git commit -m "feat: 第一期商品图像识别验证 Demo（Capacitor + TFLite 薄插件，评审 10/10 PASS）" 2>&1 | Select-Object -First 5; git log --oneline -3
+
+-- ledger/gate/snapshot (0) --
+
+-- test/build (12) --
+[T7 2026/10/26 10:44:05] $sdk = $env:ANDROID_HOME; if (-not $sdk) { $sdk = $env:ANDROID_SDK_ROOT }; if ($sdk) { "ANDROID_SDK: $sdk"; Test-Path $sdk } else { "NO_ANDROID_SDK_ENV" }; $adb = Get-Command adb -ErrorAction Silently
+[T7 2026/10/26 10:44:18] $sdk = "C:\Users\Administrator\AppData\Local\Android\Sdk"; Get-ChildItem $sdk -Directory | Select-Object -ExpandProperty Name; if (Test-Path "$sdk\platforms") { Get-ChildItem "$sdk\platforms" -Directo
+[T8 2026/10/26 10:52:09] $node = "C:\Users\Administrator\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"; $pnpm = "C:\Users\Administrator\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.
+[T10 2026/10/26 11:00:17] $node = "C:\Users\Administrator\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"; $pnpm = "C:\Users\Administrator\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.
+[T11 2026/10/26 11:09:29] $node = "C:\Users\Administrator\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"; $pnpm = "C:\Users\Administrator\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.
+[T11 2026/10/26 11:10:07] $a = "G:\www\ziyou\ocr\ocr-01\mobile-app\android"; Select-String -Path "$a\capacitor.settings.gradle" -Pattern "demo-feature-extractor" | ForEach-Object { "settings: $($_.Line.Trim())" }; Select-Strin
+[T11 2026/10/26 11:20:13] $dest = "C:\Users\Administrator\.jdks\temurin-21.zip"; $url = "https://api.adoptium.net/v3/binary/latest/21/ga/windows/x64/jdk/hotspot/normal/eclipse"; Invoke-WebRequest -Uri $url -OutFile $dest -UseB
+[T11 2026/10/26 11:25:47] $p = "C:\Users\Administrator\AppData\Local\Android\Sdk\platforms\android-37.0"; Test-Path "$p\android.jar"; Get-ChildItem $p | Select-Object -ExpandProperty Name | Select-Object -First 10; (Get-Conten
+[T11 2026/10/26 11:26:01] $dest = "$env:TEMP\platform-35_r02.zip"; Invoke-WebRequest -Uri "https://dl.google.com/android/repository/platform-35_r02.zip" -OutFile $dest -UseBasicParsing -TimeoutSec 600; (Get-Item $dest).Length;
+[T11 2026/10/26 11:27:45] $apk = "G:\www\ziyou\ocr\ocr-01\mobile-app\android\app\build\outputs\apk\debug\app-debug.apk"; Get-Item $apk | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}, LastWriteTime; Add-Type
+[T12 2026/10/26 11:34:20] $node = "C:\Users\Administrator\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"; $pnpm = "C:\Users\Administrator\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.
+[T13 2026/10/26 11:36:12] $node = "C:\Users\Administrator\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"; $pnpm = "C:\Users\Administrator\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.
+
+-- other (13) --
+[T11 2026/10/26 11:07:40] $node = "C:\Users\Administrator\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"; & $node G:\www\ziyou\ocr\ocr-01\mobile-app\scripts\fetch-model.mjs 2>&1 | Select-Object -Last 6; 
+[T11 2026/10/26 11:07:43] Get-ChildItem C:\Users\Administrator\.jdks -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name; "---"; Get-ChildItem "C:\Program Files\Java" -Directory -ErrorAction SilentlyC
+[T11 2026/10/26 11:08:46] $node = "C:\Users\Administrator\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"; & $node G:\www\ziyou\ocr\ocr-01\mobile-app\scripts\fetch-model.mjs 2>&1 | Select-Object -Last 8; 
+[T11 2026/10/26 11:09:50] $node = "C:\Users\Administrator\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"; $pnpm = "C:\Users\Administrator\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.
+[T11 2026/10/26 11:11:04] $env:JAVA_HOME = "C:\Users\Administrator\.jdks\jbr-17.0.14"; $env:ANDROID_HOME = "C:\Users\Administrator\AppData\Local\Android\Sdk"; Set-Location G:\www\ziyou\ocr\ocr-01\mobile-app\android; .\gradlew.
+[T11 2026/10/26 11:12:40] $env:JAVA_HOME = "C:\Users\Administrator\.jdks\jbr-17.0.14"; $env:ANDROID_HOME = "C:\Users\Administrator\AppData\Local\Android\Sdk"; Set-Location G:\www\ziyou\ocr\ocr-01\mobile-app\android; .\gradlew.
+[T11 2026/10/26 11:22:43] $zip = "C:\Users\Administrator\.jdks\temurin-21.zip"; $dest = "C:\Users\Administrator\.jdks"; Expand-Archive -Path $zip -DestinationPath $dest -Force; Get-ChildItem $dest -Directory | Select-Object -E
+[T11 2026/10/26 11:22:57] $env:JAVA_HOME = "C:\Users\Administrator\.jdks\jdk-21.0.12.1+1"; $env:ANDROID_HOME = "C:\Users\Administrator\AppData\Local\Android\Sdk"; Set-Location G:\www\ziyou\ocr\ocr-01\mobile-app\android; .\grad
+[T11 2026/10/26 11:23:55] $env:JAVA_HOME = "C:\Users\Administrator\.jdks\jdk-21.0.12.1+1"; $env:ANDROID_HOME = "C:\Users\Administrator\AppData\Local\Android\Sdk"; Set-Location G:\www\ziyou\ocr\ocr-01\mobile-app\android; .\grad
+[T11 2026/10/26 11:24:32] $env:JAVA_HOME = "C:\Users\Administrator\.jdks\jdk-21.0.12.1+1"; $env:ANDROID_HOME = "C:\Users\Administrator\AppData\Local\Android\Sdk"; Set-Location G:\www\ziyou\ocr\ocr-01\mobile-app\android; .\grad
+[T11 2026/10/26 11:25:11] $dest = "$env:TEMP\platform-35.zip"; Invoke-WebRequest -Uri "https://dl.google.com/android/repository/platform-35_r03.zip" -OutFile $dest -UseBasicParsing -TimeoutSec 600; (Get-Item $dest).Length; Exp
+[T11 2026/10/26 11:25:48] foreach ($rev in @('r02','r01')) { $url = "https://dl.google.com/android/repository/platform-35_$rev.zip"; try { $resp = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -TimeoutSec 30; "$rev
+[T11 2026/10/26 11:26:45] $env:JAVA_HOME = "C:\Users\Administrator\.jdks\jdk-21.0.12.1+1"; $env:ANDROID_HOME = "C:\Users\Administrator\AppData\Local\Android\Sdk"; Set-Location G:\www\ziyou\ocr\ocr-01\mobile-app\android; .\grad
+
+
+=== 4. workspace/changes 事件 ===
+[2026/10/26 10:25:11] {"turn":2}
+[2026/10/26 10:38:43] {"turn":6}
+[2026/10/26 10:44:47] {"turn":7}
+[2026/10/26 10:55:22] {"turn":8}
+[2026/10/26 11:00:44] {"turn":10}
+[2026/10/26 11:29:06] {"turn":11}
+[2026/10/26 11:34:57] {"turn":12}
+[2026/10/26 11:35:10] {"turn":12}
+[2026/10/26 11:37:40] {"turn":13}
+[2026/10/26 11:37:50] {"turn":13}
+
+
+=== 5. 每回合最后一条 assistant 文本（尾部 500 字符） ===
+
+--- T1 结束前最后文本 ---
+**单重换算数量**恰好能解决这个，但文档未建立这个逻辑链。
+
+---
+
+## 文档缺失的关键项（建议补充进待办/风险表）
+
+1. **特征库建设成本**：几千个 SKU 的参考照片谁来拍、拍几张、新品入库如何录入特征？这是落地最大的隐性工作量，文档零提及，2–3 周工期和 5 万预算大概率不含这部分。
+2. **识别验收标准缺失**：阶段①"本周三前内部 Demo 测试"没有量化指标——Top-1 准确率多少算过？Top-5 候选+人工点选是否可接受？相似 SKU（仅靠外观不可区分）的处置规则是什么？没有标准，测试无法判定通过/失败。
+3. **识别失败的兜底流程**：识别不出时能否手动搜索/按分类选货？纯靠识别一条路，现场会卡死。
+4. **盘点场景的方案空缺**（见偏差 3）。
+5. **AI 秤成本与供应链**：8 个海外市场 × 每名业务员一台的硬件采购成本、海运、维修，文档只在"定制开发 5 万"口径内讨论，硬件费用无归属。
+6. **同步冲突/超卖规则**（见痛点②分析）。
+
+---
+
+## 结论
+
+- **痛点②（离线开单）可以解决**：离线优先 App + T+ OpenAPI（ExternalCode 幂等 + 价格本/现存量预下载）是成熟路径，2–3 周做"识别结果→单据→同步"的闭环工期合理。
+- **痛点①（发错货、盘点不准）有条件可解决**：前提是（a）把方案从"OCR"纠正为"图像特征检索"，（b）AI 秤按"视觉+称重融合"重新定位以解决相似 SKU 消歧和盘点计数，（c）先明确特征库建设责任与识别验收标准。文档目前这三点都未覆盖，**内部 Demo 测试（待办 #3）建议把验证目标从"识别效果与响应速度"细化为"相似 SKU 区分率 + 称重换算计数准确率 + Top-N 命中率"**，否则周三的测试无法给出可信的 go/no-go 结论。
+
+--- T2 结束前最后文本 ---
+仅识别包装文字，保留"OCR"仅为沿用惯称
+
+## 偏差 ② 性能论断与 AI 秤定位修正
+
+- **L39（核心结论 #2）**：删除"算力与存储瓶颈"，改为"纯视觉难以区分外观高度相似的 SKU"，AI 秤定位为"视觉定品类 + 称重定规格/数量"的融合消歧
+- **L50（纯移动端方案）**："数分钟识别一张图" → 修正为实测量级（特征库几十 MB、比对毫秒级、特征提取 100–500ms/张），瓶颈从算力改为相似 SKU 视觉不可区分
+- **L52（硬件方案）**：引入 AI 秤的理由从"算力更强"改为"视觉+称重融合识别"，并补充固定拍摄距离/光照的稳定性收益
+- **L97（技术风险）**："几千 SKU 性能存疑" → "比对速度风险较低，主要风险为相似 SKU 视觉不可区分及计数不可靠"
+- **L98（硬件依赖）**：从"算力存储规格匹配"改为"单重档案准确性与称重精度"这一真实依赖
+- grep 复验：旧表述"数分钟/算力瓶颈/随身携带"已全部清除（仅剩 L52 中"不是算力升级"的否定式表述，属有意保留）
+
+## 偏差 ③ 识别与盘点计数解耦
+
+- **L57–59（3.2 验证点）**：新增"称重消歧""称重换算计数""识别与盘点的边界"三条，明确"定 SKU"与"数数量"是两条技术路线
+- **L77（测试阶段①）**、**L88（待办 #3）**：验收目标从笼统的"识别效果与响应速度"细化为量化指标——Top-1/Top-5 命中率、相似 SKU 融合区分率、称重换算计数准确率、单张响应时间
+
+## 未纳入本次修改的项
+
+上一轮审查中"文档缺失的关键项"（特征库建设责任、识别失败兜底流程、AI 秤硬件成本归属、同步超卖规则、盘点方案细化等 6 项）属于**内容缺失**而非**论证偏差**，本次未动。如需我把这些也补进待办与风险表，说一声即可。
+
+--- T3 结束前最后文本 ---
+ 散装堆叠拍照计数业内无可靠方案；按单重换算（AI 秤）是唯一工程化解法 |
+
+文档第 50 行修正后的结论正是这个逻辑：**AI 秤解决的是"称重"维度，不是算力**。
+
+## 三、对项目可行性的最终判断
+
+**可行，但建议分两期验证，不要一步到位上秤：**
+
+1. **第一期（手机纯软件，本周 Demo）**：手机 App 实现"拍照 → Top-5 候选 → 人工点选 → 离线开单 → 回网同步 T+"。即使识别不准，**Top-N 候选 + 人工确认**的模式已经能把"外籍员工全凭记忆找货"变成"从 5 个候选里挑 1 个"，发错货问题就解决了一大半——**这一期零硬件成本，2–3 周工期和 5 万预算也只够覆盖这一期**。
+2. **第二期（按数据决策是否上秤）**：Demo 测试时把 SKU 分成"视觉可分 / 视觉不可分"两类，统计不可分 SKU 的占比：
+   - 占比低 → 不可分 SKU 走人工/条码兜底，**不需要 AI 秤**；
+   - 占比高（五金行业很可能如此）→ 再引入 AI 秤，且只给车销配，不铺开。
+
+## 四、真正影响可行性的三个前置条件（都比技术本身更关键）
+
+1. **特征库谁建**：几千个 SKU 每个拍 3–5 张参考照、提取特征入库，是项目最大的隐性工作量，目前文档无责任人、无工期；
+2. **验收标准**：Demo 前必须定死 Top-1/Top-5 命中率阈值（文档 L77 已补指标，但**没有定及格线**），否则周三测试无法判 go/no-go；
+3. **兜底流程**：识别失败必须能按分类/关键字手动选货，不能只有拍照一条路。
+
+**一句话总结**：安卓手机能实现图像识别、能解决"发错货"痛点的大头，项目可以立项；但"盘点计数"和"相似规格区分"需要称重维度补齐，建议手机先行、用 Demo 数据决定 AI 秤是否必要。
+
+--- T4 结束前最后文本 ---
+个薄原生插件桥接：输入图片路径 → 原生侧 TFLite（GPU 委托）提取特征向量 → 返回给 JS。比对（余弦相似度）在 JS 侧做。
+- ✅ 性能最真实（8GB 机型预计 50–150ms/张），周三 Demo 的响应时间指标可信
+- ✅ 与组织技术栈基线一致，Demo 代码可直接演化为第一期正式版
+- ⚠️ 需写约百行 Kotlin 桥接代码（社区 TFLite 插件均已停更，自写薄插件反而可控）
+
+**路线 B：Vue3 + Capacitor + ONNX Runtime Web（纯 Web/WASM）**
+不碰原生代码，模型在 WebView 里跑。
+- ✅ 开发最快
+- ❌ WebView 内 WASM 推理比原生慢 3–10 倍，WebGPU 在安卓 WebView 支持无保障 → **测出的性能指标不能代表最终形态**，Demo 核心目的（验证响应速度）落空
+
+**路线 C：原生 Android（Kotlin）+ TFLite**
+- ✅ 性能最确定
+- ❌ 偏离组织 Vue3+Capacitor 基线，Demo 代码在正式版基本作废，等于做两遍
+
+**模型方案（三条路线共用）**：不做分类训练，直接用预训练特征提取模型（MobileNetV3/EfficientNet-Lite 的 feature-vector 版，输出千维向量），SKU 建档 = 拍照 3–5 张提取特征存本地库，识别 = 余弦相似度 Top-5。这条路线同时验证了"新增 SKU 拍照入库"流程，且不需要任何训练数据和训练成本。
+
+---
+
+我的推荐是 **路线 A**：它是唯一能让周三 Demo 的"识别响应速度"指标可信、且代码可复用到正式版的路线，代价只是约百行 Kotlin 桥接。
+
+确认走路线 A 吗？确认后我给出完整设计（架构、数据流、特征库结构、验收指标及格线）供你审。
+
+--- T5 结束前最后文本 ---
+为 Apache-2.0；若下载受阻，备选方案是用 Python 从 Keras 自行导出。
+
+## 4. 错误处理
+
+- 插件初始化失败（GPU 不可用）→ 自动回退 CPU，UI 标注当前后端；
+- 照片解码失败/特征库为空/向量维度不匹配 → toast 明确提示，不崩溃；
+- 原生权限（CAMERA）与清单补丁写入 README（Capacitor 工程重建后需重打——基线踩坑要求）。
+
+## 5. 测试与验收及格线（建议值）
+
+| 指标 | 及格线 | 测量方式 |
+| --- | --- | --- |
+| 建档规模 | ≥20 个实物 SKU × 3–5 张 | EnrollView 现场实物建档 |
+| Top-1 / Top-5 命中率 | ≥70% / ≥90% | BenchView 用未参与建档的新照片批量测 |
+| 识别响应时间 | P50 ≤500ms，P95 ≤1s | 插件内计时（解码+推理），BenchView 出分位数 |
+| 千级 SKU 扩展性 | 1000 SKU（随机向量填充）全库比对 ≤100ms | BenchView 一键填充模拟库 |
+| 单测 | matcher 纯函数 vitest 全绿 | `pnpm test` |
+
+## 6. 文档与提交
+
+仓库根补 `AGENTS.md`（精简入口），设计文档落 `docs/superpowers/specs/2026-10-26-phase1-recognition-demo-design.md`；`.gitignore` 排除 `android/` 原生工程与模型二进制（模型提供下载脚本）。
+
+---
+
+设计是否认可？特别是**第 5 节的及格线数值**（70%/90%、500ms/1s）——这是周三 go/no-go 的判定依据，确认后我把设计写入 spec 文档并提交。
+
+--- T6 结束前最后文本 ---
+设计文档已写入并提交到 git：
+
+- 文档：[2026-10-26-phase1-recognition-demo-design.md](docs/superpowers/specs/2026-10-26-phase1-recognition-demo-design.md)（提交 `265b34a`）
+- 自审已过：无占位符、无前后矛盾、范围聚焦单一实施计划、验收数值明确
+
+**请你过目这份 spec**，确认无需改动后，我就按它生成实施计划并开始搭建（目录结构、TFLite 薄插件、三个页面、matcher 单测、模型下载脚本）。如需调整——比如验收及格线数值、页面拆分、模型选型——现在改成本最低。
+
+--- T7 结束前最后文本 ---
+环境勘察有重要发现：本机具备 **Android SDK（platforms 32/34/37 + build-tools 34/36）和 JDK 17**——这意味着 B3 的原生插件不只能写代码，还能在本机真实跑 `gradlew assembleDebug` 编译验证，最终集成验收可以覆盖到"Kotlin 插件可编译、APK 可产出"这一层。
+
+当前状态：
+
+- **B1 脚手架**子代理运行中（ID `26ebc468`），完成后我立即冻结契约文件并并行派发 B2‖B3‖B4
+- B3 的窄验证将升级为：`npx cap add android` → 原生代码同步 → `gradlew assembleDebug` 编译通过（本机 SDK 支持）
+- 最终集成命令定为：`pnpm install && pnpm test && pnpm build && npx cap sync android && gradlew :app:assembleDebug`
+
+等 B1 回报后继续。
+
+--- T8 结束前最后文本 ---
+三个批次已并行发出：
+
+| 批次 | 内容 | 窄验证 |
+| --- | --- | --- |
+| B2 `065818f1` | matcher + vectorStore（TDD：先红后绿，需提交失败/通过证据） | `vitest run` |
+| B3 `a2f1052c` | TFLite 原生插件（Kotlin）+ 模型下载脚本 | `fetch-model.mjs` 实跑一次 |
+| B4 `4d6d13f0` | 建档/识别/压测三视图（只准按冻结契约调用） | `vite build`（含 vue-tsc 类型检查） |
+
+互斥边界：B2 只跑 vitest、B4 只跑 build（避免共享产物竞争）；package.json/lockfile 三批都不碰，应用侧 `file:plugins/feature-extractor` 依赖由我在集成阶段统一接入，随后跑完整集成链 `install → vitest → build → cap add/sync android → gradlew assembleDebug`（本机 SDK+JDK 17 已确认可支撑）。等三批回报。
+
+--- T9 结束前最后文本 ---
+B4 已正式收官（与此前回报一致，无需重复动作）。目前仍在等 B2（识别模块 TDD）和 B3（原生插件）两个批次的回报，到齐后立即开始集成验收复跑：
+
+1. 应用侧接入插件依赖（`file:plugins/feature-extractor`）→ `pnpm install`
+2. `vitest run`（复跑 B2）
+3. `vite build`（复跑 B4）
+4. `npx cap add android && npx cap sync android` + manifest 补丁
+5. `gradlew assembleDebug`（验证 B3 Kotlin 插件可编译）
+6. 模型下载脚本补跑（若 B3 未能下载）
+
+之后再派只读评审对照 spec 逐条判定。
+
+--- T10 结束前最后文本 ---
+B2 已标记完成并记入台账。等待 B3（TFLite 原生插件 + 模型下载）回报，随后执行集成验收链：
+
+1. 应用侧接入 `file:plugins/feature-extractor` 依赖 → `pnpm install`
+2. `vite build` 复跑（B4）
+3. `npx cap add android && npx cap sync android` + CAMERA manifest 补丁
+4. `gradlew :app:assembleDebug`（本机 SDK/JDK 17 编译验证 B3 Kotlin 插件）
+5. 模型下载脚本补跑（若 B3 未成功）
+
+之后派只读评审对照 spec 逐条 PASS/FAIL，最后由我统一提交。
+
+--- T11 结束前最后文本 ---
+只读评审已派出（`4df05e30`）。评审期间不做任何文件改动，避免评审面漂移。等评审结论后：
+
+1. 若 PASS → 修正 README 中 JDK 注意事项（集成实测结论：必须 JDK 21，B3 原先的"JDK 17 + 补丁"路线不成立，因 `@capacitor/android` 库自身强制 Java 21 工具链）→ 对该切片复评 → 提交
+2. 若 FAIL → 按最小修复建议处理后复评对应切片
+
+--- T12 结束前最后文本 ---
+一行不派发理由：本回合 3 文件均为**评审闭环内的派发方自修**（E-FAIL 的 ~20 行导出降级 + D/G 两处文档漂移），属 DSH 明示的"评审通过后派发方自修+受影响切片重开评审"路径——已把 E/D/G 切片发回原评审代理复评，且复跑 vitest/build 均 EXIT=0；为此单开写批次的成本高于改动本身。
+
+复评结论回来后：若全 PASS → 我执行最终 git 提交；若仍有 FAIL → 继续最小修复 + 复评循环。
+
+--- T13 结束前最后文本 ---
+一行不派发理由：本回合唯一改动是评审代理明确建议的 8 行剪贴板 try/catch 兜底（评审闭环内的派发方自修，已由原评审代理对该 hunk 快评确认 PASS），shell 变更命令是提交权归属派发方的最终 `git commit`——两者均为 DSH 保留给派发方的职责，无可派发内容。
+
+--- T14 结束前最后文本 ---
+载（执行压测时自动加载）"（[:395](mobile-app/src/views/BenchView.vue#L395)）；
+- 首次点击"填充模拟库"/"千级比对计时"/"批量命中率测试"任一按钮时才触发 `ensureModel()`（[:119](mobile-app/src/views/BenchView.vue#L119)、[:150](mobile-app/src/views/BenchView.vue#L150)、[:211](mobile-app/src/views/BenchView.vue#L211)），加载成功后状态行会变成 `GPU · 1024 维` 这样的实测信息。
+
+这样做的原因：压测页有些功能（看库规模、清空数据）不需要模型，没必要进页面就花几百毫秒加载 20+MB 的解释器。
+
+**需要注意区分的异常情况**：如果你点了压测按钮后，模型行下方出现红色错误"模型加载失败：…需在安卓真机运行"，那才是问题，含义是：
+
+1. 你在**浏览器里**跑（`pnpm dev` 或真机浏览器）——Web 环境没有原生插件，这是预期行为，识别相关功能必须在装好的 APK 里测；
+2. 你在**真机 APK** 里但模型文件没打进包——检查 `plugins/feature-extractor/android/src/main/assets/model.tflite` 是否存在（构建前先跑 `node scripts/fetch-model.mjs`），然后重新 `pnpm build && npx cap sync android && gradlew assembleDebug`。
+
+对照：识别页（RecognizeView）是进页面就 `loadModel()`，所以那边一进去就应显示 GPU/CPU 后端信息——两个页面加载时机不同，都是有意设计。
+
+--- T15 结束前最后文本 ---
+**"重试"按钮是常驻的，不能用它判断加载状态**——它一直显示在"模型状态"卡片右侧（[RecognizeView.vue:111-118](mobile-app/src/views/RecognizeView.vue#L111-L118)），加载中时文字变"加载中…"，其余时间显示"重试"，作用是让你随时可手动重新加载。
+
+真正的状态看按钮**下方那一行字**（[:120-125](mobile-app/src/views/RecognizeView.vue#L120-L125)）：
+
+| 显示内容 | 含义 |
+| --- | --- |
+| `后端 GPU · 输入 224px · 向量 1024 维`（灰色小字） | ✅ 已加载成功（CPU 则显示 CPU） |
+| `正在加载模型…` | 加载中 |
+| `未加载` + 下方**红色**"模型加载失败：…" | ❌ 加载失败，点"重试"重新加载 |
+| `未加载`（无红字） | 尚未触发加载 |
+
+所以：如果按钮下方有"后端 GPU/CPU · …"那行字，就是**加载好了**，可以拍照识别；如果是红字报错，把报错内容发我（常见原因是模型文件没打进 APK 或浏览器环境运行）。
+
+--- T16 结束前最后文本 ---
+**不是问题，这是设计的正常回退路径。** 插件的逻辑是：优先尝试 GPU 委托，构造或推理失败就自动回退 CPU（4 线程），并把**实际使用的后端**如实显示出来（评审已核过这两层回退：[FeatureExtractorPlugin.kt:201-232](mobile-app/plugins/feature-extractor/android/src/main/java/com/ziyou/ocrdemo/featureextractor/FeatureExtractorPlugin.kt#L201-L232)）。
+
+对你的影响只有一个：**推理会比 GPU 慢**（MobileNetV3-Small float32 在 CPU 上单张约 200–500ms，GPU 上约 50–150ms）。验收时按实际后端如实记录即可——**如果 CPU 下 P50 仍 ≤500ms、P95 ≤1s，指标照样算通过**；反而"CPU 都达标"是更强的结论。
+
+几个排查方向（如果你想确认为什么没用上 GPU）：
+
+1. **你是不是在模拟器里跑？** 模拟器基本都没有可用的 GPU 委托，显示 CPU 属预期；
+2. **真机的话**，看 logcat（tag：`FeatureExtractor`），GPU 委托初始化失败时会打印具体原因（常见：设备 GPU 驱动不兼容、模型含 GPU 不支持的算子）；
+3. 这不阻塞周三 Demo——先按 CPU 后端测出指标；若 CPU 不达标而 GPU 达标，再决定是否值得深入 GPU 兼容问题，或换 int8 量化模型（CPU 上能再快 2–4 倍，只需替换 `model.tflite` 文件，代码零改动）。
+
+一句话：**能识别、耗时达标就行，后端显示 CPU 只是告诉你"这次用的是 CPU"**。
+
+--- 最终回合尾部文本 ---
+分两种情况——两个蓝色按钮**直接点就行**，但"批量命中率测试"**需要准备**，而且建议按顺序来：
+
+## 直接可点（无需准备）
+
+| 按钮 | 做的事 |
+| --- | --- |
+| **填充模拟库** | 自动加载模型 → 写入 1000 个 MOCK 假 SKU（每个 3 条向量），显示填充耗时 |
+| **千级比对计时** | 对已填充的千级库做 20 次全库比对取平均，判定 ≤100ms 通过/不通过 |
+
+⚠️ 注意顺序：**先点"填充模拟库"，再点"千级比对计时"**（库里没数据时计时没意义）。测完记得点**"清空模拟数据（MOCK-\*）"**，否则假 SKU 会污染识别页的真实比对结果。
+
+## 需要准备（批量命中率测试）
+
+这是出 Top-1/Top-5 指标的核心测试，准备工作有三步：
+
+1. **先建档**：去"建档"页，用 ≥20 个实物各拍 3–5 张入库（SKU 名起得简短规范，后面要用）；
+2. **准备测试照片**：对每个已建档的 SKU **再拍几张新照片**（不能 reuse 建档那几张，否则命中率虚高），文件名改成 `SKU名__序号.jpg` 格式——`__` 前面必须和建档时填的 SKU 名**完全一致**（这是判定对错的 ground truth），例如 `切割片4寸__01.jpg`、`切割片4寸__02.jpg`；
+3. **把照片传到手机上**（微信/数据线/网盘均可，能进系统的文件选择器就行）。
+
+然后点"批量命中率测试"→ 多选这些照片 → 自动逐张识别 → 输出 Top-1（≥70%）/ Top-5（≥90%）/ P50 / P95 四项判定 → **点"导出 JSON"留档**（真机会复制到剪贴板，粘贴到微信/备忘录发回来即可）。
+
+## 推荐操作顺序
+
+```
+建档页：20+ 实物建档
+  → 压测页：批量命中率测试（出准确率 + 响应时间指标）
+  → 压测页：填充模拟库 → 千级比对计时（出规模扩展性指标）
+  → 压测页：清空模拟数据
+```
+
+周三 Demo 的 go/no-go 数据就齐了。
