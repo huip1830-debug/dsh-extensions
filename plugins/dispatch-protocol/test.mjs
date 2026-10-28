@@ -81,7 +81,7 @@ test('the default text states all six dispatch rules', () => {
   // paragraph, and an accidental seventh clause would silently dilute the
   // ownership split.
   assert.equal(DEFAULT_RULES.length, 6, '0.5.1: the rules are six, not seven')
-  const order = ['先勘察', '执行类派发必须自包含', '验收分两层', '评审只审变更集', '提交权归派发方', '并行只读，互斥并行写'].map(t => text.indexOf(t))
+  const order = ['先勘察', '执行类派发必须自包含', '验收与等待', '评审只审变更集', '提交权归派发方', '并行只读，互斥并行写'].map(t => text.indexOf(t))
   for (const index of order) assert.ok(index >= 0, '0.5.1: every rule title must be present')
   for (let i = 1; i < order.length; i += 1) {
     assert.ok(order[i] > order[i - 1], '0.5.1: the rules must keep the responsibility order')
@@ -90,6 +90,24 @@ test('the default text states all six dispatch rules', () => {
   assert.match(text, /全 PASS 须说明每条例子的验证方式/)
   assert.match(text, /裁决归派发方/)
   assert.match(text, /按读写路径再切/)
+
+  // The batch now has a clock and a freeze window. The failure it
+  // prevents (session-1433e747): a 30-minute child burned 192 steps while the
+  // dispatcher spent 54 of 106 minutes inside Start-Sleep, and the contract
+  // moved under the child eight minutes in.
+  assert.match(text, /覆盖本批改动的窄命令/, 'the child verification must be narrow')
+  assert.match(text, /全量构建\/全量测试归派发方的集成命令/, 'the integrated run belongs to the dispatcher, not the brief')
+  assert.match(text, /【预算：墙钟与步数上限】/, 'a batch carries a budget')
+  assert.match(text, /一句话进度/, 'the child reports at half budget')
+  assert.match(text, /超预算先报阻塞点再停/, 'over budget means report and stop, not extend')
+  assert.match(text, /派发即冻结/, 'the contract is frozen while the batch runs')
+  assert.match(text, /先停子代理（interrupt）/, 'a contract change stops the child first')
+  assert.match(text, /结束回合等完成事件/, 'the dispatcher waits for the completion event instead of polling')
+  assert.match(text, /不要用一串 Start-Sleep\/list_agents 轮询/, 'sleep-polling is named as the anti-pattern')
+  assert.match(text, /一批最多一次主动检查/, 'at most one active check per batch')
+  assert.match(text, /15 分钟或 30 次编辑/, 'the batch budget has calibrated defaults')
+  assert.match(text, /10 分钟内出现第一个可验收切片/, 'slicing must produce an early verifiable piece')
+  assert.doesNotMatch(text, /独立复跑/, 'the child claimed command is not re-run by the dispatcher')
 })
 
 test('configured rules replace the default text', () => {
@@ -190,7 +208,7 @@ test('a completed child triggers exactly one checkpoint message to its parent', 
 
   assert.equal(parent.messages.length, 1, 'the checkpoint is delivered once')
   assert.match(parent.messages[0].text, /child-1/)
-  assert.match(parent.messages[0].text, /复跑/)
+  assert.match(parent.messages[0].text, /集成命令/)
   assert.match(parent.messages[0].text, /diff/)
 })
 
