@@ -108,6 +108,10 @@ test('the default text states all six dispatch rules', () => {
   assert.match(text, /15 分钟或 30 次编辑/, 'the batch budget has calibrated defaults')
   assert.match(text, /10 分钟内出现第一个可验收切片/, 'slicing must produce an early verifiable piece')
   assert.doesNotMatch(text, /独立复跑/, 'the child claimed command is not re-run by the dispatcher')
+  // 0.5.4: the no-re-run stance holds only while the integrated command covers
+  // every narrow assertion; the single exception is spelled out in rule 3.
+  assert.match(text, /集成命令必须覆盖各批窄验证断言点的并集/, 'the no-re-run stance has a coverage precondition')
+  assert.match(text, /唯一的复跑例外/, 'the coverage gap exception is the only re-run')
 })
 
 test('configured rules replace the default text', () => {
