@@ -2,7 +2,7 @@
 //
 // Three mechanisms, all DSH-only:
 //   1. One system-prompt section, so every request (main agent and every
-//      subagent) carries the five dispatch rules. Independent of which skills
+//      subagent) carries the six dispatch rules. Independent of which skills
 //      the model chose to load.
 //   2. A completion checkpoint: when a child agent finishes, the parent gets one
 //      short reminder to read the diff and re-run the command the child claims.

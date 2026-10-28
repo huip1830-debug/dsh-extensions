@@ -59,6 +59,37 @@ test('the default text states all six dispatch rules', () => {
   assert.match(text, /合并判级/, '0.4.0: a change set cannot be split into normal batches to dodge review')
   assert.match(text, /重开评审|重开受影响切片/, '0.4.0: post-review changes re-enter review')
   assert.match(text, /拆批方案或一行不派发理由/, '0.4.0: implementation plans must name the batches or the skip reason')
+
+  // Rule 4 bounds the review object. The failure it prevents: a review that
+  // starts from `git status` (or from "check the repo") turns one cross-cutting
+  // change into a repository audit, and the report can no longer be tied to a
+  // batch. A repo-wide sweep is legitimate only as a separate column with a
+  // named search space, and only when the requirement is itself an invariant.
+  assert.match(text, /评审只审变更集/, 'review covers the change set, not the repository')
+  assert.match(text, /白名单并集的 diff/, 'the review input is the batch-union diff, not a worktree snapshot')
+  assert.match(text, /不是工作区快照/, 'the brief must not hand the reviewer a worktree snapshot')
+  assert.match(text, /不逐文件通读未改动文件/, 'the default review is not a repo audit')
+  assert.match(text, /全仓不变量核查/, 'a repo-wide sweep is its own column, opened only for invariants')
+  assert.match(text, /给定检索词与目录/, 'the sweep names its search space instead of "look everywhere"')
+  assert.match(text, /用户可见的遗漏判 FAIL/, 'a sweep hit is a verdict, not a note')
+  assert.match(text, /20 个文件或 3 个契约面/, 'the review package has an explicit capacity bound')
+  assert.match(text, /跨切片一致性另设一包/, 'cross-slice consistency is reviewed as its own package')
+  assert.match(text, /程序化比对/, 'read-only shell comparison is in scope; build/test re-runs are not')
+
+  // 0.5.1: the rules were reordered by "who decides what". Six rules, not
+  // seven — the reordering moved review out of the grading rule into its own
+  // paragraph, and an accidental seventh clause would silently dilute the
+  // ownership split.
+  assert.equal(DEFAULT_RULES.length, 6, '0.5.1: the rules are six, not seven')
+  const order = ['先勘察', '执行类派发必须自包含', '验收分两层', '评审只审变更集', '提交权归派发方', '并行只读，互斥并行写'].map(t => text.indexOf(t))
+  for (const index of order) assert.ok(index >= 0, '0.5.1: every rule title must be present')
+  for (let i = 1; i < order.length; i += 1) {
+    assert.ok(order[i] > order[i - 1], '0.5.1: the rules must keep the responsibility order')
+  }
+  assert.match(text, /禁止重跑构建\/测试\/集成命令/)
+  assert.match(text, /全 PASS 须说明每条例子的验证方式/)
+  assert.match(text, /裁决归派发方/)
+  assert.match(text, /按读写路径再切/)
 })
 
 test('configured rules replace the default text', () => {
@@ -115,13 +146,16 @@ test('one closing paragraph states who does what and when a dispatch may be skip
   assert.match(text, /不许整包留给自己/, 'the fallback-to-self trap must be named')
   assert.match(text, /缺计划类 skill/, 'the missing-plan-skill path must be named')
 
-  // No magic numbers: the whitelist is bounded by "the whole batch must be
-  // verifiable by one integrated command" and the task list by "one entry = one
-  // decision or one batch".
+  // No magic numbers on the two work bounds: the whitelist is bounded by "the
+  // whole batch must be verifiable by one integrated command" and the task list
+  // by "one entry = one decision or one batch". The one numeric bound in the
+  // rules is review *capacity* (20 files / 3 contract surfaces), which is a
+  // reviewer limit, not a limit on how much work a batch may contain.
   assert.doesNotMatch(text, /≤3 个/, 'the whitelist is not capped by file count')
   assert.doesNotMatch(text, /≤7 条/, 'the task list is not capped by item count')
   assert.match(text, /逐条列名/, 'the whitelist is enumerated, not counted')
   assert.match(text, /一条集成命令/, 'the batch bound is the integrated command')
+  assert.match(text, /20 个文件或 3 个契约面/, 'the only numeric bound is the review package capacity')
   assert.match(text, /窄验证/, 'per-child verification is narrow, attribution stays intact')
   assert.match(text, /每条 = 一个决策点或一批派发/, 'task-list entries map to decisions or batches')
 

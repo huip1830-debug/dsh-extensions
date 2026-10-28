@@ -8,7 +8,7 @@
       config:
         enabled: true
         order: 500            # after first-party guidance, before persona suffix (10200)
-        # rules: []           # override the five defaults; non-empty string array
+        # rules: []           # override the six defaults; non-empty string array
         # footer: ''          # override the closing paragraph (cost + exemption); '' drops it
         checkpoint:
           enabled: true       # remind the parent when a child completes (judged at the parent's next turn-stopping)

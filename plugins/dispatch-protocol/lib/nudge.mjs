@@ -1,7 +1,7 @@
 // Missed-dispatch detection: a turn that changed several files while delegating
 // nothing.
 //
-// The five rules in the system prompt are advisory — nothing in the harness
+// The six rules in the system prompt are advisory — nothing in the harness
 // makes a model dispatch. A session can therefore survey, edit five files, build
 // and test entirely on its own and still read as compliant, because the
 // discipline only governs the *form* of a dispatch, never its occurrence.
@@ -49,7 +49,7 @@ export const DEFAULT_PWSH_MUTATION_PATTERN = /\b(Remove-Item|Set-Content|Out-Fil
  * The same shell-mutation shape minus the `commit` verb — the nudge counter's
  * tier of the 0.4.1 (I3) split.
  *
- * Commit rights belong to the dispatcher (rule 4), so the dispatcher's own
+ * Commit rights belong to the dispatcher (rule 5), so the dispatcher's own
  * `git commit` must not push a turn over the nudge threshold; four observed
  * false positives: sample four T3, S5 t34, S6 t13 and S7 t2. The checkpoint's
  * read-only verdict keeps the full pattern above: a child that commits is
