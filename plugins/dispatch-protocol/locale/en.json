@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Dispatch Protocol",
-    "description": "Inject always-on delegation discipline into the system prompt: survey before dispatch, self-contained briefs, the dispatcher re-runs claimed verification, reviews cover only the change set, the dispatcher owns commits."
+    "description": "Inject always-on delegation discipline into the system prompt: survey before dispatch, self-contained briefs, the dispatcher runs one integrated verification, reviews cover only the change set, the dispatcher owns commits."
   }
 }

@@ -210,6 +210,7 @@ test('a completed child triggers exactly one checkpoint message to its parent', 
   assert.match(parent.messages[0].text, /child-1/)
   assert.match(parent.messages[0].text, /集成命令/)
   assert.match(parent.messages[0].text, /diff/)
+  assert.doesNotMatch(parent.messages[0].text, /复跑/, 'the checkpoint must not ask for a re-run of the child command')
 })
 
 test('a failed or aborted child does not trigger a checkpoint', () => {

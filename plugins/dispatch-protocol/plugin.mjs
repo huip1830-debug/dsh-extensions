@@ -216,7 +216,7 @@ function registerReminders(ctx, nudge, checkpoint, observation) {
    */
   const classify = (parent, childId, record) => {
     // A child that never attempted a write is a read-only survey: there is no
-    // diff to read and no command to re-run, so the checkpoint would be noise.
+    // diff to read and no exit code to check, so the checkpoint would be noise.
     if (ranReadOnly(record.agent)) return 'read-only'
     if (parentAlreadyHandled(parent, record.agent, childId)) return 'handled'
     return 'delivered'
