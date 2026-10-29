@@ -55,7 +55,7 @@ test('the default text states all six dispatch rules', () => {
   assert.match(text, /互斥并行写/, 'implementation parallelism is allowed behind disjoint whitelists')
   assert.match(text, /契约在派发前定死/, 'parallel implementation requires frozen contracts')
   assert.match(text, /共享产物/, 'shared build outputs stay serial')
-  assert.match(text, /单文件/, 'the closing paragraph states the exemption')
+  assert.match(text, /循环批/, 'the closing paragraph routes execution work to loop batches')
   assert.match(text, /合并判级/, '0.4.0: a change set cannot be split into normal batches to dodge review')
   assert.match(text, /重开评审|重开受影响切片/, '0.4.0: post-review changes re-enter review')
   assert.match(text, /拆批方案或一行不派发理由/, '0.4.0: implementation plans must name the batches or the skip reason')
@@ -122,10 +122,10 @@ test('configured rules replace the default text', () => {
   assert.match(text, /第一条/)
   assert.match(text, /第二条/)
   // The closing paragraph stays: replacing `rules` replaces the numbered rules
-  // only. `白名单` belongs to default rule 1, so its absence is what proves the
+  // only. `先勘察` belongs to default rule 1, so its absence is what proves the
   // default rules are gone.
-  assert.doesNotMatch(text, /白名单/)
-  assert.match(text, /成本与豁免/, 'the closing paragraph is independent of the rules')
+  assert.doesNotMatch(text, /先勘察/)
+  assert.match(text, /白名单与循环批/, 'the closing paragraph is independent of the rules')
 })
 
 test('a disabled plugin registers nothing', () => {
@@ -159,8 +159,17 @@ test('one closing paragraph states who does what and when a dispatch may be skip
   plugin.apply(h.ctx, {})
   const text = h.sections[0].text
 
-  assert.match(text, /成本与豁免/, 'cost split and exemption are one paragraph')
-  assert.match(text, /单文件且纯文案/, 'the small-change exemption survives')
+  assert.match(text, /白名单与循环批/, 'whitelist and loop batches are one paragraph')
+  assert.match(text, /主控只做控制面/, 'the control plane is the only allowed surface')
+  assert.match(text, /七类/, 'the control plane enumerates seven allowed action types')
+  assert.match(text, /执行面一律派发/, 'execution work is always dispatched')
+  assert.match(text, /循环批/, 'a loop batch is the routing unit for unknown-result work')
+  assert.match(text, /NEEDS_DECISION/, 'a contract fork returns three lines, not a take-over')
+  assert.match(text, /实测契约表/, 'external unknowns are measured before they are frozen')
+  assert.match(text, /主控单回合 15 分钟\/20 步/, 'the symmetric budget caps the main agent turn')
+  assert.match(text, /按「产出物归属」判定/, 'permission follows the artifact owner, not judgement density')
+  assert.doesNotMatch(text, /均不命中/, 'the old micro-batch exemption exit must be gone')
+  assert.doesNotMatch(text, /单文件且纯文案/, 'the small-change exemption is removed')
   assert.match(text, /默认派给子代理/, 'mechanical volume defaults to children')
   assert.match(text, /拆批/, 'uncertainty must map to batching')
   assert.match(text, /只读勘察批次/, 'the first batch is a read-only survey')
@@ -183,9 +192,19 @@ test('one closing paragraph states who does what and when a dispatch may be skip
 
   const dropped = harness()
   plugin.apply(dropped.ctx, { footer: '' })
-  assert.doesNotMatch(dropped.sections[0].text, /成本与豁免/)
+  assert.doesNotMatch(dropped.sections[0].text, /白名单与循环批/)
 
   assert.throws(() => resolveConfig({ footer: 42 }), /footer/)
+})
+
+test('the first rule scopes the main agent to the control plane', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+  const text = h.sections[0].text
+
+  assert.match(text, /七类/, 'the first rule names the seven control-plane actions')
+  assert.match(text, /唯一例外是用户显式要求主控亲自做/, 'only an explicit user request overrides the split')
+  assert.match(text, /禁止把「调研 X 然后实现」/, 'research-then-implement must not be dispatched to an execution child')
 })
 
 test('the footer states the read-only label convention', () => {
@@ -502,7 +521,8 @@ test('a multi-write turn without delegation is reminded exactly once', () => {
     h.turnStopping(agent, 1)
 
     assert.equal(agent.messages.length, 1, 'the nudge costs one step, once per turn')
-    assert.match(agent.messages[0].text, /派发 0 次/)
+    assert.match(agent.messages[0].text, /不在主控白名单内/)
+    assert.match(agent.messages[0].text, /循环批/, 'the reminder routes the remaining work to a loop batch')
     assert.match(agent.messages[0].text, /写入 2 个文件/, '0.4.1: fileCount is the distinct-file count')
     assert.match(agent.messages[0].text, /（2 次）：x\.xaml, y\.xaml/, '0.4.1: writes and the file list carry no shell count')
     assert.equal(agent.messages[0].role, 'user', 'the provider requires a user-role message')
@@ -930,7 +950,7 @@ test('a delivered checkpoint owns the turn so the same turn is not nudged', () =
   assert.match(parent.messages[0].text, /child-20/)
   assert.match(parent.messages[0].text, /已完成/)
   assert.doesNotMatch(parent.messages[0].text, /写入 2 个文件/)
-  assert.doesNotMatch(parent.messages[0].text, /派发 0 次/)
+  assert.doesNotMatch(parent.messages[0].text, /不在主控白名单内/)
 })
 
 test('a skipped read-only checkpoint leaves the same turn free to nudge', () => {
@@ -952,7 +972,7 @@ test('a skipped read-only checkpoint leaves the same turn free to nudge', () => 
 
   assert.equal(parent.messages.length, 1, 'the read-only checkpoint is skipped, the nudge fires')
   assert.match(parent.messages[0].text, /写入 2 个文件/)
-  assert.match(parent.messages[0].text, /派发 0 次/)
+  assert.match(parent.messages[0].text, /不在主控白名单内/)
   assert.doesNotMatch(parent.messages[0].text, /child-21/)
 })
 
@@ -1713,7 +1733,7 @@ test('a delivered gate makes the nudge yield in the same turn', () => {
 
   assert.equal(parent.messages.length, 1, 'the gate owns the turn, the nudge stays silent')
   assert.match(parent.messages[0].text, /准备 present\/commit/)
-  assert.doesNotMatch(parent.messages[0].text, /派发 0 次/)
+  assert.doesNotMatch(parent.messages[0].text, /不在主控白名单内/)
 })
 
 test('send_message and dispatch calls are not waiting', () => {
@@ -2060,7 +2080,7 @@ test('a turn that already delivered a nudge cannot also deliver a gate', () => {
     h.created(parent)
     h.turnStopping(parent, 1)
     assert.equal(parent.messages.length, 1)
-    assert.match(parent.messages[0].text, /派发 0 次/, 'close#1 delivers the nudge')
+    assert.match(parent.messages[0].text, /不在主控白名单内/, 'close#1 delivers the nudge')
 
     // 同一回合追加 present：若不检查 lastDeliveredTurn，第二次收尾会再发 verify。
     events.push(call(1, 'present', { file_path: 'report.md' }, 'present-1'))

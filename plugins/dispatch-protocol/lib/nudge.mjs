@@ -110,7 +110,7 @@ function readCommand(raw) {
  * keep their own count inside `{files}` (see `renderNudge`/`formatFiles`), so a
  * commit-only turn cannot render as "写了 N 个文件".
  */
-export const DEFAULT_NUDGE_TEXT = '[dispatch-protocol] 本回合写入 {fileCount} 个文件（{writes} 次）：{files}。派发 0 次，也没有说明理由。要么一行给出不派发的理由，要么改为派发。'
+export const DEFAULT_NUDGE_TEXT = '[dispatch-protocol] 本回合写入 {fileCount} 个文件（{writes} 次）：{files}。这些写入不在主控白名单内——源码/测试/脚本/文档正文一律由子代理写。停止本回合，把剩余工作派成循环批或下一批；只有白名单状态文件可以直接写。'
 
 /**
  * Substrings that count as "this turn already explained itself".
