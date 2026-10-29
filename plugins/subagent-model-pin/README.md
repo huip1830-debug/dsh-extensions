@@ -1,6 +1,6 @@
 # subagent-model-pin
 
-> 当前部署：desktop **0.2.x**（配置卡片与 `roles[].sandbox` 随本提交发布）；probe 为 `link:`。改动后：提交推送 → 关闭 DSH → `dsh plugin --profile desktop update subagent-model-pin` → 启动。
+> 部署状态以 profile 安装为准（`dsh plugin --profile desktop list`）；probe 为 `link:`。改动后：提交推送 → 关闭 DSH → `dsh plugin --profile desktop update subagent-model-pin` → 启动。
 
 DSH profile 插件：**子 agent 默认跑低成本模型，需要时在委派调用里显式升级**。
 

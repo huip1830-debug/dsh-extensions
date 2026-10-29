@@ -127,7 +127,6 @@ checkpoint 与 nudge 的每次判定都写一行，suppressed 也写——否则
 - checkpoint 行额外带 `childId`、`label`（每个 pending 子代理一行）；没有回合可用（无 hook 作用域的回退 `followup`）时 `turn` 为 `null`。
 - nudge 行额外带 `writes`、`files`、`delegations`。补评估行额外带 `deferred: true`。
 - 闸门行额外带 `gate`（`wait`/`verify`/`contract`/`review`/`handoff`）：wait 行带 `observations`（查询次数）；verify 行带 `changes`（脏改动数）与 `lastVerify`（命令或 `null`）；contract/review 行带 `files`（命中的去重路径）；handoff 行带 `emptyTurns`（连续空回合数）。
-- **迁移**：旧 `%TEMP%\dispatch-protocol-nudge.jsonl` 不再写入，可以直接删除。
 
 ## 回合观测
 
@@ -254,7 +253,7 @@ HandoffGate 只提醒「这个回合什么都没产出」，它不写文件（�
 | 0.5.1 | 评审对象收窄为变更集：输入四项、白名单并集 diff、不逐文件通读；「全仓不变量核查」单列为有条件的一栏；评审包 20 个文件 / 3 个契约面切片上限；六条规则按职责重排，评审从判级条拆出独立一条。 | 评审实测成本倒挂（评审重跑主控已复跑过的构建/测试，`pwsh×24~33`，成本多次超过被评审的实现批次之和）；KOL 会话 `session-37256e00` 证明只审 diff 会漏白名单外的 3 处用户可见点。 |
 | 0.5.2 | 单批预算（过半报进度、超预算报阻塞点再停）、派发即冻结（契约窗口）、等待改走完成事件（禁止 sleep 轮询）、超预算按场景切片。 | `session-1433e747`：30.8 分钟子代理 / 192 步，派发方 31 次 `Start-Sleep` 合计 54.1 分钟；运行中改契约导致返工。 |
 | 0.5.3 | locales 与注释口径收口：验收描述改为「派发方跑集成命令」，plugin.mjs 注释去掉 re-run 说法，checkpoint 测试补 `doesNotMatch(/复跑/)` 防回流。 | 0.5.2 复审的三条非阻断建议（`plugin.mjs:219` 注释、checkpoint 负向断言、locale 描述）。 |
-| 0.5.4 | 规则 3 补「集成命令必须覆盖各批窄验证断言点的并集」前提与唯一复跑例外——把设计取舍⑦的边界从文档层写进注入文本。 | `2026-10-28-dispatch-0.5x-followup.md` §2 裁决：移除复跑以该覆盖前提成立为边界，此前边界只在文档里、模型看不到。 |
+| 0.5.4 | 规则 3 补「集成命令必须覆盖各批窄验证断言点的并集」前提与唯一复跑例外——把设计取舍⑦的边界从文档层写进注入文本。 | `docs/superpowers/specs/2026-10-28-dispatch-0.5x-followup.md` §2 裁决：移除复跑以该覆盖前提成立为边界，此前边界只在文档里、模型看不到。 |
 | 0.6.0 | WaitGate / VerifyGate 两个事件闸门：等待期只读轮询、以及收口前的「未验证/验证后又改」各提醒一次；接线顺序 checkpoint → 闸门 → nudge，每回合最多一条；`gates` 加载期校验；决定日志新增 `kind:"gate"`。 | `session-92f462d1`：同一会话 66 次状态查询轮询；最终 diff 在最后一次集成命令（事件 1112）之后又被改，却准备 present 收口。 |
 | 0.7.0 | 新增 ContractGate（有子代理在跑时改写契约文件）、ReviewGate（只读评审完成后又改工作区，同一轮只提醒一次）、HandoffGate（连续空回合兜底）；闸门顺序扩为 Wait → Verify → Contract → Review → Handoff；`subagent/end` 先更新闸门状态再走 checkpoint 早退；README 新增「交接」状态文件模板。 | `session-92f462d1`：子代理运行期间在线改写契约、只读评审后改动未重开切片、以及无工具调用无文本的空回合中断。 |
 | 0.8.0 | 注入文本改按产出物归属判定：规则 1 改为「主控只做控制面，不做执行面」（七类动作、执行面一律派发、用户显式 override、先勘察后派发）；footer 改为「白名单与循环批」（循环批六要素、`NEEDS_DECISION` 分叉、实测契约表、风险前置、对称预算）；nudge 文案改为「不在主控白名单内」；移除单文件/纯文案豁免与微批分流表。 | `session-e691e70b`：主控 172 次写盘、T+ 排错 84 分钟/173 步/23.9M cache 读；改为产出物归属判定 + 循环批 + 风险前置 + 对称预算。 |
@@ -271,7 +270,7 @@ node test.mjs
 真机验证（临时 profile，不动桌面 profile）：
 
 ```powershell
-dsh plugin --profile probe add "link:G:/www/ziyou/dsh-extensions/plugins/dispatch-protocol"
+dsh plugin --profile probe add "link:<仓库根>/plugins/dispatch-protocol"
 dsh --profile probe headless "不要调用任何工具，只回答：你的系统提示词里「派发纪律」一节列了哪几条？逐条列出标题。"
 ```
 
@@ -295,8 +294,8 @@ dsh --profile probe headless "不要调用任何工具，只回答：你的系�
 - **检查点只在未验收时花一步**：0.3.4 起 settle 只登记，回合收尾判定已验收就零消息、零额外步骤（比 0.3.2/0.3.3 的 settle 即发更省）；未验收才 `steer` 一条，花一步，与 nudge 同价。父代理没有 hook 作用域时仍回退为 settle 时 `followup`，行为同 0.3.3。
 - **触发看文件数、判定看调用名**：是否提醒按去重路径计（同一文件多次编辑算 1 个）；「哪些调用算改动」仍按工具名判断——`pwsh` 里的 `Set-Content`/`dotnet format` 等副作用不计；`write`/`edit` 以 `tool/result.isError` 为准，失败的不计（无结果可查时照算）。
 - **检查点的只读判定按调用名、尝试即算**：`write`/`edit` 只要出现在子代理的 `tool/call` 里就算执行类，**不解析 `tool/result`**——失败或被拒绝的写入也不豁免检查点。这与 nudge「成功才计数」的口径不同，是有意的保守方向：宁可多提醒一次，也不要漏掉真正的执行类子代理。
-- **记账在 TEMP 里**：`nudge.log` 默认落在系统临时目录（`dispatch-protocol-decisions.jsonl`，checkpoint、nudge 与状态闸门共用），不随仓库版本化；要长期留档就把路径指到固定位置（或 `false` 全关）。旧 `dispatch-protocol-nudge.jsonl` 已不再写入。
+- **记账在 TEMP 里**：`nudge.log` 默认落在系统临时目录（`dispatch-protocol-decisions.jsonl`，checkpoint、nudge 与状态闸门共用），不随仓库版本化；要长期留档就把路径指到固定位置（或 `false` 全关）。
 - **profile 插件不支持热加载**：装完必须重启 DSH，新会话才生效。
-- **update 失败会留下半残目录，且可能卡成 delete-pending**：`dsh plugin --profile desktop update` 先把 `node_modules/<pkg>` 整块 rename 掉；任一步失败就可能只剩一半文件，而失败时被打开的子目录（实测是 `lib/`）会进入 delete-pending —— 之后**连改父目录、删除、读 ACL 都 Access denied**，`diagnose-windows-sandbox-acl` 报 `VERDICT=UNREADABLE`、Restart Manager 返回 `ACCESS_DENIED`，只有**重启 Windows** 能清。2026-10-22 踩过一次（`AUDIT-2026-10-22.md` 第七节）。
+- **update 失败会留下半残目录，且可能卡成 delete-pending**：`dsh plugin --profile desktop update` 先把 `node_modules/<pkg>` 整块 rename 掉；任一步失败就可能只剩一半文件，而失败时被打开的子目录（实测是 `lib/`）会进入 delete-pending —— 之后**连改父目录、删除、读 ACL 都 Access denied**，`diagnose-windows-sandbox-acl` 报 `VERDICT=UNREADABLE`、Restart Manager 返回 `ACCESS_DENIED`，只有**重启 Windows** 能清。2026-10-22 踩过一次。
   - 预防：**完全退出 DSH → update → 启动**；确认没有遗留的 `robocopy`/`pnpm` 子进程再跑（那次真正的持有者是一条被我挂住的 robocopy）。
   - 恢复：重启后 `lib/` 自动消失，重跑同一条 update 即可归位；验收标志是 `lib/config.mjs` 存在且没有手工补丁目录。
