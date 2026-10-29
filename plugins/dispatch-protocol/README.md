@@ -2,11 +2,12 @@
 
 > 部署状态不在本文档硬编码：desktop 的实际版本以 profile 安装为准（`dsh plugin --profile desktop list` 或 `profiles/desktop/node_modules/dispatch-protocol/package.json`）；probe 为 `link:` → 直接吃工作区。发布顺序固定为：提交推送 → `dsh plugin --profile desktop update dispatch-protocol` → 重启 DSH → 台账记一笔。没走完不算发布。
 
-把「派发纪律」常驻注入 DSH。三个机制，都不拦截任何调用：
+把「派发纪律」常驻注入 DSH。四个机制，都不拦截任何调用：
 
 1. **系统提示词 section**：每次请求（主控与每个子代理）都会看到六条规则，且**按职责排序**（谁产出前提 → 子代理可碰什么、能花多久 → 谁付执行成本、怎么等 → 评审看什么 → 谁拥有提交权 → 什么能并行、怎么判级）。规则在插件里，不依赖模型是否加载了某个 skill。
 2. **完成检查点**：子代理结束（`stopReason === 'completed'`）时只登记「待验收」，等父代理下一个回合收尾（`agent/turn-stopping`）才判定：已验收就静默丢弃，未验收才提醒读 diff、核对它报告的退出码，并在全批结束后跑一次集成命令。静态规则容易被跳过，时点提醒不会；**父代理已经按子代理汇报处理过的不再重复提醒**。
 3. **漏派发提示**：一回合改了多个文件却一次没派发时，在本回合收尾前给主控一条提醒。规则只约束「怎么派发」，从来不含「必须派发」，所以「这回合漏了派发」只能观测，不能推断。
+4. **状态闸门（0.6.0/0.7.0）**：等待期只读轮询（WaitGate）、「验证之后又改却准备 present/commit」（VerifyGate）、有子代理在跑时改写契约文件（ContractGate）、只读评审后改动工作区（ReviewGate）、空回合兜底（HandoffGate）各提醒一次；同样只读事件、不拦截调用，详见「状态闸门（0.6.0/0.7.0）」。
 
 ## 为什么不用 AGENTS.md
 
@@ -97,12 +98,17 @@
 
 ## 提醒让位（0.3.10 起）
 
-两个提醒由同一个 `agent/turn-stopping` 处理器按固定顺序判定：**先 checkpoint，后 nudge**，不依赖订阅顺序。同一回合号不同时发 checkpoint 与 nudge（deferred 补评估属于 N−1，可能在同一次回合收尾里与本回合 checkpoint 各发一条）；nudge 每回合至多一条，checkpoint 每个未验收子代理一条。
+两个提醒与五个状态闸门由同一个 `agent/turn-stopping` 处理器按固定顺序判定：**先 checkpoint，再按 Wait → Verify → Contract → Review → Handoff 顺序判定状态闸门，最后 nudge**，不依赖订阅顺序。同一回合号不同时发 checkpoint 与 nudge（deferred 补评估属于 N−1，可能在同一次回合收尾里与本回合 checkpoint 各发一条）；闸门投递后 nudge 让位；nudge 每回合至多一条，checkpoint 每个未验收子代理一条。
 
 | 优先级 | 提醒 | 触发 | 让位/静默 |
 |---|---|---|---|
 | 1 | 完成检查点 | 子代理 `completed` + 父代理未验收 | 只读子代理；父代理已按汇报动过手 |
-| 2 | 漏派发提示 | ≥2 去重文件 + 0 派发 + 正文未解释 | 本回合是验收回合；上一回合（turn-1）刚投递过检查点（一回合宽限） |
+| 2 | WaitGate | 回合内状态查询 ≥ 阈值且无写入/派发/验证 | 本回合已投递 checkpoint；N−1 的 deferred nudge 已投递；每回合最多一条 |
+| 3 | VerifyGate | present/commit 且有成功写入未验证、验证后又脏 | 纯只读 present（零写入）；上一条闸门已投递；每回合最多一条 |
+| 4 | ContractGate | 有未结束子代理时改写契约文件 | 收尾时无活跃子代理；每回合最多一条 |
+| 5 | ReviewGate | 只读评审完成后父代理又写工作区 | 同一轮评审已提醒（warned）；每个 completed 建立新基线；每回合最多一条 |
+| 6 | HandoffGate | 连续空回合 ≥ `emptyTurns` | 回合有工具调用或非空文本；子代理回合；每回合最多一条 |
+| 7 | 漏派发提示 | ≥2 去重文件 + 0 派发 + 正文未解释 | 本回合是验收回合；上一回合（turn-1）刚投递过检查点（一回合宽限）；闸门已投递 |
 
 - **checkpoint 先占用回合**：本回合投递了 checkpoint 就不再评估 nudge。
 - **验收回合静默**：checkpoint 判 `handled`（父代理已按汇报动过手）时，本回合 nudge 不发——这回合本来就在验收，不是漏派。
@@ -111,15 +117,16 @@
 
 ## 决定日志（0.3.10 起）
 
-checkpoint 与 nudge 的每次判定都写一行，被抑制的也写——否则日志分不清「没触发」和「触发后被静默」。默认 `%TEMP%\dispatch-protocol-decisions.jsonl`，`nudge.log` 键名保留：`false` 两个机制都不记，字符串则覆盖路径（checkpoint 与 nudge 写同一文件）。
+checkpoint 与 nudge 的每次判定都写一行，suppressed 也写——否则日志分不清「没触发」和「触发后被静默」；**状态闸门只记 delivered**（闸门不产生 suppressed 行）。默认 `%TEMP%\dispatch-protocol-decisions.jsonl`，`nudge.log` 键名保留：`false` 三个机制都不记，字符串则覆盖路径（checkpoint、nudge 与闸门写同一文件）。
 
 ```json
-{"time":"...","session":"...","turn":36,"kind":"checkpoint|nudge","decision":"delivered|suppressed","reason":"justified|handled|read-only|grace","writes":3,"files":[...],"delegations":0}
+{"time":"...","session":"...","turn":36,"kind":"checkpoint|nudge|gate","decision":"delivered|suppressed","reason":"justified|handled|read-only|grace","writes":3,"files":[...],"delegations":0,"gate":"wait|verify|contract|review|handoff","observations":6,"changes":2,"lastVerify":"npm test","emptyTurns":1}
 ```
 
 - 公共字段：`time`、`session`、`turn`、`kind`、`decision`；`reason` 只在 `suppressed` 时出现。
 - checkpoint 行额外带 `childId`、`label`（每个 pending 子代理一行）；没有回合可用（无 hook 作用域的回退 `followup`）时 `turn` 为 `null`。
 - nudge 行额外带 `writes`、`files`、`delegations`。补评估行额外带 `deferred: true`。
+- 闸门行额外带 `gate`（`wait`/`verify`/`contract`/`review`/`handoff`）：wait 行带 `observations`（查询次数）；verify 行带 `changes`（脏改动数）与 `lastVerify`（命令或 `null`）；contract/review 行带 `files`（命中的去重路径）；handoff 行带 `emptyTurns`（连续空回合数）。
 - **迁移**：旧 `%TEMP%\dispatch-protocol-nudge.jsonl` 不再写入，可以直接删除。
 
 ## 回合观测
@@ -134,6 +141,49 @@ checkpoint 与 nudge 的每次判定都写一行，被抑制的也写——否�
 - **同一 `(session, turn)` 只保留首行**：`steer` 会让同一回合再跑一步、`agent/turn-stopping` 二次触发，此时丢弃 steer 之后那行快照——首行才是自然的回合末快照。
 - **观测不是门禁**：不回读、不阻断任何事，写盘失败静默吞掉（目录不可写、磁盘满都不会让回合失败）。
 - **开关**：`observation.enabled: false` 关闭；`observation.dir: false` 一并关闭；字符串则改目录（相对会话 cwd，默认 `dispatch/runs`）。
+
+## 状态闸门（0.6.0/0.7.0）
+
+五个事件闸门，都在 `agent/turn-stopping` 里判定：只对根代理生效、每回合最多一条、判定与投递异常一律吞掉、不阻断任何工具调用。判据只读 `session.snapshotEvents()`，不跑 git、不读磁盘。依据 `session-92f462d1`：同一会话 66 次状态查询轮询（每次查询都付一整步模型步进，子代理状态却没有变），最终 diff 在最后一次集成命令（事件 1112）之后又被写入，主控却已经准备 present/commit 收口；同一会话还在子代理运行期间改过契约文件、在只读评审之后继续改工作区，并出现过无工具调用、无文本的空回合。
+
+| 闸门 | 触发 | 动作 | 决定日志 |
+|---|---|---|---|
+| WaitGate | 本回合 `gates.wait.tools` 调用数 ≥ `threshold`，且没有 write/edit、派发、`present`、`send_message`、`interrupt_agent`、`job_kill`，也没有命中 `gates.verify.commands` 的 `pwsh` 验证 | 一条「结束回合等完成事件」提醒，占位 `{count}` / `{tools}`（去重、最多 4 个） | `kind:"gate", gate:"wait", observations:<查询次数>` |
+| VerifyGate | 本回合出现 `present` 或命中 `commitPattern` 的 `git commit/push`，且（有成功写入但从未成功验证 或 最近一次成功验证之后又脏） | 一条「先跑集成命令再收口」提醒，占位 `{changes}` / `{lastVerify}` | `kind:"gate", gate:"verify", changes:<脏改动数>, lastVerify:<命令或 null>` |
+| ContractGate | 本回合 write/edit 的 `file_path`/`path` 命中 `gates.contract.patterns`，且收尾时仍有未结束子代理 | 一条「派发即冻结：先 interrupt 停批」提醒，占位 `{files}`（最多 3 个） | `kind:"gate", gate:"contract", files:[...]` |
+| ReviewGate | 只读评审子代理 `completed` 之后，父代理又成功 write/edit | 一条「评审已失效：重开受影响切片」提醒，占位 `{files}`（本轮 dirty 的去重路径，最多 3 个） | `kind:"gate", gate:"review", files:[...]` |
+| HandoffGate | 当前收尾回合为空（无本回合 tool/call、无本回合非空 text），且往前连续空回合数 ≥ `gates.handoff.emptyTurns` | 一条「先写 dispatch/state.md 再开新会话」提醒，占位 `{emptyTurns}`（可选） | `kind:"gate", gate:"handoff", emptyTurns:<n>` |
+
+- **验证成功口径**：`pwsh` 命中 `gates.verify.commands`（大小写不敏感子串），有对应 `tool/result`、`isError !== true`、结果文本无 `exit code: N` 或 `N === 0`。失败的验证不算验证——一条红的 `npm test` 不能把闸门永久静音。
+- **纯只读 present 不提醒**：整会话零写入、也从未验证时没有 diff 可验（例如 present 一份报告/计划），VerifyGate 不触发（契约 §11-A）。
+- **脏判定**：最近一次成功验证之后，存在成功的 write/edit，或命中 `DEFAULT_PWSH_NUDGE_SHELL_PATTERN` 的 pwsh（复用 nudge 档位，不计 `git commit`）。没有对应结果的调用按脏处理——宁可多提醒，也不要把被中断的写入抹掉。
+- **ContractGate 只看收尾时刻**：`activeChildren` 在 `agent/created` 登记、`subagent/end` 标 `ended`；子代理在写入之后、回合收尾之前结束的，本闸门不会触发（契约 §3 已知边界）。契约文件按路径大小写不敏感子串识别，默认只认 `contract`。**误报**：`src/contracts.ts`、`tmp/contract-notes.md` 在子代理运行时同样命中（`patterns` 是路径子串，不是文件类型），且失败的 write（`isError`）也按 §3 字面视为写入——提醒是建议性的，按需缩小 `patterns`。
+- **ReviewGate 只看「有评审完成 + 之后有写入」**：label 以 `gates.review.labelPrefixes` 开头（默认 `只读评审`/`只读复审`）；任一评审子代理 completed 都建立新基线（`since=max(旧基线,当前父事件长度)`、`warned=false`）；不解析评审报告的 PASS/FAIL——FAIL 后返修同样应重开，方向一致。非评审子代理（勘察/实现）不改变状态（契约 §4 已知边界）。**`warned` 在下一轮评审 `created` 或任一评审 `completed` 时重置；每个基线只提醒一次；同一波次里第二个评审切片完成会重新建立基线。** 同一 childId 的重复 settle 不会重建基线（契约 §12-B）。
+- **HandoffGate 是 best-effort**：若宿主在空流/中断回合根本不再触发 `agent/turn-stopping`，本闸门无法提醒；连续空回合会在下一个空回合再次提醒（弱提醒，不阻断）。**空回合口径**：只认 `type:'text'` 非空文本，仅 reasoning、无 text 的回合也算空回合。
+- **让位顺序**：checkpoint → Wait → Verify → Contract → Review → Handoff → nudge。前一环投递后，后面的机制让位；闸门投递后设 `lastDeliveredTurn`，nudge 让位；闸门投递仍写回合观测行。**同回合已投递过任何提醒（checkpoint/nudge/闸门）→ 后续收尾不再发闸门**（契约 §11-A：一条 steer 之后不叠加第二条）。若 N−1 的 deferred nudge 已占用本次收尾，本回合不再叠加闸门（宁可少一条提醒，也不要一次收尾投递两条 steer）。
+- **配置边界**：派发工具名复用 `nudge.delegationTools`（不新增配置键）；`{lastVerify}` 为 `null` 时文案渲染「从未验证」。
+- **已知误报与边界**：`present` 只按工具名识别；`pwsh` 里的 `git commit` 即使写在未执行分支也会触发（与 nudge 的过度包含口径一致）；验证命令按子串匹配，`npm test -- --watch=false` 也算 `npm test`。**子串匹配的误报**：`Get-Content tsconfig.json` 会命中 `tsc`、`cat jest.config.js` 会命中 `jest`，非代码会话请按需追加 `gates.verify.commands`。子代理回合不判定。闸门是提醒而非门禁——它不会阻止 `present`/`commit`，只要求模型先补一次集成命令。
+
+## 交接（0.7.0）
+
+HandoffGate 只提醒「这个回合什么都没产出」，它不写文件（闸门不读盘、不写盘）。连续空回合（默认 1 个；模型失稳时常见连续 2 个以上）出现时，正确的动作是先落状态再开新会话，而不是继续 `/compact`：
+
+```markdown
+# dispatch/state.md
+
+- run: <目标一句话 + 冻结契约路径>
+- head: <当前分支 / 最近提交>
+- diffHash: <git diff 的 sha256，或 `git status --short` 摘要>
+- batches: <已完成批次 / 在跑批次 / 待派批次>
+- verifies: <集成命令 + 退出码 + 时间；失败的也记>
+- reviews: <评审轮次 + PASS|FAIL + 切片>
+- open: <未决问题 / 阻塞点 / 契约疑点>
+- next: <下一步唯一动作；恢复会话先读这一行>
+```
+
+- **先落状态，再开新会话**：空回合往往意味着上下文已经失真，继续压缩只会把状态越压越少；把上面八项写进 `dispatch/state.md` 后开新会话接力，恢复成本最低。
+- **状态文件是记忆，不是证据**：恢复会话时用 `head`/`diffHash` 核对工作区；不一致时以工作区为准，并把 `open` 里的疑点重新问一遍。
+- **best-effort**：若宿主在空流/中断回合根本不再触发 `agent/turn-stopping`，闸门无法提醒——不能把「没收到提醒」当成「没有空回合」。
 
 ## 配置
 
@@ -154,9 +204,27 @@ checkpoint 与 nudge 的每次判定都写一行，被抑制的也写——否�
 | `nudge.delegationTools` | `['subagent','subagent_fork','workflow']` | 计入「已派发」的工具名 |
 | `nudge.justifiedPatterns` | 见上（0.3.8 起 9 条） | 本回合正文命中任一即静默（子串匹配，NFKC 归一） |
 | `nudge.text` | 内置模板 | 覆盖提醒文案，支持 `{fileCount}` / `{writes}` / `{files}` / `{turn}` |
-| `nudge.log` | `%TEMP%\dispatch-protocol-decisions.jsonl` | 决定日志（checkpoint 与 nudge 的 delivered/suppressed 各一行）；`false` 两个机制都不记 |
+| `nudge.log` | `%TEMP%\dispatch-protocol-decisions.jsonl` | 决定日志：checkpoint/nudge 写 delivered 与 suppressed，状态闸门只写 delivered；`false` 三个机制都不记 |
+| `gates.enabled` | `true` | 五个事件闸门（Wait/Verify/Contract/Review/Handoff）总开关 |
+| `gates.wait.enabled` | `true` | 是否提醒等待期的只读状态轮询 |
+| `gates.wait.threshold` | `3` | 本回合状态查询次数达到该值、且无写/派发/验证时提醒（正整数） |
+| `gates.wait.tools` | `['list_agents','job_list','schedule_list','get_goal']` | 计入「状态查询」的工具名 |
+| `gates.wait.text` | 内置模板 | 覆盖等待提醒，支持 `{count}` / `{tools}` |
+| `gates.verify.enabled` | `true` | 是否提醒「未验证就收口」 |
+| `gates.verify.commands` | `['npm test','npm run build','dotnet test','jest','tsc','prisma migrate deploy','node test']` | 视为集成验证的命令片段（大小写不敏感子串） |
+| `gates.verify.commitPattern` | 内置正则字符串（完整默认值见 `lib/gates.mjs` 的 `DEFAULT_VERIFY_COMMIT_PATTERN`） | 收口动作里的 commit/push 识别，加载期编译，非法即报错 |
+| `gates.verify.text` | 内置模板 | 覆盖验证提醒，支持 `{changes}` / `{lastVerify}` |
+| `gates.contract.enabled` | `true` | 有子代理运行时改写契约文件的提醒 |
+| `gates.contract.patterns` | `['contract']` | 契约文件路径片段（大小写不敏感子串） |
+| `gates.contract.text` | 内置模板 | 覆盖契约冻结提醒，支持 `{files}` |
+| `gates.review.enabled` | `true` | 评审后改动未重开的提醒 |
+| `gates.review.labelPrefixes` | `['只读评审','只读复审']` | 识别只读评审子代理的 label 前缀 |
+| `gates.review.text` | 内置模板 | 覆盖评审失效提醒，支持 `{files}` |
+| `gates.handoff.enabled` | `true` | 空回合兜底提醒 |
+| `gates.handoff.emptyTurns` | `1` | 连续空回合达到该值才提醒（正整数） |
+| `gates.handoff.text` | 内置模板 | 覆盖交接提醒，支持 `{emptyTurns}` |
 
-非法配置（`order` 非有限数字、`rules` 为空/非数组、`footer`/`checkpoint.text` 非字符串、`nudge.threshold` 非正整数、工具名单为空数组、`nudge.justifiedPatterns` 为空数组或含空白串、`nudge.log` 既非路径也非 `false`）在插件加载时直接报错，不会静默降级。
+非法配置（`order` 非有限数字、`rules` 为空/非数组、`footer`/`checkpoint.text` 非字符串、`nudge.threshold` 非正整数、工具名单为空数组、`nudge.justifiedPatterns` 为空数组或含空白串、`nudge.log` 既非路径也非 `false`、`gates.wait.threshold` 非正整数、`gates.wait.tools`/`gates.verify.commands`/`gates.contract.patterns`/`gates.review.labelPrefixes` 为空数组、`gates.handoff.emptyTurns` 非正整数、`gates.*.text` 为空白串、`gates.verify.commitPattern` 无法编译、`gates.contract`/`gates.review`/`gates.handoff` 非对象）在插件加载时直接报错，不会静默降级。
 
 ## 设计取舍
 
@@ -187,6 +255,8 @@ checkpoint 与 nudge 的每次判定都写一行，被抑制的也写——否�
 | 0.5.2 | 单批预算（过半报进度、超预算报阻塞点再停）、派发即冻结（契约窗口）、等待改走完成事件（禁止 sleep 轮询）、超预算按场景切片。 | `session-1433e747`：30.8 分钟子代理 / 192 步，派发方 31 次 `Start-Sleep` 合计 54.1 分钟；运行中改契约导致返工。 |
 | 0.5.3 | locales 与注释口径收口：验收描述改为「派发方跑集成命令」，plugin.mjs 注释去掉 re-run 说法，checkpoint 测试补 `doesNotMatch(/复跑/)` 防回流。 | 0.5.2 复审的三条非阻断建议（`plugin.mjs:219` 注释、checkpoint 负向断言、locale 描述）。 |
 | 0.5.4 | 规则 3 补「集成命令必须覆盖各批窄验证断言点的并集」前提与唯一复跑例外——把设计取舍⑦的边界从文档层写进注入文本。 | `2026-10-28-dispatch-0.5x-followup.md` §2 裁决：移除复跑以该覆盖前提成立为边界，此前边界只在文档里、模型看不到。 |
+| 0.6.0 | WaitGate / VerifyGate 两个事件闸门：等待期只读轮询、以及收口前的「未验证/验证后又改」各提醒一次；接线顺序 checkpoint → 闸门 → nudge，每回合最多一条；`gates` 加载期校验；决定日志新增 `kind:"gate"`。 | `session-92f462d1`：同一会话 66 次状态查询轮询；最终 diff 在最后一次集成命令（事件 1112）之后又被改，却准备 present 收口。 |
+| 0.7.0 | 新增 ContractGate（有子代理在跑时改写契约文件）、ReviewGate（只读评审完成后又改工作区，同一轮只提醒一次）、HandoffGate（连续空回合兜底）；闸门顺序扩为 Wait → Verify → Contract → Review → Handoff；`subagent/end` 先更新闸门状态再走 checkpoint 早退；README 新增「交接」状态文件模板。 | `session-92f462d1`：子代理运行期间在线改写契约、只读评审后改动未重开切片、以及无工具调用无文本的空回合中断。 |
 
 ## 验证
 
@@ -223,7 +293,7 @@ dsh --profile probe headless "不要调用任何工具，只回答：你的系�
 - **检查点只在未验收时花一步**：0.3.4 起 settle 只登记，回合收尾判定已验收就零消息、零额外步骤（比 0.3.2/0.3.3 的 settle 即发更省）；未验收才 `steer` 一条，花一步，与 nudge 同价。父代理没有 hook 作用域时仍回退为 settle 时 `followup`，行为同 0.3.3。
 - **触发看文件数、判定看调用名**：是否提醒按去重路径计（同一文件多次编辑算 1 个）；「哪些调用算改动」仍按工具名判断——`pwsh` 里的 `Set-Content`/`dotnet format` 等副作用不计；`write`/`edit` 以 `tool/result.isError` 为准，失败的不计（无结果可查时照算）。
 - **检查点的只读判定按调用名、尝试即算**：`write`/`edit` 只要出现在子代理的 `tool/call` 里就算执行类，**不解析 `tool/result`**——失败或被拒绝的写入也不豁免检查点。这与 nudge「成功才计数」的口径不同，是有意的保守方向：宁可多提醒一次，也不要漏掉真正的执行类子代理。
-- **记账在 TEMP 里**：`nudge.log` 默认落在系统临时目录（`dispatch-protocol-decisions.jsonl`，checkpoint 与 nudge 共用），不随仓库版本化；要长期留档就把路径指到固定位置（或 `false` 全关）。旧 `dispatch-protocol-nudge.jsonl` 已不再写入。
+- **记账在 TEMP 里**：`nudge.log` 默认落在系统临时目录（`dispatch-protocol-decisions.jsonl`，checkpoint、nudge 与状态闸门共用），不随仓库版本化；要长期留档就把路径指到固定位置（或 `false` 全关）。旧 `dispatch-protocol-nudge.jsonl` 已不再写入。
 - **profile 插件不支持热加载**：装完必须重启 DSH，新会话才生效。
 - **update 失败会留下半残目录，且可能卡成 delete-pending**：`dsh plugin --profile desktop update` 先把 `node_modules/<pkg>` 整块 rename 掉；任一步失败就可能只剩一半文件，而失败时被打开的子目录（实测是 `lib/`）会进入 delete-pending —— 之后**连改父目录、删除、读 ACL 都 Access denied**，`diagnose-windows-sandbox-acl` 报 `VERDICT=UNREADABLE`、Restart Manager 返回 `ACCESS_DENIED`，只有**重启 Windows** 能清。2026-10-22 踩过一次（`AUDIT-2026-10-22.md` 第七节）。
   - 预防：**完全退出 DSH → update → 启动**；确认没有遗留的 `robocopy`/`pnpm` 子进程再跑（那次真正的持有者是一条被我挂住的 robocopy）。

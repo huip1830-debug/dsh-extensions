@@ -300,7 +300,9 @@ test('a child that kept writing after the report is still reminded', () => {
 
 test('a read-only survey child does not trigger a checkpoint', () => {
   const h = harness()
-  plugin.apply(h.ctx, quiet)
+  // 0.7.0 HandoffGate 默认开启；本用例的父回合没有工具/正文，只验证 checkpoint
+  // 对只读子代理的跳过，因此隔离新闸门，断言保持 0.3.3 原样。
+  plugin.apply(h.ctx, { ...quiet, gates: { handoff: { enabled: false } } })
 
   const parent = h.main('parent-4', [splice('child-12')])
   const child = h.child('child-12', 'parent-4', '勘察 Task 12', [
@@ -320,7 +322,7 @@ test('a read-only survey child does not trigger a checkpoint', () => {
 
 test('a child that called no tools at all does not trigger a checkpoint', () => {
   const h = harness()
-  plugin.apply(h.ctx, quiet)
+  plugin.apply(h.ctx, { ...quiet, gates: { handoff: { enabled: false } } })
 
   const parent = h.main('parent-5', [splice('child-13')])
   h.created(h.child('child-13', 'parent-5', '零工具子代理'))
@@ -334,7 +336,7 @@ test('a child that called no tools at all does not trigger a checkpoint', () => 
 
 test('a skipped read-only child stays deduplicated across repeated settlement events', () => {
   const h = harness()
-  plugin.apply(h.ctx, quiet)
+  plugin.apply(h.ctx, { ...quiet, gates: { handoff: { enabled: false } } })
 
   const parent = h.main('parent-6', [splice('child-14')])
   const child = h.child('child-14', 'parent-6', '勘察 Task 14', [call(1, 'read', { file_path: 'a.ts' })])
@@ -375,7 +377,7 @@ test('a checkpoint registered before the parent read the report cannot race the 
 
 test('a drained checkpoint is not delivered again on a later turn-stopping', () => {
   const h = harness()
-  plugin.apply(h.ctx, quiet)
+  plugin.apply(h.ctx, { ...quiet, gates: { handoff: { enabled: false } } })
 
   const parent = h.main('parent-16', [splice('child-16')])
   h.created(h.child('child-16', 'parent-16', '实现 Task 16', [
@@ -1081,7 +1083,10 @@ test('the nudge shell pattern keeps the other git mutations but drops commit', (
 
 test('a commit-only or single-file commit turn no longer crosses the nudge threshold', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
+  // 0.6.0: 本用例只验证 nudge 档位对 `git commit` 的计数；commit 现在同时是
+  // VerifyGate 的收口动作（契约 §4），默认开启会给这两回合各补一条验证提醒。
+  // 关掉闸门隔离被测机制，断言保持 0.4.1 原样。
+  plugin.apply(h.ctx, { nudge: { log: false }, gates: { enabled: false } })
 
   const commitOnly = h.main('session-61', [
     call(1, 'pwsh', { command: 'git add -A; git commit -m "x"' }),
@@ -1371,6 +1376,793 @@ test('a commit-only turn leaves no observation row', () => {
 })
 
 // ---------------------------------------------------------------------------
+// 0.6.0 — 状态闸门：WaitGate + VerifyGate（契约 §7）
+
+test('session-92f462d1 replay: six status polls with no write, dispatch or verify earn one wait gate', () => {
+  // 92f462d1 的轮询形态：一回合 66 次状态查询，子代理状态没变，主控却为每次
+  // 查询付了一整步模型步进。这里用 6 次 list_agents 复现最小形状。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-wait-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log } })
+
+    const parent = h.main('session-92f462d1', [
+      call(1, 'list_agents', {}, 'poll-1'),
+      call(1, 'list_agents', {}, 'poll-2'),
+      call(1, 'list_agents', {}, 'poll-3'),
+      call(1, 'list_agents', {}, 'poll-4'),
+      call(1, 'list_agents', {}, 'poll-5'),
+      call(1, 'list_agents', {}, 'poll-6'),
+    ])
+    h.created(parent)
+    h.turnStopping(parent, 1)
+    h.turnStopping(parent, 1) // steer 后同回合再收尾一次，闸门仍只发一条
+
+    assert.equal(parent.messages.length, 1, 'one gate message per turn')
+    assert.match(parent.messages[0].text, /本回合 6 次状态查询/)
+    assert.match(parent.messages[0].text, /list_agents/)
+    assert.match(parent.messages[0].text, /结束回合等完成事件/)
+
+    const rows = readRows(log).filter(row => row.kind === 'gate')
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].gate, 'wait')
+    assert.equal(rows[0].decision, 'delivered')
+    assert.equal(rows[0].observations, 6)
+    assert.equal(rows[0].turn, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a writing turn is not a waiting turn: six polls plus one write stay silent', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('session-gate-write', [
+    call(1, 'list_agents', {}, 'poll-1'),
+    call(1, 'list_agents', {}, 'poll-2'),
+    call(1, 'list_agents', {}, 'poll-3'),
+    call(1, 'list_agents', {}, 'poll-4'),
+    call(1, 'list_agents', {}, 'poll-5'),
+    call(1, 'list_agents', {}, 'poll-6'),
+    call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
+  ])
+  h.created(parent)
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 0, 'a turn that wrote produced evidence and is not polling')
+})
+
+test('status polls below the threshold stay silent', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('session-gate-below', [
+    call(1, 'list_agents', {}, 'poll-1'),
+    call(1, 'job_list', {}, 'poll-2'),
+  ])
+  h.created(parent)
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 0)
+})
+
+test('session-92f462d1 replay: a write after the last successful verification and before present earns one verify gate', () => {
+  // 92f462d1 的收口形态：最后一次集成命令（事件 1112）之后 diff 又被写入，
+  // 主控却已经准备 present。验证状态来自整个 session 的事件序，不看单回合。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-verify-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log } })
+
+    const parent = h.main('session-92f462d1-verify', [
+      call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+      resultWithText(1, 'verify-1', 'Tests 79 passed\nexit code: 0'),
+      call(2, 'write', { file_path: 'gates.mjs' }, 'write-1'),
+      result(2, 'write-1', false),
+      call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+    ])
+    h.created(parent)
+
+    h.turnStopping(parent, 1)
+    assert.equal(parent.messages.length, 0, 'the verification turn itself is not a closure')
+
+    h.turnStopping(parent, 2)
+    assert.equal(parent.messages.length, 1, 'the dirty closure turn earns exactly one gate')
+    assert.match(parent.messages[0].text, /准备 present\/commit/)
+    assert.match(parent.messages[0].text, /先跑一次集成命令并留存退出码/)
+
+    const rows = readRows(log).filter(row => row.kind === 'gate')
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].gate, 'verify')
+    assert.equal(rows[0].decision, 'delivered')
+    assert.equal(rows[0].changes, 1)
+    assert.equal(rows[0].lastVerify, 'npm test')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a verification that is the last write keeps present silent', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('session-gate-clean', [
+    call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
+    call(2, 'pwsh', { command: 'npm test' }, 'verify-1'),
+    resultWithText(2, 'verify-1', 'exit code: 0'),
+    call(3, 'present', { file_path: 'report.md' }, 'present-1'),
+  ])
+  h.created(parent)
+  h.turnStopping(parent, 1)
+  h.turnStopping(parent, 2)
+  h.turnStopping(parent, 3)
+
+  assert.equal(parent.messages.length, 0, 'the diff is clean after the last successful verification')
+})
+
+test('present with no successful verification ever earns the verify gate', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  // 契约 §11-A：必须至少有一次写入，否则纯只读 present 不算「有 diff 可验」。
+  const parent = h.main('session-gate-never', [
+    call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
+    result(1, 'write-1', false),
+    call(1, 'present', { file_path: 'report.md' }, 'present-1'),
+  ])
+  h.created(parent)
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 1)
+  assert.match(parent.messages[0].text, /（或从未跑过）/)
+})
+
+test('a read-only present with no writes is not gated', () => {
+  // 契约 §11-A：present 一份报告/计划、整会话零写入时没有 diff 可验，
+  // 提醒只会让模型为空命令多花一步。
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('session-gate-read-only-present', [
+    call(1, 'present', { file_path: 'report.md' }, 'present-1'),
+  ])
+  h.created(parent)
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 0)
+})
+
+test('a failed verification does not count, so a later write plus present is gated', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-failed-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log } })
+
+    const parent = h.main('session-gate-failed', [
+      call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+      resultWithText(1, 'verify-1', '1 failing\nexit code: 1'),
+      call(2, 'write', { file_path: 'a.ts' }, 'write-1'),
+      call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+    ])
+    h.created(parent)
+    h.turnStopping(parent, 1)
+    h.turnStopping(parent, 2)
+
+    assert.equal(parent.messages.length, 1, 'a red verification is not a verification')
+    const verifyRow = readRows(log).find(row => row.kind === 'gate')
+    assert.equal(verifyRow.lastVerify, null)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a git commit with no successful verification earns the verify gate', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-commit-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log } })
+
+    const parent = h.main('session-gate-commit', [
+      call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
+      result(1, 'write-1', false),
+      call(2, 'pwsh', { command: 'git commit -m "收口"' }, 'commit-1'),
+      result(2, 'commit-1', false),
+    ])
+    h.created(parent)
+    h.turnStopping(parent, 1)
+    h.turnStopping(parent, 2)
+
+    assert.equal(parent.messages.length, 1, 'commit is a closure action too')
+    assert.match(parent.messages[0].text, /准备 present\/commit/)
+    const verifyRow = readRows(log).find(row => row.kind === 'gate')
+    assert.equal(verifyRow.gate, 'verify')
+    assert.equal(verifyRow.lastVerify, null)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('gates can be disabled wholesale, and wait can be disabled alone', () => {
+  const off = harness()
+  plugin.apply(off.ctx, { nudge: { log: false }, gates: { enabled: false } })
+  const quietParent = off.main('session-gate-off', [
+    call(1, 'list_agents', {}, 'poll-1'),
+    call(1, 'list_agents', {}, 'poll-2'),
+    call(1, 'list_agents', {}, 'poll-3'),
+  ])
+  off.created(quietParent)
+  off.turnStopping(quietParent, 1)
+  assert.equal(quietParent.messages.length, 0, 'gates.enabled:false silences both gates')
+
+  const waitOff = harness()
+  plugin.apply(waitOff.ctx, { nudge: { log: false }, gates: { wait: { enabled: false } } })
+  const parent = waitOff.main('session-gate-wait-off', [
+    call(1, 'list_agents', {}, 'poll-1'),
+    call(1, 'list_agents', {}, 'poll-2'),
+    call(1, 'list_agents', {}, 'poll-3'),
+    // 契约 §11-A 之后纯只读 present 不再触发 verify，这里补一次写入让
+    // 「只关 wait、verify 仍开」的断言继续成立。
+    call(2, 'write', { file_path: 'a.ts' }, 'write-1'),
+    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+  ])
+  waitOff.created(parent)
+  waitOff.turnStopping(parent, 1)
+  assert.equal(parent.messages.length, 0, 'gates.wait.enabled:false leaves the wait turn alone')
+  waitOff.turnStopping(parent, 2)
+  assert.equal(parent.messages.length, 1, 'the verify gate is still on')
+  assert.match(parent.messages[0].text, /准备 present\/commit/)
+})
+
+test('a delivered checkpoint keeps the same turn to itself, so no gate fires', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('parent-gate-checkpoint', [
+    call(1, 'list_agents', {}, 'poll-1'),
+    call(1, 'list_agents', {}, 'poll-2'),
+    call(1, 'list_agents', {}, 'poll-3'),
+  ])
+  h.created(parent)
+  h.created(h.child('child-gate-checkpoint', 'parent-gate-checkpoint', '实现 Task', [
+    call(1, 'write', { file_path: 'a.ts' }),
+  ]))
+  h.ended({ childId: 'child-gate-checkpoint', stopReason: 'completed' })
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 1)
+  assert.match(parent.messages[0].text, /已完成/)
+  assert.doesNotMatch(parent.messages[0].text, /状态查询/, 'checkpoint owns the turn, the gate yields')
+})
+
+test('gates config rejects values that would silently never fire', () => {
+  assert.throws(() => resolveConfig({ gates: { wait: { threshold: 0 } } }), /gates\.wait\.threshold/)
+  assert.throws(() => resolveConfig({ gates: { wait: { tools: [] } } }), /gates\.wait\.tools/)
+  assert.throws(() => resolveConfig({ gates: { verify: { commands: [] } } }), /gates\.verify\.commands/)
+  assert.throws(() => resolveConfig({ gates: { verify: { commitPattern: '(' } } }), /gates\.verify\.commitPattern/)
+  assert.throws(() => resolveConfig({ gates: { wait: { text: '' } } }), /gates\.wait\.text/)
+  assert.throws(() => resolveConfig({ gates: { verify: { text: '' } } }), /gates\.verify\.text/)
+  assert.throws(() => resolveConfig({ gates: 42 }), /dispatch-protocol: gates/)
+
+  const gates = resolveConfig({}).gates
+  assert.equal(gates.enabled, true)
+  assert.equal(gates.wait.threshold, 3)
+  assert.deepEqual(gates.wait.tools, ['list_agents', 'job_list', 'schedule_list', 'get_goal'])
+  assert.deepEqual(gates.verify.commands,
+    ['npm test', 'npm run build', 'dotnet test', 'jest', 'tsc', 'prisma migrate deploy', 'node test'])
+  assert.equal(gates.verify.commitRegExp.test('git -C "G:\\repo" commit -m x'), true)
+  assert.equal(gates.verify.commitRegExp.test('git status --short'), false)
+})
+
+test('gates only judge root-agent turns', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  // 子代理自己的写操作已经记在父回合里，且它不能再派发/提交；若闸门对子代理
+  // 生效，只会重复父回合的提醒（契约 §5）。
+  const child = h.main('session-gate-child', [
+    call(1, 'list_agents', {}, 'poll-1'),
+    call(1, 'list_agents', {}, 'poll-2'),
+    call(1, 'list_agents', {}, 'poll-3'),
+    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+  ], { origin: 'subagent', parentSession: 'parent-gate-root' })
+  h.created(child)
+
+  h.turnStopping(child, 1)
+  h.turnStopping(child, 2)
+  assert.equal(child.messages.length, 0)
+})
+
+// ---------------------------------------------------------------------------
+// 0.6.0 amendment（契约 §11-E）：边界、让位与去重
+
+test('exactly threshold status polls already trigger the wait gate', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('session-gate-boundary', [
+    call(1, 'list_agents', {}, 'poll-1'),
+    call(1, 'list_agents', {}, 'poll-2'),
+    call(1, 'list_agents', {}, 'poll-3'),
+  ])
+  h.created(parent)
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 1, 'threshold is inclusive')
+  assert.match(parent.messages[0].text, /本回合 3 次状态查询/)
+})
+
+test('a delivered gate makes the nudge yield in the same turn', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('session-gate-yield', [
+    call(1, 'list_agents', {}, 'poll-1'),
+    call(1, 'list_agents', {}, 'poll-2'),
+    call(1, 'list_agents', {}, 'poll-3'),
+    call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
+    call(1, 'write', { file_path: 'b.ts' }, 'write-2'),
+    call(1, 'present', { file_path: 'report.md' }, 'present-1'),
+  ])
+  h.created(parent)
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 1, 'the gate owns the turn, the nudge stays silent')
+  assert.match(parent.messages[0].text, /准备 present\/commit/)
+  assert.doesNotMatch(parent.messages[0].text, /派发 0 次/)
+})
+
+test('send_message and dispatch calls are not waiting', () => {
+  const withMessage = harness()
+  plugin.apply(withMessage.ctx, { nudge: { log: false } })
+  const messageParent = withMessage.main('session-gate-send-message', [
+    call(1, 'list_agents', {}, 'poll-1'),
+    call(1, 'list_agents', {}, 'poll-2'),
+    call(1, 'list_agents', {}, 'poll-3'),
+    call(1, 'list_agents', {}, 'poll-4'),
+    call(1, 'list_agents', {}, 'poll-5'),
+    call(1, 'list_agents', {}, 'poll-6'),
+    call(1, 'send_message', { agent_id: 'child-1' }, 'send-1'),
+  ])
+  withMessage.created(messageParent)
+  withMessage.turnStopping(messageParent, 1)
+  assert.equal(messageParent.messages.length, 0, 'a delivered message is an action')
+
+  const withDispatch = harness()
+  plugin.apply(withDispatch.ctx, { nudge: { log: false } })
+  const dispatchParent = withDispatch.main('session-gate-dispatch', [
+    call(1, 'list_agents', {}, 'poll-1'),
+    call(1, 'list_agents', {}, 'poll-2'),
+    call(1, 'list_agents', {}, 'poll-3'),
+    call(1, 'list_agents', {}, 'poll-4'),
+    call(1, 'list_agents', {}, 'poll-5'),
+    call(1, 'list_agents', {}, 'poll-6'),
+    call(1, 'subagent', { description: '实现 X' }, 'dispatch-1'),
+  ])
+  withDispatch.created(dispatchParent)
+  withDispatch.turnStopping(dispatchParent, 1)
+  assert.equal(dispatchParent.messages.length, 0, 'a dispatch is an action')
+})
+
+test('gates validation still runs when the gates are disabled', () => {
+  assert.throws(() => resolveConfig({ gates: { enabled: false, wait: { threshold: 0 } } }),
+    /gates\.wait\.threshold/, 'a typo must fail at load time even when disabled')
+})
+
+test('wait gate deduplicates tool names and joins them with commas', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('session-gate-dedupe', [
+    call(1, 'list_agents', {}, 'poll-1'),
+    call(1, 'list_agents', {}, 'poll-2'),
+    call(1, 'list_agents', {}, 'poll-3'),
+    call(1, 'job_list', {}, 'poll-4'),
+    call(1, 'job_list', {}, 'poll-5'),
+    call(1, 'job_list', {}, 'poll-6'),
+  ])
+  h.created(parent)
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 1)
+  assert.match(parent.messages[0].text, /（list_agents, job_list）/)
+})
+
+// ---------------------------------------------------------------------------
+// 0.7.0 — ContractGate / ReviewGate / HandoffGate（契约 §8）
+
+test('contract gate fires when a contract file is written while a child is active', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-contract-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log }, checkpoint: { enabled: false } })
+
+    const parent = h.main('session-contract-active', [
+      call(1, 'write', { file_path: 'tmp/fix-contract.md' }, 'write-1'),
+    ])
+    h.created(parent)
+    h.created(h.child('child-contract-active', 'session-contract-active', '实现 A'))
+    h.turnStopping(parent, 1)
+
+    assert.equal(parent.messages.length, 1)
+    assert.match(parent.messages[0].text, /契约文件/)
+    assert.match(parent.messages[0].text, /tmp\/fix-contract\.md/)
+    const row = readRows(log).find(entry => entry.kind === 'gate')
+    assert.equal(row.gate, 'contract')
+    assert.deepEqual(row.files, ['tmp/fix-contract.md'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('contract gate stays silent when no child is active', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false }, checkpoint: { enabled: false } })
+
+  const parent = h.main('session-contract-idle', [
+    call(1, 'write', { file_path: 'fix-contract.md' }, 'write-1'),
+  ])
+  h.created(parent)
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 0)
+})
+
+test('contract gate stays silent after the child has ended', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false }, checkpoint: { enabled: false } })
+
+  const parent = h.main('session-contract-ended', [
+    call(1, 'write', { file_path: 'fix-contract.md' }, 'write-1'),
+  ])
+  h.created(parent)
+  h.created(h.child('child-contract-ended', 'session-contract-ended', '实现 B'))
+  h.ended({ childId: 'child-contract-ended', stopReason: 'completed' })
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 0, 'the active set is judged at turn close')
+})
+
+test('contract gate ignores non-contract files', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false }, checkpoint: { enabled: false } })
+
+  const parent = h.main('session-contract-other', [
+    call(1, 'write', { file_path: 'src/a.ts' }, 'write-1'),
+  ])
+  h.created(parent)
+  h.created(h.child('child-contract-other', 'session-contract-other', '实现 C'))
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 0)
+})
+
+test('contract gate stays silent when an active child exists but nothing was written', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false }, checkpoint: { enabled: false } })
+
+  const parent = h.main('session-contract-read', [
+    call(1, 'read', { file_path: 'fix-contract.md' }, 'read-1'),
+  ])
+  h.created(parent)
+  h.created(h.child('child-contract-read', 'session-contract-read', '实现 D'))
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 0)
+})
+
+test('review gate fires when the parent writes after a completed read-only review', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-review-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const events = []
+    const h = harness()
+    plugin.apply(h.ctx, {
+      nudge: { log }, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+    })
+
+    const parent = h.main('session-review-write', events)
+    h.created(parent)
+    h.created(h.child('review-1', 'session-review-write', '只读评审：diff'))
+    h.ended({ childId: 'review-1', stopReason: 'completed' })
+    events.push(
+      call(2, 'write', { file_path: 'src/a.ts' }, 'write-1'),
+      result(2, 'write-1', false),
+    )
+    h.turnStopping(parent, 2)
+
+    assert.equal(parent.messages.length, 1)
+    assert.match(parent.messages[0].text, /只读评审之后又改动了工作区/)
+    assert.match(parent.messages[0].text, /src\/a\.ts/)
+    const row = readRows(log).find(entry => entry.kind === 'gate')
+    assert.equal(row.gate, 'review')
+    assert.deepEqual(row.files, ['src/a.ts'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('review gate warns only once in the same review round', () => {
+  const events = []
+  const h = harness()
+  plugin.apply(h.ctx, {
+    nudge: { log: false }, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+  })
+
+  const parent = h.main('session-review-once', events)
+  h.created(parent)
+  h.created(h.child('review-2', 'session-review-once', '只读评审：diff'))
+  h.ended({ childId: 'review-2', stopReason: 'completed' })
+  events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-1'), result(2, 'write-1', false))
+  h.turnStopping(parent, 2)
+  assert.equal(parent.messages.length, 1)
+
+  events.push(call(3, 'write', { file_path: 'src/b.ts' }, 'write-2'), result(3, 'write-2', false))
+  h.turnStopping(parent, 3)
+  assert.equal(parent.messages.length, 1, 'warned=true until a new review round starts')
+})
+
+test('review gate fires again after a new read-only review starts', () => {
+  const events = []
+  const h = harness()
+  plugin.apply(h.ctx, {
+    nudge: { log: false }, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+  })
+
+  const parent = h.main('session-review-rounds', events)
+  h.created(parent)
+  h.created(h.child('review-3', 'session-review-rounds', '只读评审：round 1'))
+  h.ended({ childId: 'review-3', stopReason: 'completed' })
+  events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-1'), result(2, 'write-1', false))
+  h.turnStopping(parent, 2)
+  assert.equal(parent.messages.length, 1)
+
+  h.created(h.child('review-4', 'session-review-rounds', '只读评审：round 2'))
+  h.ended({ childId: 'review-4', stopReason: 'completed' })
+  events.push(call(4, 'write', { file_path: 'src/c.ts' }, 'write-2'), result(4, 'write-2', false))
+  h.turnStopping(parent, 4)
+  assert.equal(parent.messages.length, 2, 'a new review round resets warned')
+  assert.match(parent.messages[1].text, /src\/c\.ts/)
+})
+
+test('non-review child completion does not arm the review gate', () => {
+  const events = []
+  const h = harness()
+  plugin.apply(h.ctx, {
+    nudge: { log: false }, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+  })
+
+  const parent = h.main('session-review-impl', events)
+  h.created(parent)
+  h.created(h.child('impl-1', 'session-review-impl', '实现 Task 1'))
+  h.ended({ childId: 'impl-1', stopReason: 'completed' })
+  events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-1'), result(2, 'write-1', false))
+  h.turnStopping(parent, 2)
+
+  assert.equal(parent.messages.length, 0)
+})
+
+test('review gate stays silent when nothing was written after the review', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {
+    nudge: { log: false }, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+  })
+
+  const parent = h.main('session-review-clean', [])
+  h.created(parent)
+  h.created(h.child('review-5', 'session-review-clean', '只读评审：diff'))
+  h.ended({ childId: 'review-5', stopReason: 'completed' })
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 0)
+})
+
+test('handoff gate fires on the first empty turn by default', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-handoff-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log } })
+
+    const parent = h.main('session-handoff-default', [])
+    h.created(parent)
+    h.turnStopping(parent, 1)
+
+    assert.equal(parent.messages.length, 1)
+    assert.match(parent.messages[0].text, /没有任何产出/)
+    assert.match(parent.messages[0].text, /dispatch\/state\.md/)
+    const row = readRows(log).find(entry => entry.kind === 'gate')
+    assert.equal(row.gate, 'handoff')
+    assert.equal(row.emptyTurns, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('handoff gate ignores a turn that has text', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const parent = h.main('session-handoff-text', [assistantMessage(1, '正在处理，稍后汇报。')])
+  h.created(parent)
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 0)
+})
+
+test('handoff gate with emptyTurns:2 waits for the second consecutive empty turn', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false }, gates: { handoff: { emptyTurns: 2 } } })
+
+  const parent = h.main('session-handoff-two', [])
+  h.created(parent)
+
+  h.turnStopping(parent, 1)
+  assert.equal(parent.messages.length, 0, 'one empty turn is below the configured threshold')
+  h.turnStopping(parent, 2)
+  assert.equal(parent.messages.length, 1)
+  assert.match(parent.messages[0].text, /没有任何产出/)
+})
+
+test('handoff gate never fires for a subagent turn', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false } })
+
+  const child = h.main('session-handoff-child', [], { origin: 'subagent', parentSession: 'parent-handoff' })
+  h.created(child)
+  h.turnStopping(child, 1)
+
+  assert.equal(child.messages.length, 0)
+})
+
+test('new gate config rejects values that would silently never fire', () => {
+  assert.throws(() => resolveConfig({ gates: { contract: { patterns: [] } } }), /gates\.contract\.patterns/)
+  assert.throws(() => resolveConfig({ gates: { review: { labelPrefixes: [] } } }), /gates\.review\.labelPrefixes/)
+  assert.throws(() => resolveConfig({ gates: { handoff: { emptyTurns: 0 } } }), /gates\.handoff\.emptyTurns/)
+  assert.throws(() => resolveConfig({ gates: { contract: { text: '' } } }), /gates\.contract\.text/)
+  assert.throws(() => resolveConfig({ gates: { review: { text: '' } } }), /gates\.review\.text/)
+  assert.throws(() => resolveConfig({ gates: { handoff: { text: '' } } }), /gates\.handoff\.text/)
+  assert.throws(() => resolveConfig({ gates: { contract: 42 } }), /gates\.contract must be an object/)
+  assert.throws(() => resolveConfig({ gates: { review: [] } }), /gates\.review must be an object/)
+  assert.throws(() => resolveConfig({ gates: { handoff: 'x' } }), /gates\.handoff must be an object/)
+})
+
+test('new gate defaults are the documented ones', () => {
+  const gates = resolveConfig({}).gates
+  assert.deepEqual(gates.contract.patterns, ['contract'])
+  assert.deepEqual(gates.review.labelPrefixes, ['只读评审', '只读复审'])
+  assert.equal(gates.handoff.emptyTurns, 1)
+  assert.equal(gates.contract.enabled, true)
+  assert.equal(gates.review.enabled, true)
+  assert.equal(gates.handoff.enabled, true)
+})
+
+// ---------------------------------------------------------------------------
+// 0.7.0 amendment（契约 §11-A/B/E）
+
+test('a turn that already delivered a nudge cannot also deliver a gate', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-single-steer-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const events = [
+      call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
+      call(1, 'write', { file_path: 'b.ts' }, 'write-2'),
+    ]
+    const h = harness()
+    plugin.apply(h.ctx, { nudge: { log } })
+
+    const parent = h.main('session-single-steer', events)
+    h.created(parent)
+    h.turnStopping(parent, 1)
+    assert.equal(parent.messages.length, 1)
+    assert.match(parent.messages[0].text, /派发 0 次/, 'close#1 delivers the nudge')
+
+    // 同一回合追加 present：若不检查 lastDeliveredTurn，第二次收尾会再发 verify。
+    events.push(call(1, 'present', { file_path: 'report.md' }, 'present-1'))
+    h.turnStopping(parent, 1)
+
+    assert.equal(parent.messages.length, 1, 'one steer per turn, including across close#1/close#2')
+    assert.equal(readRows(log).filter(row => row.kind === 'gate').length, 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a second completed review slice re-arms the gate with a new baseline', () => {
+  const events = []
+  const h = harness()
+  plugin.apply(h.ctx, {
+    nudge: { log: false }, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+  })
+
+  const parent = h.main('session-review-parallel', events)
+  h.created(parent)
+  h.created(h.child('review-a', 'session-review-parallel', '只读评审：A'))
+  h.created(h.child('review-b', 'session-review-parallel', '只读评审：B'))
+
+  h.ended({ childId: 'review-a', stopReason: 'completed' })
+  events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-1'), result(2, 'write-1', false))
+  h.turnStopping(parent, 2)
+  assert.equal(parent.messages.length, 1)
+
+  // 第二个评审切片完成：基线推进到当前父事件长度，且 warned 被重置。
+  h.ended({ childId: 'review-b', stopReason: 'completed' })
+  events.push(call(3, 'write', { file_path: 'src/b.ts' }, 'write-2'), result(3, 'write-2', false))
+  h.turnStopping(parent, 3)
+  assert.equal(parent.messages.length, 2, 'a later completed review re-arms the warning')
+  assert.match(parent.messages[1].text, /src\/b\.ts/)
+  assert.doesNotMatch(parent.messages[1].text, /src\/a\.ts/, 'since advanced past the first slice write')
+})
+
+test('a duplicate settle of the same review child does not re-arm the gate', () => {
+  const events = []
+  const h = harness()
+  plugin.apply(h.ctx, {
+    nudge: { log: false }, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+  })
+
+  const parent = h.main('session-review-duplicate', events)
+  h.created(parent)
+  h.created(h.child('review-dup', 'session-review-duplicate', '只读评审：dup'))
+  h.ended({ childId: 'review-dup', stopReason: 'completed' })
+  events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-1'), result(2, 'write-1', false))
+  h.turnStopping(parent, 2)
+  assert.equal(parent.messages.length, 1)
+
+  // 同一 childId 的重复 settle 不应把 warned 重置成 false（契约 §12-B）。
+  h.ended({ childId: 'review-dup', stopReason: 'completed' })
+  events.push(call(3, 'write', { file_path: 'src/b.ts' }, 'write-2'), result(3, 'write-2', false))
+  h.turnStopping(parent, 3)
+  assert.equal(parent.messages.length, 1, 'a duplicate settle must not re-arm the warning')
+})
+
+test('writes before a review completes are not dirty', () => {
+  const events = [
+    call(1, 'write', { file_path: 'src/old.ts' }, 'write-1'),
+    result(1, 'write-1', false),
+  ]
+  const h = harness()
+  plugin.apply(h.ctx, {
+    nudge: { log: false },
+    checkpoint: { enabled: false },
+    gates: { verify: { enabled: false }, handoff: { enabled: false } },
+  })
+
+  const parent = h.main('session-review-before', events)
+  h.created(parent)
+  h.created(h.child('review-before', 'session-review-before', '只读评审：x'))
+  h.ended({ childId: 'review-before', stopReason: 'completed' })
+  events.push(call(2, 'present', { file_path: 'report.md' }, 'present-1'))
+  h.turnStopping(parent, 2)
+
+  assert.equal(parent.messages.length, 0, 'only writes after `since` count as review-dirty')
+})
+
+test('contract gate lists at most three files', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { nudge: { log: false }, checkpoint: { enabled: false } })
+
+  const parent = h.main('session-contract-three', [
+    call(1, 'write', { file_path: 'fix-contract.md' }, 'write-1'),
+    call(1, 'write', { file_path: 'a-contract-b.ts' }, 'write-2'),
+    call(1, 'write', { file_path: 'contract-c.md' }, 'write-3'),
+    call(1, 'write', { file_path: 'src/contracts.ts' }, 'write-4'),
+  ])
+  h.created(parent)
+  h.created(h.child('child-contract-three', 'session-contract-three', '实现 E'))
+  h.turnStopping(parent, 1)
+
+  assert.equal(parent.messages.length, 1)
+  assert.match(parent.messages[0].text, /fix-contract\.md, a-contract-b\.ts, contract-c\.md/)
+  assert.doesNotMatch(parent.messages[0].text, /src\/contracts\.ts/, '{files} caps at three paths')
+})
+
+// ---------------------------------------------------------------------------
 function call(turn, name, args, id) {
   return { type: 'tool/call', data: { turn, step: 1, callId: id ?? `call-${turn}-${name}`, name, arguments: JSON.stringify(args ?? {}) } }
 }
@@ -1378,6 +2170,22 @@ function call(turn, name, args, id) {
 /** One committed `tool/result` record; `isError` marks a refused call. */
 function result(turn, callId, isError) {
   return { type: 'tool/result', data: { turn, step: 1, message: { isError, toolCallId: callId, content: [] } } }
+}
+
+/**
+ * One `tool/result` record carrying text — the exit code a verification call
+ * reports lives in the result content (0.6.0 gate tests).
+ */
+function resultWithText(turn, callId, text, isError = false) {
+  return {
+    type: 'tool/result',
+    data: { turn, step: 1, message: { isError, toolCallId: callId, content: [{ type: 'text', text }] } },
+  }
+}
+
+/** Read a decision log as parsed rows (0.6.0 gate assertions). */
+function readRows(path) {
+  return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(row => JSON.parse(row))
 }
 
 /** One committed `assistant/message` record: the model's prose for a step. */

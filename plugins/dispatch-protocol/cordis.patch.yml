@@ -20,4 +20,28 @@
           # writeTools: ['write', 'edit']        # tools counted as a file change (default write, edit)
           # delegationTools: ['subagent']        # tools counted as a dispatch (default subagent, subagent_fork, workflow)
           # justifiedPatterns: ['豁免']          # turn prose containing any of these silences the nudge
-          # log: false        # shared decision log (checkpoint + nudge); default %TEMP%/dispatch-protocol-decisions.jsonl, false disables both
+          # log: false        # shared decision log (checkpoint + nudge + gates); default %TEMP%/dispatch-protocol-decisions.jsonl, false disables all
+        # gates:                # 0.6.0/0.7.0 event gates: Wait + Verify + Contract + Review + Handoff
+        #   enabled: true       # master switch for all five gates; judged at the root agent's turn-stopping
+        #   wait:
+        #     enabled: true
+        #     threshold: 3      # >= this many status-query calls and no write/dispatch/verify in the turn
+        #     tools: ['list_agents', 'job_list', 'schedule_list', 'get_goal']
+        #     # text: ''        # overrides DEFAULT_WAIT_TEXT; supports {count} {tools}
+        #   verify:
+        #     enabled: true
+        #     commands: ['npm test', 'npm run build', 'dotnet test', 'jest', 'tsc', 'prisma migrate deploy', 'node test']
+        #     # commitPattern: '\bgit\s+(commit|push)\b'  # YAML single-quoted regex; full default is DEFAULT_VERIFY_COMMIT_PATTERN in lib/gates.mjs
+        #     # text: ''        # overrides DEFAULT_VERIFY_TEXT; supports {changes} {lastVerify}
+        #   contract:             # 0.7.0 ContractGate: contract files edited while a child is still running
+        #     enabled: true
+        #     patterns: ['contract']          # case-insensitive path substrings; supports {files}
+        #     # text: ''        # overrides DEFAULT_CONTRACT_TEXT
+        #   review:               # 0.7.0 ReviewGate: parent writes after a read-only review completed
+        #     enabled: true
+        #     labelPrefixes: ['只读评审', '只读复审']
+        #     # text: ''        # overrides DEFAULT_REVIEW_TEXT; supports {files}
+        #   handoff:              # 0.7.0 HandoffGate: consecutive empty turns
+        #     enabled: true
+        #     emptyTurns: 1     # consecutive turns with no tool/call and no non-empty text
+        #     # text: ''        # overrides DEFAULT_HANDOFF_TEXT; supports {emptyTurns}

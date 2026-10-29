@@ -1,6 +1,6 @@
 // dispatch-protocol — always-on dispatch discipline for DSH sessions.
 //
-// Three mechanisms, all DSH-only:
+// Four mechanisms, all DSH-only:
 //   1. One system-prompt section, so every request (main agent and every
 //      subagent) carries the six dispatch rules. Independent of which skills
 //      the model chose to load.
@@ -14,6 +14,13 @@
 //      the *form* of a dispatch and can never require one, so "did this turn
 //      skip the dispatch?" is an observation, not an inference — counted from
 //      the committed `tool/call` log of that turn.
+//   4. 状态闸门（0.6.0/0.7.0）：WaitGate（等待期只读轮询）、VerifyGate（验证后
+//      又改却准备 present/commit）、ContractGate（有子代理在跑时改写契约文件）、
+//      ReviewGate（只读评审后改动工作区）与 HandoffGate（空回合兜底）各提醒一次。
+//      它们排在 checkpoint 之后、nudge 之前，每回合最多一条；判据只读已提交事件，
+//      不拦截任何工具调用。证据 session-92f462d1：66 次状态查询轮询；最终 diff
+//      在最后一次集成命令（事件 1112）之后又被改却准备收口；契约在线改写、评审
+//      后未重开、空回合中断也是同一会话的形态。
 //
 // The nudge yields to the checkpoint: a turn that delivered a checkpoint, or
 // that turned out to be an acceptance turn for a child report, or that directly
@@ -42,6 +49,11 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { resolveConfig } from './lib/config.mjs'
 import { callTouchesFile, renderNudge, shouldNudge, summarizeTurn, justifiedInTurn } from './lib/nudge.mjs'
+import {
+  evaluateContractGate, evaluateHandoffGate, evaluateReviewGate,
+  evaluateVerifyGate, evaluateWaitGate,
+  renderContractGate, renderHandoffGate, renderReviewGate, renderVerifyGate, renderWaitGate,
+} from './lib/gates.mjs'
 
 export const name = 'dispatch-protocol'
 export const inject = ['systemPrompt', 'agents']
@@ -115,7 +127,7 @@ function steerText(agent, text) {
  * a full disk or a bad path must never close a turn.
  * @param log - the resolved decision-log path, or false when logging is off.
  * @param agent - the agent the decision belongs to.
- * @param payload - `{ turn, kind, decision, reason?, childId?, label?, writes?, files?, delegations? }`.
+ * @param payload - `{ turn, kind, decision, reason?, childId?, label?, writes?, files?, delegations?, gate?, observations?, changes?, lastVerify?, emptyTurns? }`.
  */
 function recordDecision(log, agent, payload) {
   if (log === false) return
@@ -133,6 +145,14 @@ function recordDecision(log, agent, payload) {
       ...(payload.writes === undefined ? {} : { writes: payload.writes }),
       ...(payload.files === undefined ? {} : { files: payload.files }),
       ...(payload.delegations === undefined ? {} : { delegations: payload.delegations }),
+      // 0.6.0 状态闸门：与 checkpoint/nudge 共用同一份决定日志。`gate` 区分
+      // wait/verify；`observations` 与 `changes`/`lastVerify` 是各自的事实字段。
+      ...(payload.gate === undefined ? {} : { gate: payload.gate }),
+      ...(payload.observations === undefined ? {} : { observations: payload.observations }),
+      ...(payload.changes === undefined ? {} : { changes: payload.changes }),
+      ...(payload.lastVerify === undefined ? {} : { lastVerify: payload.lastVerify }),
+      // 0.7.0 HandoffGate：连续空回合数，供日志回答「到底空了多久」。
+      ...(payload.emptyTurns === undefined ? {} : { emptyTurns: payload.emptyTurns }),
     })
     appendFileSync(log, `${line}\n`)
   } catch {
@@ -152,23 +172,27 @@ export function apply(ctx, rawConfig) {
     }))
   }
 
-  registerReminders(ctx, config.nudge, config.checkpoint, config.observation)
+  registerReminders(ctx, config.nudge, config.checkpoint, config.observation, config.gates)
 }
 
 /**
- * Run both reminders from one turn-stopping handler per agent.
+ * Run the reminders from one turn-stopping handler per agent.
  *
  * The completion checkpoint is judged first and a delivered checkpoint owns the
- * turn, so a nudge never shares a turn with it — no dependence on subscription
- * order, and only one `steer` per turn. Turn state is keyed by parent id;
+ * turn, so a gate or nudge never shares a turn with it — no dependence on
+ * subscription order, and only one `steer` per turn. 0.6.0 inserts the event
+ * gates between checkpoint and nudge; 0.7.0 extends the gate order to
+ * Wait → Verify → Contract → Review → Handoff. A delivered gate also owns the
+ * turn, so the nudge yields to it. Turn state is keyed by parent id;
  * `lastCheckpointTurn` is recorded for the later one-turn grace rule.
  * @param ctx - the plugin context.
  * @param nudge - the resolved `nudge` section.
  * @param checkpoint - the resolved `checkpoint` section.
  * @param observation - the resolved `observation` section (0.4.0).
+ * @param gates - the resolved `gates` section (0.6.0).
  */
-function registerReminders(ctx, nudge, checkpoint, observation) {
-  if (!nudge.enabled && !checkpoint.enabled && !observation.enabled) return
+function registerReminders(ctx, nudge, checkpoint, observation, gates) {
+  if (!nudge.enabled && !checkpoint.enabled && !observation.enabled && !gates.enabled) return
 
   /** childId → `{ parentId, label, agent }` for settlement lookup. */
   const children = new Map()
@@ -178,8 +202,8 @@ function registerReminders(ctx, nudge, checkpoint, observation) {
   /** Agent ids whose single `agent/turn-stopping` handler is already installed. */
   const watched = new Set()
 
-  // One log for both mechanisms: `nudge.log` is the key (kept for compatibility),
-  // `false` silences checkpoint decisions too.
+  // One log for every mechanism: `nudge.log` is the key (kept for compatibility),
+  // `false` silences checkpoint, nudge and state-gate decisions too.
   const decisionLog = nudge.log
 
   const lastDeliveredTurn = new Map()
@@ -189,6 +213,27 @@ function registerReminders(ctx, nudge, checkpoint, observation) {
   const lastEvaluatedTurn = new Map()
   /** parentId → last turn number that already produced one observation row (0.4.1). */
   const lastObservedTurn = new Map()
+  /** parentId → last turn number that already produced one gate message (0.6.0). */
+  const lastGateTurn = new Map()
+  /**
+   * parentId → Map<childId, `{ label, ended }`>（0.7.0 ContractGate）。
+   * 不删除已结束项：收尾判定要区分「有活跃子代理」与「本轮有过子代理」，
+   * 删除会让刚结束的子代理看起来从未存在。
+   */
+  const activeChildren = new Map()
+  /**
+   * parentId → `{ pending, warned, since }`（0.7.0 ReviewGate）。
+   * `since` 是评审完成时父事件的长度，即「此后的写入才算评审后改动」的边界；
+   * `dirty` 不落状态，判定时从 `since` 往后扫，避免在每次 tool 事件上记账。
+   */
+  const reviewState = new Map()
+  /**
+   * parentId → Set<childId>（契约 §12-B）：已处理过 completed 的评审子代理。
+   * 重复 settle 若再次建立基线，会把 warned 重置成 false，让同一轮评审多提醒
+   * 一次；与 checkpoint 的 `reported` 同思路，只认第一次。新评审 child 的 id
+   * 不同，仍会正常建立新基线。
+   */
+  const reviewSettled = new Map()
 
   const render = (record, childId) => checkpoint.text
     .replaceAll('{childId}', childId)
@@ -278,6 +323,88 @@ function registerReminders(ctx, nudge, checkpoint, observation) {
       result.delivered = true
     }
     return result
+  }
+
+  /** label 是否命中只读评审前缀（0.7.0 ReviewGate）。 */
+  const isReviewLabel = (label) => typeof label === 'string'
+    && gates.review.labelPrefixes.some(prefix => label.startsWith(prefix))
+
+  /** 该 parent 下收尾时刻仍未结束的子代理数（0.7.0 ContractGate）。 */
+  const activeChildCount = (parentId) => {
+    const map = activeChildren.get(parentId)
+    if (map === undefined) return 0
+    let count = 0
+    for (const record of map.values()) if (record.ended !== true) count += 1
+    return count
+  }
+
+  /**
+   * 判定并投递本回合的状态闸门（0.6.0/0.7.0，契约 §3-§6）。
+   *
+   * 顺序固定 Wait → Verify → Contract → Review → Handoff：一个回合最多一条
+   * 闸门消息（`lastGateTurn` 去重），投递后设 `lastDeliveredTurn`，nudge 让位。
+   * 只对根代理生效：子代理不能再派发，它们的写入也已经记在父回合里，提醒子
+   * 代理只会多一条噪音。全程 try/catch——闸门读的是宿主日志，解析失败或宿主
+   * 接口变动都不该让回合失败（与 observation 的防御口径一致）。
+   * @param target - 正在收尾的代理。
+   * @param parentId - 该代理的会话 id。
+   * @param turn - 正在收尾的回合。
+   * @param isRootAgent - 是否根代理。
+   * @returns true 表示本回合投递了一条闸门消息。
+   */
+  const evaluateGates = (target, parentId, turn, isRootAgent) => {
+    if (!gates.enabled || !isRootAgent) return false
+    // 同回合已经投递过任何提醒（checkpoint/nudge/闸门）就不再投闸门：那条
+    // steer 已让本回合多跑一步，第二次收尾再发就是同回合两条 steer。契约
+    // §11-A 的硬边界；`lastGateTurn` 只防闸门自己重复。
+    if (!Number.isInteger(turn)
+      || lastGateTurn.get(parentId) === turn
+      || lastDeliveredTurn.get(parentId) === turn) return false
+    try {
+      const events = target?.session?.snapshotEvents?.() ?? []
+      /** 投递一条闸门消息：steer + 决定日志 + 本回合去重 + nudge 让位。 */
+      const deliver = (text, payload) => {
+        steerText(target, text)
+        recordDecision(decisionLog, target, { turn, kind: 'gate', decision: 'delivered', ...payload })
+        lastGateTurn.set(parentId, turn)
+        lastDeliveredTurn.set(parentId, turn)
+        return true
+      }
+      // 派发工具名复用 nudge 的解析结果：两套名单若各写一份，配置改了其中
+      // 一处就会出现「nudge 认为派发过、闸门认为干等」的矛盾（契约 §3）。
+      const wait = evaluateWaitGate(events, turn, gates, nudge.delegationTools)
+      if (wait !== null) return deliver(renderWaitGate(gates.wait.text, wait), { gate: 'wait', observations: wait.count })
+
+      const verify = evaluateVerifyGate(events, turn, gates)
+      if (verify !== null) {
+        return deliver(renderVerifyGate(gates.verify.text, verify),
+          { gate: 'verify', changes: verify.changes, lastVerify: verify.lastVerify })
+      }
+
+      const contract = evaluateContractGate(events, turn, gates, activeChildCount(parentId))
+      if (contract !== null) {
+        return deliver(renderContractGate(gates.contract.text, contract), { gate: 'contract', files: contract.files })
+      }
+
+      const review = evaluateReviewGate(events, gates, reviewState.get(parentId))
+      if (review !== null) {
+        const delivered = deliver(renderReviewGate(gates.review.text, review), { gate: 'review', files: review.files })
+        // 同一轮评审只提醒一次；下一轮评审 created 或任一评审 completed 时重置
+        // （契约 §4/§11-B/§12-B）。
+        const state = reviewState.get(parentId)
+        if (state !== undefined) state.warned = true
+        return delivered
+      }
+
+      const handoff = evaluateHandoffGate(events, turn, gates)
+      if (handoff !== null) {
+        return deliver(renderHandoffGate(gates.handoff.text, handoff), { gate: 'handoff', emptyTurns: handoff.emptyTurns })
+      }
+      return false
+    } catch {
+      // 提醒是建议性的：判定失败时保持静默，绝不阻断回合。
+      return false
+    }
   }
 
   /**
@@ -421,6 +548,15 @@ function registerReminders(ctx, nudge, checkpoint, observation) {
           observeTurn(target, parentId, turn, isRootAgent)
           return
         }
+        // 0.6.0：闸门排在 checkpoint 之后、nudge 之前（契约 §5）。checkpoint
+        // 已投递会直接 return，所以这里只在它让位时执行。闸门投递后设
+        // `lastDeliveredTurn` 让 nudge 让位，但仍补一条观测行保持语义。
+        // 若 deferred（N−1）nudge 已经占用这次收尾，本回合不再叠加闸门——
+        // 宁可少一条提醒，也不要一次收尾投递两条 steer。
+        if (!deferredDelivered && evaluateGates(target, parentId, turn, isRootAgent)) {
+          observeTurn(target, parentId, turn, isRootAgent)
+          return
+        }
         // When the deferred nudge already consumed this turn's one reminder,
         // the current turn is deliberately left unevaluated: the next closing
         // turn picks it up through the same deferred path, so no fact is lost
@@ -440,22 +576,66 @@ function registerReminders(ctx, nudge, checkpoint, observation) {
   ctx.on('agent/created', ({ agent }) => {
     const header = agent?.session?.header
     if (header?.origin === 'subagent') {
-      children.set(agent.id, {
-        parentId: header.parentSession,
-        label: readLabel(agent) ?? '未命名',
-        agent,
-      })
+      const parentId = header.parentSession
+      const label = readLabel(agent) ?? '未命名'
+      children.set(agent.id, { parentId, label, agent })
+      // 0.7.0 ContractGate：登记 active child；已结束项不删除，收尾判定看
+      // `ended` 标记，而不是「有没有登记过」。
+      let active = activeChildren.get(parentId)
+      if (active === undefined) {
+        active = new Map()
+        activeChildren.set(parentId, active)
+      }
+      active.set(agent.id, { label, ended: false })
+      // 0.7.0 ReviewGate：新一轮只读评审开始就覆盖上一轮的 pending/dirty/warned，
+      // 因为上一轮评审的结论已被这次评审取代（契约 §4）。
+      if (isReviewLabel(label)) reviewState.set(parentId, { pending: false, warned: false, since: undefined })
     }
     attach(agent)
   })
 
   ctx.on('subagent/end', (info) => {
-    if (!checkpoint.enabled) return
     const childId = info?.childId ?? info?.id
     const record = childId === undefined ? undefined : children.get(childId)
-    if (record === undefined || reported.has(childId)) return
-
     const stopReason = info?.stopReason ?? info?.outcome ?? info?.terminal?.stopReason
+
+    // 0.7.0：先更新闸门状态，再走 checkpoint 的早退（契约 §6）。checkpoint
+    // 的行为与文案不变；即使 checkpoint 关闭，闸门仍需要 ended/pending。
+    if (record !== undefined) {
+      const active = activeChildren.get(record.parentId)?.get(childId)
+      if (active !== undefined) active.ended = true
+      if (isReviewLabel(record.label) && stopReason === 'completed') {
+        let settled = reviewSettled.get(record.parentId)
+        if (settled === undefined) {
+          settled = new Set()
+          reviewSettled.set(record.parentId, settled)
+        }
+        // 重复 settle 直接跳过：否则会把 warned 重置，同一轮评审再提醒一次。
+        if (!settled.has(childId)) {
+          settled.add(childId)
+          const parent = ctx.agents?.get?.(record.parentId)
+          let since = 0
+          try {
+            since = parent?.session?.snapshotEvents?.()?.length ?? 0
+          } catch {
+            since = 0
+          }
+          const state = reviewState.get(record.parentId) ?? { pending: false, warned: false, since: undefined }
+          // 契约 §11-B：任一评审子代理完成都建立新基线——pending 置真、`since`
+          // 取 max(旧值, 当前父事件长度)（并行切片晚完成时基线只前进不倒退）、
+          // warned 重置。否则第二个评审完成后的写入会被旧 warned 永久静音。
+          const oldSince = Number.isInteger(state.since) ? state.since : 0
+          reviewState.set(record.parentId, {
+            pending: true,
+            warned: false,
+            since: Math.max(oldSince, since),
+          })
+        }
+      }
+    }
+
+    if (!checkpoint.enabled) return
+    if (record === undefined || reported.has(childId)) return
     if (stopReason !== 'completed') return
     reported.add(childId)
 

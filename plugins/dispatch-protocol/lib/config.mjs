@@ -29,6 +29,18 @@
 // whitelist stays enumerated and is never capped by file count.
 
 import { resolveNudge } from './nudge.mjs'
+import { resolveGates } from './gates.mjs'
+
+// 0.6.0/0.7.0 状态闸门的默认值统一从 config.mjs 导出（契约 §7）：默认值只有
+// 这一个入口，实现与加载期校验放在 lib/gates.mjs，避免「文档里的默认值」和
+// 「代码里的默认值」各写一份。
+export {
+  DEFAULT_CONTRACT_PATTERNS, DEFAULT_CONTRACT_TEXT,
+  DEFAULT_HANDOFF_EMPTY_TURNS, DEFAULT_HANDOFF_TEXT,
+  DEFAULT_REVIEW_LABEL_PREFIXES, DEFAULT_REVIEW_TEXT,
+  DEFAULT_VERIFY_COMMANDS, DEFAULT_VERIFY_COMMIT_PATTERN, DEFAULT_VERIFY_TEXT,
+  DEFAULT_WAIT_TEXT, DEFAULT_WAIT_THRESHOLD, DEFAULT_WAIT_TOOLS,
+} from './gates.mjs'
 
 /** The six non-negotiable rules; overridable through `config.rules`. */
 export const DEFAULT_RULES = [
@@ -128,5 +140,10 @@ export function resolveConfig(config = {}) {
   // `nudge.threshold` must fail at load time, not silently never fire.
   const nudge = resolveNudge(source.nudge)
 
-  return { enabled: source.enabled !== false, order, rules, footer, text, checkpoint, observation, nudge }
+  // 0.6.0 状态闸门同样在加载期校验（契约 §6）：`threshold: 0` 或一条无法编译的
+  // commitPattern 若静默降级，闸门会「永远不触发」，和「配置正确但没命中」
+  // 在日志里无法区分。即使 gates.enabled 为 false 也照样校验。
+  const gates = resolveGates(source.gates)
+
+  return { enabled: source.enabled !== false, order, rules, footer, text, checkpoint, observation, nudge, gates }
 }
