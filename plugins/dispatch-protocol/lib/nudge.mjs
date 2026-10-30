@@ -21,6 +21,28 @@ export const DEFAULT_DELEGATION_TOOLS = ['subagent', 'subagent_fork', 'workflow'
 export const DEFAULT_WRITE_TOOLS = ['write', 'edit']
 
 /**
+ * 控制面路径片段（0.8.2）。
+ *
+ * 规则 1 明许主控写 `dispatch/state.md`、`dispatch/ledger/*` 与
+ * `docs/superpowers/specs/*`：这些写入是主控的合法控制面动作，不是漏派发、
+ * 脏改动或评审失效的信号。片段按大小写不敏感子串匹配；路径里的反斜杠先归一
+ * 为正斜杠，所以 `dispatch\ledger\x.md` 与 `dispatch/ledger/x.md` 等价。
+ */
+export const DEFAULT_CONTROL_PLANE_PATTERNS = ['dispatch/state.md', 'dispatch/ledger/', 'docs/superpowers/specs/']
+
+/**
+ * 判断一个写入路径是否落在控制面。
+ * @param path - `write`/`edit` 调用参数里的文件路径。
+ * @param patterns - 控制面路径片段列表。
+ * @returns 命中返回 true；路径缺失或为空返回 false。
+ */
+export function isControlPlanePath(path, patterns = DEFAULT_CONTROL_PLANE_PATTERNS) {
+  if (typeof path !== 'string' || path === '') return false
+  const normalized = path.replaceAll('\\', '/').toLowerCase()
+  return patterns.some(fragment => normalized.includes(fragment.toLowerCase()))
+}
+
+/**
  * Shell command fragments that mutate files or the repo tree (0.4.0; redirect
  * lookbehind and git `-C` widened in 0.4.1).
  *
@@ -172,6 +194,12 @@ export function resolveNudge(source = {}) {
     throw new Error('dispatch-protocol: nudge.justifiedPatterns must be a non-empty array of non-empty strings')
   }
 
+  const controlPlanePatterns = config.controlPlanePatterns ?? DEFAULT_CONTROL_PLANE_PATTERNS
+  if (!Array.isArray(controlPlanePatterns) || controlPlanePatterns.length === 0
+    || controlPlanePatterns.some(pattern => typeof pattern !== 'string' || pattern.trim() === '')) {
+    throw new Error('dispatch-protocol: nudge.controlPlanePatterns must be a non-empty array of non-empty strings')
+  }
+
   const log = config.log === false
     ? false
     : (typeof config.log === 'string' && config.log.trim() !== ''
@@ -181,7 +209,7 @@ export function resolveNudge(source = {}) {
     throw new Error('dispatch-protocol: nudge.log must be a path or false')
   }
 
-  return { enabled: config.enabled !== false, threshold, writeTools, delegationTools, justifiedPatterns, text, log }
+  return { enabled: config.enabled !== false, threshold, writeTools, delegationTools, justifiedPatterns, controlPlanePatterns, text, log }
 }
 
 /**
@@ -227,8 +255,12 @@ export function summarizeTurn(events, turn, config, shellPattern = DEFAULT_PWSH_
     }
 
     if (config.writeTools.includes(tool)) {
-      writes.push(tool)
       const path = readPath(data.arguments)
+      // 0.8.2 控制面写入（state/ledger/specs）是主控的合法动作，不是漏派发
+      // 信号：既不计 `writes`，也不进 `files`。`pwsh` 壳变更没有可靠路径，
+      // 口径不变。
+      if (isControlPlanePath(path, config.controlPlanePatterns ?? DEFAULT_CONTROL_PLANE_PATTERNS)) continue
+      writes.push(tool)
       if (path !== undefined && !files.includes(path)) files.push(path)
       continue
     }

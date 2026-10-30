@@ -13,7 +13,9 @@
 // 设计边界（契约 §1）：只读 `session.snapshotEvents()`，不跑 git、不读磁盘、
 // 不阻断任何工具调用。判定与投递失败一律吞掉——闸门是提醒，不是门禁。
 
-import { DEFAULT_PWSH_NUDGE_SHELL_PATTERN, DEFAULT_WRITE_TOOLS } from './nudge.mjs'
+import {
+  DEFAULT_CONTROL_PLANE_PATTERNS, DEFAULT_PWSH_NUDGE_SHELL_PATTERN, DEFAULT_WRITE_TOOLS, isControlPlanePath,
+} from './nudge.mjs'
 
 /** await 闸门的默认查询工具：全是「只读状态」类工具，不产生新证据。 */
 export const DEFAULT_WAIT_TOOLS = ['list_agents', 'job_list', 'schedule_list', 'get_goal']
@@ -94,6 +96,10 @@ export function resolveGates(source = {}) {
   const config = source ?? {}
   if (!isRecord(config)) throw new Error('dispatch-protocol: gates must be an object')
 
+  // 0.8.2 控制面路径豁免：一份顶层配置，解析后同时挂到 `verify` 与 `review`
+  // 两个子段，避免同一份片段要在两处各写一遍、改一处漏一处。
+  const controlPlanePatterns = readStringList(config.controlPlanePatterns, DEFAULT_CONTROL_PLANE_PATTERNS, 'controlPlanePatterns')
+
   const waitSource = config.wait ?? {}
   if (!isRecord(waitSource)) throw new Error('dispatch-protocol: gates.wait must be an object')
   const threshold = waitSource.threshold ?? DEFAULT_WAIT_THRESHOLD
@@ -126,6 +132,7 @@ export function resolveGates(source = {}) {
     commands,
     commitPattern,
     commitRegExp,
+    controlPlanePatterns,
     text: readText(verifySource.text, DEFAULT_VERIFY_TEXT, 'verify.text'),
   }
 
@@ -142,6 +149,7 @@ export function resolveGates(source = {}) {
   const review = {
     enabled: reviewSource.enabled !== false,
     labelPrefixes: readStringList(reviewSource.labelPrefixes, DEFAULT_REVIEW_LABEL_PREFIXES, 'review.labelPrefixes'),
+    controlPlanePatterns,
     text: readText(reviewSource.text, DEFAULT_REVIEW_TEXT, 'review.text'),
   }
 
@@ -157,7 +165,7 @@ export function resolveGates(source = {}) {
     text: readText(handoffSource.text, DEFAULT_HANDOFF_TEXT, 'handoff.text'),
   }
 
-  return { enabled: config.enabled !== false, wait, verify, contract, review, handoff }
+  return { enabled: config.enabled !== false, controlPlanePatterns, wait, verify, contract, review, handoff }
 }
 
 /**
@@ -258,14 +266,18 @@ function collectResults(events) {
  * 判断一个写入类调用是否真的改了工作树。
  *
  * 三态（契约 §4）：有失败结果 → 没改；没有结果 → 按改过算（宁可多提醒，回合
- * 被打断时不能把写入抹掉）；其余 → 改过。
+ * 被打断时不能把写入抹掉）；其余 → 改过。0.8.2 起 write/edit 先取路径，命中
+ * 控制面（state/ledger/specs）的写入不算脏改动——那是主控的合法动作。
  * @param call - 一条 `tool/call` 事件。
  * @param results - `collectResults` 的结果。
+ * @param patterns - 控制面路径片段（`gates.verify.controlPlanePatterns`）。
  */
-function touchedWorkingTree(call, results) {
+function touchedWorkingTree(call, results, patterns = DEFAULT_CONTROL_PLANE_PATTERNS) {
   const data = call.data ?? {}
   const name = data?.name
   if (DEFAULT_WRITE_TOOLS.includes(name)) {
+    const path = readPath(data?.arguments)
+    if (isControlPlanePath(path, patterns)) return false
     const message = results.get(data?.callId)
     return message === undefined || message.isError !== true
   }
@@ -314,7 +326,7 @@ export function analyzeVerification(events, verify) {
   for (let i = lastIndex + 1; i < log.length; i++) {
     const event = log[i]
     if (event?.type !== 'tool/call') continue
-    if (!touchedWorkingTree(event, results)) continue
+    if (!touchedWorkingTree(event, results, verify.controlPlanePatterns ?? DEFAULT_CONTROL_PLANE_PATTERNS)) continue
     dirty = true
     changes += 1
   }
@@ -530,11 +542,14 @@ export function evaluateReviewGate(events, gates, state) {
     if (event?.type !== 'tool/call') continue
     const name = event.data?.name
     if (name !== 'write' && name !== 'edit') continue
+    // 0.8.2：控制面写入（state/ledger/specs）是主控的合法动作，不会让评审失效
+    // （既不计 `changes`，也不入 `files`）。
+    const path = readPath(event.data?.arguments)
+    if (isControlPlanePath(path, gates.review.controlPlanePatterns ?? DEFAULT_CONTROL_PLANE_PATTERNS)) continue
     // 与 VerifyGate 的防御口径一致：有失败结果才算没改；没有结果按改过算。
     const message = results.get(event.data?.callId)
     if (message?.isError === true) continue
     changes += 1
-    const path = readPath(event.data?.arguments)
     if (path !== undefined && !files.includes(path)) files.push(path)
   }
   if (changes === 0) return null

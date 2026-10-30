@@ -16,9 +16,11 @@ import { join } from 'node:path'
 import * as plugin from './plugin.mjs'
 import { resolveConfig, DEFAULT_RULES } from './lib/config.mjs'
 import {
-  callTouchesFile, DEFAULT_PWSH_MUTATION_PATTERN, DEFAULT_PWSH_NUDGE_SHELL_PATTERN,
-  renderNudge, resolveNudge, shouldNudge, summarizeTurn,
+  callTouchesFile, DEFAULT_CONTROL_PLANE_PATTERNS, DEFAULT_PWSH_MUTATION_PATTERN,
+  DEFAULT_PWSH_NUDGE_SHELL_PATTERN, isControlPlanePath, renderNudge, resolveNudge,
+  shouldNudge, summarizeTurn,
 } from './lib/nudge.mjs'
+import { evaluateReviewGate, evaluateVerifyGate, resolveGates } from './lib/gates.mjs'
 
 // Reminder behaviour is asserted from the harness messages. Decision logging
 // stays off so a test run never appends to the real `%TEMP%` decision log; the
@@ -2186,6 +2188,121 @@ test('contract gate lists at most three files', () => {
   assert.equal(parent.messages.length, 1)
   assert.match(parent.messages[0].text, /fix-contract\.md, a-contract-b\.ts, contract-c\.md/)
   assert.doesNotMatch(parent.messages[0].text, /src\/contracts\.ts/, '{files} caps at three paths')
+})
+
+// ---------------------------------------------------------------------------
+// 0.8.2 — 控制面路径豁免（契约 §2.4）
+
+test('control-plane writes do not count toward the nudge', () => {
+  const config = resolveNudge({})
+  const events = [
+    call(1, 'write', { file_path: 'dispatch/ledger/x.md' }),
+    call(1, 'write', { file_path: 'docs/superpowers/specs/y.md' }),
+  ]
+
+  const summary = summarizeTurn(events, 1, config)
+  assert.equal(summary.writes, 0, '0.8.2: control-plane writes are not execution work')
+  assert.deepEqual(summary.files, [])
+  assert.equal(shouldNudge(summary, config), false, 'two control-plane files are not a missed dispatch')
+})
+
+test('a control-plane file does not count toward the nudge threshold', () => {
+  const config = resolveNudge({})
+  const events = [
+    call(1, 'write', { file_path: 'dispatch/ledger/x.md' }),
+    call(1, 'write', { file_path: 'src/a.ts' }),
+  ]
+
+  const summary = summarizeTurn(events, 1, config)
+  assert.equal(summary.writes, 1)
+  assert.deepEqual(summary.files, ['src/a.ts'], 'only the source file is counted')
+  assert.equal(shouldNudge(summary, config), false, 'one counted file is below the threshold')
+
+  events.push(call(1, 'write', { file_path: 'src/b.ts' }))
+  const second = summarizeTurn(events, 1, config)
+  assert.equal(second.files.length, 2)
+  assert.equal(shouldNudge(second, config), true, 'the second source file crosses the threshold')
+})
+
+test('a control-plane edit after a successful verification leaves the verify gate silent', () => {
+  const gates = resolveGates({})
+  const events = [
+    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+    resultWithText(1, 'verify-1', 'exit code: 0'),
+    call(2, 'edit', { file_path: 'dispatch/ledger/x.md' }, 'edit-1'),
+    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+  ]
+
+  assert.equal(evaluateVerifyGate(events, 2, gates), null,
+    '0.8.2: a control-plane write is not a dirty working-tree change')
+
+  const dirtyEvents = [
+    ...events.slice(0, 3),
+    call(2, 'edit', { file_path: 'src/a.ts' }, 'edit-2'),
+    events[3],
+  ]
+  const dirty = evaluateVerifyGate(dirtyEvents, 2, gates)
+  assert.notEqual(dirty, null, 'a source edit after the verification still gates')
+  assert.equal(dirty.changes, 1)
+  assert.equal(dirty.lastVerify, 'npm test')
+})
+
+test('a control-plane write after a review does not invalidate it', () => {
+  const gates = resolveGates({})
+  const state = { pending: true, warned: false, since: 0 }
+  const events = [
+    call(2, 'write', { file_path: 'dispatch/ledger/x.md' }, 'write-1'),
+  ]
+
+  assert.equal(evaluateReviewGate(events, gates, state), null,
+    '0.8.2: replaying a ledger file is a legal control-plane action')
+
+  events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-2'))
+  const review = evaluateReviewGate(events, gates, state)
+  assert.notEqual(review, null)
+  assert.deepEqual(review.files, ['src/a.ts'], 'the ledger path is not listed as a review-dirty file')
+})
+
+test('controlPlanePatterns is configurable on both sections and validated', () => {
+  const nudge = resolveNudge({ controlPlanePatterns: ['dispatch/notes/'] })
+  assert.deepEqual(nudge.controlPlanePatterns, ['dispatch/notes/'])
+
+  const customEvents = [
+    call(1, 'write', { file_path: 'dispatch/notes/x.md' }),
+    call(1, 'write', { file_path: 'src/a.ts' }),
+  ]
+  assert.equal(shouldNudge(summarizeTurn(customEvents, 1, nudge), nudge), false,
+    'the override moves the exemption to the custom fragment')
+
+  const gates = resolveGates({ controlPlanePatterns: ['dispatch/notes/'] })
+  assert.deepEqual(gates.controlPlanePatterns, ['dispatch/notes/'])
+  assert.deepEqual(gates.verify.controlPlanePatterns, ['dispatch/notes/'], 'verify carries the same list')
+  assert.deepEqual(gates.review.controlPlanePatterns, ['dispatch/notes/'], 'review carries the same list')
+
+  const state = { pending: true, warned: false, since: 0 }
+  const reviewEvents = [call(2, 'edit', { file_path: 'dispatch/notes/y.md' }, 'write-1')]
+  assert.equal(evaluateReviewGate(reviewEvents, gates, state), null, 'the custom fragment is exempt')
+  reviewEvents.push(call(2, 'edit', { file_path: 'src/a.ts' }, 'write-2'))
+  assert.notEqual(evaluateReviewGate(reviewEvents, gates, state), null, 'other paths still count')
+
+  assert.equal(isControlPlanePath('dispatch\\ledger\\x.md'), true, 'backslashes are normalized')
+  assert.equal(isControlPlanePath('src\\a.ts'), false)
+  assert.deepEqual(DEFAULT_CONTROL_PLANE_PATTERNS,
+    ['dispatch/state.md', 'dispatch/ledger/', 'docs/superpowers/specs/'])
+
+  assert.throws(() => resolveNudge({ controlPlanePatterns: [] }), /dispatch-protocol: nudge\.controlPlanePatterns/)
+  assert.throws(() => resolveNudge({ controlPlanePatterns: ['ok', 42] }), /dispatch-protocol: nudge\.controlPlanePatterns/)
+  assert.throws(() => resolveGates({ controlPlanePatterns: [] }), /dispatch-protocol: gates\.controlPlanePatterns/)
+  assert.throws(() => resolveGates({ controlPlanePatterns: ['ok', null] }), /dispatch-protocol: gates\.controlPlanePatterns/)
+})
+
+test('the injected rules name the light-batch review exception and the ledger carrier', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+  const text = h.sections[0].text
+
+  assert.match(text, /判为轻批的批次除外/, '0.8.2: gated does not re-open a light batch to review')
+  assert.match(text, /任务清单或台账首行/, '0.8.2: grading may live in the ledger head instead of the task list')
 })
 
 // ---------------------------------------------------------------------------
