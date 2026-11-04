@@ -4,12 +4,16 @@
 //
 // The harness fakes the extension points the plugin uses:
 //   - `ctx.systemPrompt.section(section)` (the system-prompt registry)
+//   - `ctx.tools.guard(fn)` (0.9.0 write guard; `h.guard(exec)` replays a call)
 //   - `agent/created` / `subagent/end` (root event bus)
-//   - `agent.ctx.on('agent/turn-stopping')` + `agent.steer` (the nudge check)
+//   - `agent.ctx.on('agent/turn-stopping')` + `agent.steer` (checkpoint and gates)
 //   - `session.snapshotEvents()` (committed `tool/call` records)
+//   - `session.cwd` / `session.createdAt` (write-policy path and freshness)
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -17,15 +21,17 @@ import * as plugin from './plugin.mjs'
 import { resolveConfig, DEFAULT_RULES } from './lib/config.mjs'
 import {
   callTouchesFile, DEFAULT_CONTROL_PLANE_PATTERNS, DEFAULT_PWSH_MUTATION_PATTERN,
-  DEFAULT_PWSH_NUDGE_SHELL_PATTERN, isControlPlanePath, renderNudge, resolveNudge,
-  shouldNudge, summarizeTurn,
-} from './lib/nudge.mjs'
+  DEFAULT_PWSH_SHELL_PATTERN, isControlPlanePath, summarizeTurn,
+} from './lib/tool-calls.mjs'
+import {
+  DEFAULT_ALLOWLIST, DEFAULT_OVERRIDE_PATH, DEFAULT_WRITE_POLICY_MODE, resolveWritePolicy,
+} from './lib/write-policy.mjs'
 import { evaluateReviewGate, evaluateVerifyGate, resolveGates } from './lib/gates.mjs'
 
 // Reminder behaviour is asserted from the harness messages. Decision logging
 // stays off so a test run never appends to the real `%TEMP%` decision log; the
 // tests that check log lines opt into an explicit path inside a temp dir.
-const quiet = { nudge: { log: false } }
+const quiet = { log: false }
 
 test('registers one prompt section with literal text and a stable order', () => {
   const h = harness()
@@ -134,6 +140,14 @@ test('a disabled plugin registers nothing', () => {
   const h = harness()
   plugin.apply(h.ctx, { enabled: false })
   assert.equal(h.sections.length, 0)
+  // 0.9.0: 顶层 `enabled` 是总开关——提示词、写入守卫、收尾提醒一起关。
+  assert.equal(h.guards.length, 0, 'enabled:false must not register the write guard')
+
+  const parent = h.main('parent-disabled', [])
+  h.created(h.child('child-disabled', 'parent-disabled', '实现 Task', [call(1, 'write', { file_path: 'a.ts' })]))
+  h.ended({ childId: 'child-disabled', stopReason: 'completed' })
+  h.turnStopping(parent, 1)
+  assert.equal(parent.messages.length, 0, 'enabled:false must not deliver any turn-stopping reminder')
 })
 
 test('config rejects values that would silently break the section', () => {
@@ -450,561 +464,12 @@ test('two pending checkpoints drain in one turn-stopping while the accepted one 
   assert.doesNotMatch(parent.messages.map(message => message.text).join(''), /child-17a/)
 })
 
-// ---------------------------------------------------------------------------
-// Missed-dispatch nudge
-
-test('summarizeTurn counts only the requested turn\'s writes and files', () => {
-  const config = resolveNudge({})
-  const events = [
-    call(1, 'write', { file_path: 'a.ts' }),
-    call(1, 'edit', { file_path: 'b.ts' }),
-    call(1, 'read', { file_path: 'c.ts' }),
-    call(1, 'subagent', { description: '勘察' }),
-    call(2, 'write', { file_path: 'd.ts' }),
-  ]
-
-  const summary = summarizeTurn(events, 1, config)
-  assert.equal(summary.writes, 2)
-  assert.deepEqual(summary.files, ['a.ts', 'b.ts'])
-  assert.equal(summary.delegations, 1)
-  assert.equal(shouldNudge(summary, config), false, 'a delegation means the dispatch happened')
-
-  const second = summarizeTurn(events, 2, config)
-  assert.equal(second.writes, 1)
-  assert.equal(second.delegations, 0)
-})
-
-test('a write whose result is an error is not counted', () => {
-  const config = resolveNudge({ threshold: 2 })
-  const events = [
-    call(1, 'write', { file_path: 'a.ts' }, 'call-a'),
-    call(1, 'write', { file_path: 'b.ts' }, 'call-b'),
-    result(1, 'call-a', true),
-  ]
-
-  const summary = summarizeTurn(events, 1, config)
-  assert.equal(summary.writes, 1, 'the refused write is not a write')
-  assert.deepEqual(summary.files, ['b.ts'])
-  assert.equal(shouldNudge(summary, config), false, 'one surviving file is below the threshold')
-})
-
-test('a write without a matching result is still counted', () => {
-  const config = resolveNudge({})
-  const events = [
-    call(1, 'write', { file_path: 'a.ts' }, 'call-a'),
-    call(1, 'write', { file_path: 'b.ts' }),
-  ]
-
-  const summary = summarizeTurn(events, 1, config)
-  assert.equal(summary.writes, 2, 'a missing result must not erase a write')
-  assert.equal(summary.files.length, 2)
-})
-
-test('a successful result does not suppress the write', () => {
-  const config = resolveNudge({})
-  const events = [
-    call(1, 'write', { file_path: 'a.ts' }, 'call-a'),
-    result(1, 'call-a', false),
-  ]
-
-  const summary = summarizeTurn(events, 1, config)
-  assert.equal(summary.writes, 1)
-  assert.deepEqual(summary.files, ['a.ts'])
-})
-
-test('a multi-write turn without delegation is reminded exactly once', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-'))
-  try {
-    const log = join(dir, 'decisions.jsonl')
-    const h = harness()
-    plugin.apply(h.ctx, { nudge: { log, threshold: 2 } })
-
-    const agent = h.main('session-1', [
-      call(1, 'write', { file_path: 'x.xaml' }),
-      call(1, 'edit', { file_path: 'y.xaml' }),
-    ])
-    h.created(agent)
-
-    h.turnStopping(agent, 1)
-    h.turnStopping(agent, 1)
-
-    assert.equal(agent.messages.length, 1, 'the nudge costs one step, once per turn')
-    assert.match(agent.messages[0].text, /不在主控白名单内/)
-    assert.match(agent.messages[0].text, /循环批/, 'the reminder routes the remaining work to a loop batch')
-    assert.match(agent.messages[0].text, /写入 2 个文件/, '0.4.1: fileCount is the distinct-file count')
-    assert.match(agent.messages[0].text, /（2 次）：x\.xaml, y\.xaml/, '0.4.1: writes and the file list carry no shell count')
-    assert.equal(agent.messages[0].role, 'user', 'the provider requires a user-role message')
-
-    const lines = readFileSync(log, 'utf8').trim().split('\n')
-    assert.equal(lines.length, 1)
-    const record = JSON.parse(lines[0])
-    assert.equal(record.kind, 'nudge')
-    assert.equal(record.decision, 'delivered')
-    assert.equal(record.turn, 1)
-    assert.equal(record.writes, 2)
-    assert.equal(record.delegations, 0)
-    assert.deepEqual(record.files, ['x.xaml', 'y.xaml'])
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('repeated writes to one file stay inside the small-change exemption', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false, threshold: 2 } })
-
-  const agent = h.main('session-2b', [
-    call(1, 'edit', { file_path: 'same.mjs' }),
-    call(1, 'edit', { file_path: 'same.mjs' }),
-    call(1, 'edit', { file_path: 'same.mjs' }),
-  ])
-  h.created(agent)
-  h.turnStopping(agent, 1)
-
-  assert.equal(agent.messages.length, 0, 'three writes to one file count as one file')
-})
-
-test('enough distinct files are reminded even when each is written once', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false, threshold: 3 } })
-
-  const agent = h.main('session-2c', [
-    call(1, 'write', { file_path: 'a.txt' }),
-    call(1, 'write', { file_path: 'b.txt' }),
-    call(1, 'write', { file_path: 'c.txt' }),
-    call(1, 'write', { file_path: 'd.txt' }),
-  ])
-  h.created(agent)
-  h.turnStopping(agent, 1)
-
-  assert.equal(agent.messages.length, 1)
-  assert.match(agent.messages[0].text, /写入 4 个文件/)
-  assert.match(agent.messages[0].text, /（4 次）：a\.txt, b\.txt, c\.txt, d\.txt/)
-})
-
-test('a single write keeps the small-change exemption and is not reminded', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
-
-  const agent = h.main('session-2', [call(1, 'write', { file_path: 'only.txt' })])
-  h.created(agent)
-  h.turnStopping(agent, 1)
-
-  assert.equal(agent.messages.length, 0)
-})
-
-test('writes below the configured threshold are not reminded', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false, threshold: 3 } })
-
-  const agent = h.main('session-3', [
-    call(1, 'write', { file_path: 'a.txt' }),
-    call(1, 'write', { file_path: 'b.txt' }),
-  ])
-  h.created(agent)
-  h.turnStopping(agent, 1)
-
-  assert.equal(agent.messages.length, 0)
-})
-
-test('a turn that delegated is never reminded', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
-
-  const agent = h.main('session-4', [
-    call(1, 'write', { file_path: 'a.txt' }),
-    call(1, 'write', { file_path: 'b.txt' }),
-    call(1, 'subagent', { description: '实现 Task 1' }),
-  ])
-  h.created(agent)
-  h.turnStopping(agent, 1)
-
-  assert.equal(agent.messages.length, 0)
-})
-
-test('a turn whose prose already explains the skip is not reminded', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-'))
-  try {
-    const log = join(dir, 'decisions.jsonl')
-    const h = harness()
-    plugin.apply(h.ctx, { nudge: { log } })
-
-    const agent = h.main('session-8', [
-      call(1, 'write', { file_path: 'a.md' }),
-      call(1, 'write', { file_path: 'b.md' }),
-      assistantMessage(1, '两处都是纯文案改动，属于单文件小改豁免。'),
-    ])
-    h.created(agent)
-    h.turnStopping(agent, 1)
-
-    assert.equal(agent.messages.length, 0, 'no reminder when the turn explained itself')
-    const [line] = readFileSync(log, 'utf8').trim().split('\n').map(row => JSON.parse(row))
-    assert.equal(line.kind, 'nudge')
-    assert.equal(line.decision, 'suppressed', 'the suppression is still accounted for')
-    assert.equal(line.reason, 'justified')
-    assert.equal(line.turn, 1)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('a justification in another turn does not suppress this one', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
-
-  const agent = h.main('session-9', [
-    call(1, 'write', { file_path: 'a.md' }),
-    assistantMessage(1, '这属于豁免。'),
-    call(2, 'write', { file_path: 'a.md' }),
-    call(2, 'write', { file_path: 'b.md' }),
-  ])
-  h.created(agent)
-  h.turnStopping(agent, 2)
-
-  assert.equal(agent.messages.length, 1, 'turn 2 never explained itself')
-})
-
-test('a keyword quoted in a tool result is not an explanation', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
-
-  const agent = h.main('session-10', [
-    call(1, 'write', { file_path: 'a.md' }),
-    call(1, 'write', { file_path: 'b.md' }),
-    {
-      type: 'tool/result',
-      data: {
-        turn: 1,
-        step: 1,
-        message: { isError: false, toolCallId: 'call-1-write', content: [{ type: 'text', text: '豁免 不派发' }] },
-      },
-    },
-  ])
-  h.created(agent)
-  h.turnStopping(agent, 1)
-
-  assert.equal(agent.messages.length, 1, 'only assistant prose counts, not tool output')
-})
-
-test('a justification phrased without the original keywords is still recognised', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
-
-  const agent = h.main('session-12', [
-    call(1, 'write', { file_path: 'a.md' }),
-    call(1, 'write', { file_path: 'b.md' }),
-    assistantMessage(1, '这三个文件是同一处改动的三个面，一条命令验完。'),
-  ])
-  h.created(agent)
-  h.turnStopping(agent, 1)
-
-  assert.equal(agent.messages.length, 0, 'the 0.3.8 phrasings must suppress the reminder')
-})
-
-test('the suppression keyword list is configurable', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false, justifiedPatterns: ['镜像面'] } })
-
-  const agent = h.main('session-11', [
-    call(1, 'write', { file_path: 'a.md' }),
-    call(1, 'write', { file_path: 'b.md' }),
-    assistantMessage(1, '四个文件是同一处文案的镜像面。'),
-  ])
-  h.created(agent)
-  h.turnStopping(agent, 1)
-
-  assert.equal(agent.messages.length, 0)
-})
-
-test('a subagent is never nudged, even with many writes', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
-
-  const child = h.main('child-9', [
-    call(1, 'write', { file_path: 'a.txt' }),
-    call(1, 'write', { file_path: 'b.txt' }),
-  ], { origin: 'subagent', parentSession: 'session-5' })
-  h.created(child)
-  h.turnStopping(child, 1)
-
-  assert.equal(child.messages.length, 0)
-})
-
-test('the nudge can be disabled without touching the checkpoint', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { enabled: false, log: false } })
-
-  const agent = h.main('session-6', [
-    call(1, 'write', { file_path: 'a.txt' }),
-    call(1, 'write', { file_path: 'b.txt' }),
-  ])
-  h.created(agent)
-  h.turnStopping(agent, 1)
-
-  assert.equal(agent.messages.length, 0)
-
-  const parent = h.parent('parent-6')
-  h.created(h.child('child-6', 'parent-6', '实现 Task 6', [call(1, 'write', { file_path: 'a.ts' })]))
-  h.ended({ childId: 'child-6', stopReason: 'completed' })
-  assert.equal(parent.messages.length, 1, 'the checkpoint still runs')
-})
-
-test('a log path of false records nothing for either mechanism', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-'))
-  try {
-    const h = harness()
-    plugin.apply(h.ctx, { nudge: { log: false } })
-
-    const agent = h.main('session-7', [
-      call(1, 'write', { file_path: 'a.txt' }),
-      call(1, 'write', { file_path: 'b.txt' }),
-    ])
-    h.created(agent)
-    h.turnStopping(agent, 1)
-
-    assert.equal(agent.messages.length, 1, 'the reminder still reaches the model')
-
-    const parent = h.parent('parent-7')
-    h.created(h.child('child-7', 'parent-7', '实现 Task 7', [call(1, 'write', { file_path: 'a.ts' })]))
-    h.ended({ childId: 'child-7', stopReason: 'completed' })
-    assert.equal(parent.messages.length, 1, 'the checkpoint still runs with logging off')
-    assert.equal(resolveNudge({ log: false }).log, false)
-    assert.deepEqual(readdirSync(dir), [])
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('nudge config rejects values that would silently never fire', () => {
-  assert.throws(() => resolveNudge({ threshold: 0 }), /threshold/)
-  assert.throws(() => resolveNudge({ threshold: 1.5 }), /threshold/)
-  assert.throws(() => resolveNudge({ text: '   ' }), /text/)
-  assert.throws(() => resolveNudge({ writeTools: 'write' }), /writeTools/)
-  assert.throws(() => resolveNudge({ delegationTools: [] }), /delegationTools/)
-  assert.throws(() => resolveNudge({ justifiedPatterns: [] }), /justifiedPatterns/)
-  assert.throws(() => resolveNudge({ justifiedPatterns: '豁免' }), /justifiedPatterns/)
-  assert.throws(() => resolveNudge({ justifiedPatterns: [' '] }), /justifiedPatterns/)
-  assert.throws(() => resolveConfig({ nudge: { threshold: -1 } }), /threshold/)
-
-  const defaults = resolveNudge({})
-  assert.equal(defaults.threshold, 2)
-  assert.equal(defaults.enabled, true)
-  assert.match(defaults.log, /dispatch-protocol-decisions\.jsonl$/)
-  assert.equal(resolveNudge({ log: false }).log, false, 'false turns both mechanisms off')
-})
-
-test('renderNudge fills the placeholders and truncates a long file list', () => {
-  const text = renderNudge('w={writes} f={files} t={turn} c={fileCount}', {
-    writes: 7,
-    files: ['a', 'b', 'c', 'd', 'e', 'f', 'g'],
-    turn: 3,
-  })
-
-  assert.match(text, /w=7/)
-  assert.match(text, /t=3/)
-  assert.match(text, /c=7/, 'fileCount is the number of distinct files')
-  assert.match(text, /等 7 个/)
-  assert.match(renderNudge('{files}', { writes: 0, files: [], turn: 1 }), /未记录路径/)
-  assert.match(renderNudge('{fileCount}', { writes: 0, files: [], turn: 1 }), /^0$/)
-})
-
-test('renderNudge keeps shell changes out of the file and write counts', () => {
-  const template = 'c={fileCount} w={writes} f={files}'
-
-  // S7 t2 shape: one file plus one git commit used to render "改了 2 个文件".
-  assert.equal(renderNudge(template, { files: ['spec.md'], writes: 1, shellWrites: 1, turn: 2 }),
-    'c=1 w=1 f=spec.md，另有 1 条 shell 变更命令')
-
-  // S5 t34 shape: shell-only — zero files, zero writes, shell note only.
-  assert.equal(renderNudge(template, { files: [], writes: 0, shellWrites: 2, turn: 34 }),
-    'c=0 w=0 f=另有 2 条 shell 变更命令')
-})
-
-// ---------------------------------------------------------------------------
-// Nudge yield (acceptance turn + one-turn grace) and the unified decision log
-
-test('an acceptance turn silences the nudge and logs both suppressed decisions', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-'))
-  try {
-    const log = join(dir, 'decisions.jsonl')
-    const h = harness()
-    plugin.apply(h.ctx, { nudge: { log } })
-
-    const parent = h.main('parent-30', [
-      splice('child-30'),
-      call(1, 'read', { file_path: 'a.ts' }),
-      call(1, 'write', { file_path: 'b.ts' }),
-      call(1, 'write', { file_path: 'c.ts' }),
-    ])
-    h.created(h.child('child-30', 'parent-30', '实现 Task 30', [
-      call(1, 'write', { file_path: 'a.ts' }),
-      call(1, 'send_message', { agent_id: 'parent-30' }),
-    ]))
-    h.ended({ childId: 'child-30', stopReason: 'completed' })
-
-    h.turnStopping(parent, 1)
-
-    assert.equal(parent.messages.length, 0, 'the turn is an acceptance turn, not a missed dispatch')
-
-    const rows = readFileSync(log, 'utf8').trim().split('\n').map(row => JSON.parse(row))
-    const checkpoint = rows.find(row => row.kind === 'checkpoint')
-    assert.equal(checkpoint.decision, 'suppressed')
-    assert.equal(checkpoint.reason, 'handled')
-    assert.equal(checkpoint.childId, 'child-30')
-    assert.equal(checkpoint.label, '实现 Task 30')
-
-    const nudge = rows.find(row => row.kind === 'nudge')
-    assert.equal(nudge.decision, 'suppressed')
-    assert.equal(nudge.reason, 'handled')
-    assert.equal(nudge.writes, 2)
-    assert.deepEqual(nudge.files, ['b.ts', 'c.ts'])
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('the turn right after a delivered checkpoint is a grace turn', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-'))
-  try {
-    const log = join(dir, 'decisions.jsonl')
-    const h = harness()
-    plugin.apply(h.ctx, { nudge: { log } })
-
-    // Turn 1 has a report and no tool call, so the checkpoint is delivered.
-    const parentEvents = [splice('child-31')]
-    const parent = h.main('parent-31', parentEvents)
-    h.created(h.child('child-31', 'parent-31', '实现 Task 31', [call(1, 'write', { file_path: 'a.ts' })]))
-    h.ended({ childId: 'child-31', stopReason: 'completed' })
-
-    h.turnStopping(parent, 1)
-    assert.equal(parent.messages.length, 1, 'turn 1 delivers the checkpoint')
-    assert.match(parent.messages[0].text, /child-31/)
-
-    // Turn 2 is a genuine multi-write turn, but it directly follows the delivery.
-    parentEvents.push(
-      call(2, 'write', { file_path: 'b.ts' }),
-      call(2, 'write', { file_path: 'c.ts' }),
-    )
-    h.turnStopping(parent, 2)
-
-    assert.equal(parent.messages.length, 1, 'the grace turn is not nudged')
-    const rows = readFileSync(log, 'utf8').trim().split('\n').map(row => JSON.parse(row))
-    const nudge = rows.find(row => row.kind === 'nudge' && row.turn === 2)
-    assert.equal(nudge.decision, 'suppressed')
-    assert.equal(nudge.reason, 'grace')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('one explicit log path records delivered lines for both kinds', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-'))
-  try {
-    const log = join(dir, 'decisions.jsonl')
-    const h = harness()
-    plugin.apply(h.ctx, { nudge: { log } })
-
-    const parent = h.main('parent-32', [splice('child-32')])
-    h.created(h.child('child-32', 'parent-32', '实现 Task 32', [call(1, 'write', { file_path: 'a.ts' })]))
-    h.ended({ childId: 'child-32', stopReason: 'completed' })
-    h.turnStopping(parent, 1)
-
-    const solo = h.main('parent-33', [
-      call(1, 'write', { file_path: 'x.ts' }),
-      call(1, 'write', { file_path: 'y.ts' }),
-    ])
-    h.created(solo)
-    h.turnStopping(solo, 1)
-
-    assert.equal(parent.messages.length, 1, 'the checkpoint still delivers')
-    assert.equal(solo.messages.length, 1, 'the nudge still delivers when nothing yields it')
-
-    const rows = readFileSync(log, 'utf8').trim().split('\n').map(row => JSON.parse(row))
-    const checkpoint = rows.find(row => row.kind === 'checkpoint')
-    assert.equal(checkpoint.decision, 'delivered')
-    assert.equal(checkpoint.childId, 'child-32')
-    assert.equal(checkpoint.label, '实现 Task 32')
-    assert.equal(checkpoint.session, 'parent-32')
-
-    const nudge = rows.find(row => row.kind === 'nudge')
-    assert.equal(nudge.decision, 'delivered')
-    assert.equal(nudge.session, 'parent-33')
-    assert.equal(nudge.delegations, 0)
-    assert.deepEqual(nudge.files, ['x.ts', 'y.ts'])
-    assert.equal(rows.length, 2, 'one line per decision')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-// ---------------------------------------------------------------------------
-// Checkpoint × nudge interaction (one coordinator, checkpoint first)
-
-test('a delivered checkpoint owns the turn so the same turn is not nudged', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
-
-  const parent = h.main('parent-20', [
-    call(1, 'write', { file_path: 'a.ts' }),
-    call(1, 'write', { file_path: 'b.ts' }),
-  ])
-  h.created(parent)
-  h.created(h.child('child-20', 'parent-20', '实现 Task 20', [call(1, 'write', { file_path: 'c.ts' })]))
-  h.ended({ childId: 'child-20', stopReason: 'completed' })
-
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 1, 'only the checkpoint message is delivered')
-  assert.match(parent.messages[0].text, /child-20/)
-  assert.match(parent.messages[0].text, /已完成/)
-  assert.doesNotMatch(parent.messages[0].text, /写入 2 个文件/)
-  assert.doesNotMatch(parent.messages[0].text, /不在主控白名单内/)
-})
-
-test('a skipped read-only checkpoint leaves the same turn free to nudge', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
-
-  const parent = h.main('parent-21', [
-    call(1, 'write', { file_path: 'a.ts' }),
-    call(1, 'write', { file_path: 'b.ts' }),
-  ])
-  h.created(parent)
-  h.created(h.child('child-21', 'parent-21', '勘察 Task 21', [
-    call(1, 'read', { file_path: 'a.ts' }),
-    call(1, 'grep', { pattern: 'checkpoint' }),
-  ]))
-  h.ended({ childId: 'child-21', stopReason: 'completed' })
-
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 1, 'the read-only checkpoint is skipped, the nudge fires')
-  assert.match(parent.messages[0].text, /写入 2 个文件/)
-  assert.match(parent.messages[0].text, /不在主控白名单内/)
-  assert.doesNotMatch(parent.messages[0].text, /child-21/)
-})
-
-test('a parent with no pending checkpoint is still nudged', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
-
-  const parent = h.main('parent-22', [
-    call(1, 'write', { file_path: 'a.ts' }),
-    call(1, 'write', { file_path: 'b.ts' }),
-  ])
-  h.created(parent)
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 1, 'the coordinator keeps the plain nudge working')
-  assert.match(parent.messages[0].text, /写入 2 个文件/)
-})
-
 test('the checkpoint queue is keyed by the parent session id, not the agent id', () => {
   // Production hands the plugin an agent handle whose `id` and `session.id` are
   // not the same string, while `session.header.parentSession` is a session id.
   // The settlement queue must use the same key the handler later drains with.
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
+  plugin.apply(h.ctx, { log: false })
 
   const parent = h.main('agent-40', [], {}, 'session-40')
   h.created(parent)
@@ -1039,22 +504,6 @@ test('callTouchesFile sees pwsh mutations and ignores read-only shell work', () 
   assert.equal(callTouchesFile('read', '{}'), false)
 })
 
-test('a turn with two pwsh deletions and no delegations is nudged', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
-
-  const parent = h.main('parent-50', [
-    call(1, 'pwsh', { command: 'Remove-Item dead-a.cs -Force' }),
-    call(1, 'pwsh', { command: 'Remove-Item dead-b.cs -Force' }),
-  ])
-  h.created(parent)
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 1)
-  assert.match(parent.messages[0].text, /写入 0 个文件（0 次）/, '0.4.1: shell-only means zero files and zero writes')
-  assert.match(parent.messages[0].text, /另有 2 条 shell 变更命令/)
-})
-
 test('the redirect branch ignores arrows, generics and stderr merges', () => {
   const cmd = command => JSON.stringify({ command })
 
@@ -1073,80 +522,9 @@ test('git -C and a chained git commit are counted as mutations', () => {
   assert.equal(callTouchesFile('pwsh', cmd('git -C G:\\www\\ziyou\\dsh-extensions commit -m x')), true,
     'S6 t6: git -C <path> commit used to escape the pattern')
   assert.equal(callTouchesFile('pwsh', cmd('git -C "G:\\some path" commit -m x')), true, 'a quoted -C path is matched too')
+  assert.equal(callTouchesFile('pwsh', cmd('git -C G:\\repo checkout -- a.md')), true,
+    'git -C <path> checkout restoring a working-tree file is a mutation')
   assert.equal(callTouchesFile('pwsh', cmd('Remove-Item x')), true)
-})
-
-test('a git commit counts for the checkpoint but not for the nudge tier', () => {
-  const config = resolveNudge({})
-  const commit = JSON.stringify({ command: 'git commit -m "x"' })
-  const events = [
-    call(1, 'pwsh', { command: 'git commit -m "x"' }),
-    call(1, 'write', { file_path: 'spec.md' }),
-  ]
-
-  // Checkpoint tier: a child that commits is execution-class, not read-only.
-  assert.equal(callTouchesFile('pwsh', commit), true)
-
-  // Nudge tier: the dispatcher's own commit must not push the turn over.
-  const summary = summarizeTurn(events, 1, config)
-  assert.equal(summary.writes, 1)
-  assert.equal(summary.shellWrites, 0, 'a commit is not a working-tree change for the nudge counter')
-  assert.equal(shouldNudge(summary, config), false, 'one file + one commit stays inside the exemption')
-
-  // The optional 4th argument restores the full mutation pattern (checkpoint tier).
-  const full = summarizeTurn(events, 1, config, DEFAULT_PWSH_MUTATION_PATTERN)
-  assert.equal(full.shellWrites, 1)
-  assert.equal(shouldNudge(full, config), true, 'the full tier would have counted the commit')
-})
-
-test('the nudge shell pattern keeps the other git mutations but drops commit', () => {
-  assert.equal(DEFAULT_PWSH_NUDGE_SHELL_PATTERN.test('git commit -m x'), false)
-  assert.equal(DEFAULT_PWSH_NUDGE_SHELL_PATTERN.test('git -C G:\\repo commit -m x'), false)
-  assert.equal(DEFAULT_PWSH_MUTATION_PATTERN.test('git commit -m x'), true)
-  assert.equal(DEFAULT_PWSH_NUDGE_SHELL_PATTERN.test('git checkout -- a.md'), true,
-    'restoring a working-tree file is a content change')
-  assert.equal(DEFAULT_PWSH_NUDGE_SHELL_PATTERN.test('git -C G:\\repo checkout -- a.md'), true)
-  assert.equal(DEFAULT_PWSH_NUDGE_SHELL_PATTERN.test('echo hi > out.txt'), true)
-})
-
-test('a commit-only or single-file commit turn no longer crosses the nudge threshold', () => {
-  const h = harness()
-  // 0.6.0: 本用例只验证 nudge 档位对 `git commit` 的计数；commit 现在同时是
-  // VerifyGate 的收口动作（契约 §4），默认开启会给这两回合各补一条验证提醒。
-  // 关掉闸门隔离被测机制，断言保持 0.4.1 原样。
-  plugin.apply(h.ctx, { nudge: { log: false }, gates: { enabled: false } })
-
-  const commitOnly = h.main('session-61', [
-    call(1, 'pwsh', { command: 'git add -A; git commit -m "x"' }),
-    call(1, 'pwsh', { command: 'git -C G:\\repo commit -m "x"' }),
-  ])
-  h.created(commitOnly)
-  h.turnStopping(commitOnly, 1)
-  assert.equal(commitOnly.messages.length, 0, 'two commits are not two changed files')
-
-  const singleFile = h.main('session-62', [
-    call(1, 'pwsh', { command: 'git commit -m "x"' }),
-    call(1, 'edit', { file_path: 'spec.md' }),
-  ])
-  h.created(singleFile)
-  h.turnStopping(singleFile, 1)
-  assert.equal(singleFile.messages.length, 0, 'S7 t2: one file + one commit stays inside the single-file exemption')
-})
-
-test('read-only and failed pwsh commands do not feed the nudge counter', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
-
-  const parent = h.main('parent-51', [
-    call(1, 'pwsh', { command: 'Remove-Item maybe.cs' }, 'call-51-del'),
-    result(1, 'call-51-del', true),
-    call(1, 'pwsh', { command: 'git status --short' }),
-    call(1, 'pwsh', { command: 'dotnet test 2>&1 | Select-Object -Last 5' }),
-  ])
-  h.created(parent)
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 0, 'one failed deletion + read-only shell work stays under the threshold')
 })
 
 test('a child that only deleted files via pwsh is execution-class, not read-only', () => {
@@ -1187,7 +565,7 @@ test('a wave of finished children earns one aggregated checkpoint message', () =
   const log = join(dir, 'decisions.jsonl')
   try {
     const h = harness()
-    plugin.apply(h.ctx, { nudge: { log } })
+    plugin.apply(h.ctx, { log })
 
     const parent = h.main('parent-54', [])
     h.created(parent)
@@ -1225,94 +603,13 @@ test('a single deliverable child keeps the per-child checkpoint text', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 0.4.0 — deferred nudge for interrupted turns (N2)
-
-test('an unevaluated previous turn is nudged when the next turn closes', () => {
-  // session-82db5b7d T5: 43 edits / 14 files / 0 dispatches, closed by the
-  // user's interruption — the turn-stopping hook never ran for it.
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-deferred-'))
-  const log = join(dir, 'decisions.jsonl')
-  try {
-    const h = harness()
-    plugin.apply(h.ctx, { nudge: { log } })
-
-    const parent = h.main('parent-56', [
-      call(4, 'read', { file_path: 'a.ts' }),
-      call(5, 'edit', { file_path: 'x.ts' }),
-      call(5, 'edit', { file_path: 'y.ts' }),
-      call(6, 'read', { file_path: 'z.ts' }),
-    ])
-    h.created(parent)
-
-    h.turnStopping(parent, 4) // a quiet turn, evaluated normally
-    assert.equal(parent.messages.length, 0)
-    // Turn 5 is interrupted: no turn-stopping fires for it.
-    h.turnStopping(parent, 6)
-
-    assert.equal(parent.messages.length, 1, 'the interrupted turn 5 is judged when turn 6 closes')
-    assert.match(parent.messages[0].text, /写入 2 个文件/)
-
-    const rows = readFileSync(log, 'utf8').trim().split('\n').map(row => JSON.parse(row))
-    const nudgeRow = rows.find(row => row.kind === 'nudge')
-    assert.equal(nudgeRow.decision, 'delivered')
-    assert.equal(nudgeRow.turn, 5, 'the row names the missed turn, not the closing one')
-    assert.equal(nudgeRow.deferred, true)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('a freshly attached session does not retro-nudge its backlog', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
-
-  const parent = h.main('parent-57', [
-    call(1, 'edit', { file_path: 'a.ts' }),
-    call(1, 'edit', { file_path: 'b.ts' }),
-    call(2, 'edit', { file_path: 'c.ts' }),
-    call(2, 'edit', { file_path: 'd.ts' }),
-    call(3, 'read', { file_path: 'x.ts' }),
-  ])
-  h.created(parent)
-  h.turnStopping(parent, 3)
-
-  assert.equal(parent.messages.length, 0,
-    'turns 1-2 predate the first evaluation and are left alone; turn 3 is quiet')
-})
-
-test('a deferred delivery suppresses the current turn, which is picked up next time', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
-
-  const parent = h.main('parent-58', [
-    call(1, 'read', { file_path: 'a.ts' }),
-    call(2, 'edit', { file_path: 'a.ts' }),
-    call(2, 'edit', { file_path: 'b.ts' }),
-    call(3, 'edit', { file_path: 'c.ts' }),
-    call(3, 'edit', { file_path: 'd.ts' }),
-    call(4, 'read', { file_path: 'x.ts' }),
-  ])
-  h.created(parent)
-
-  h.turnStopping(parent, 1) // quiet, evaluated
-  // Turn 2 interrupted (no stopping); turn 3 closes with its own miss pending.
-  h.turnStopping(parent, 3)
-  assert.equal(parent.messages.length, 1, 'turn 2 is judged when turn 3 closes')
-  assert.match(parent.messages[0].text, /a\.ts/)
-
-  h.turnStopping(parent, 4)
-  assert.equal(parent.messages.length, 2, 'turn 3 was deferred by one turn, not swallowed')
-  assert.match(parent.messages[1].text, /c\.ts/)
-})
-
-// ---------------------------------------------------------------------------
 // 0.4.0 — per-turn observation rows (G1/G7 evidence floor)
 
 test('a root turn that wrote files appends one observation row', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-observe-'))
   try {
     const h = harness()
-    plugin.apply(h.ctx, { nudge: { log: false } })
+    plugin.apply(h.ctx, { log: false })
 
     const parent = h.main('parent-59', [
       call(1, 'edit', { file_path: 'a.ts' }),
@@ -1343,7 +640,7 @@ test('observation is off for child agents, missing cwd, and explicit disable', (
   const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-observe-off-'))
   try {
     const h = harness()
-    plugin.apply(h.ctx, { nudge: { log: false }, observation: { enabled: false } })
+    plugin.apply(h.ctx, { log: false, observation: { enabled: false } })
 
     const parent = h.main('parent-60', [call(1, 'edit', { file_path: 'a.ts' })], {}, 'session-60', dir)
     h.created(parent)
@@ -1356,11 +653,11 @@ test('observation is off for child agents, missing cwd, and explicit disable', (
   }
 })
 
-test('one (session, turn) is observed once even when a steer runs another step', () => {
+test('one (session, turn) is observed once even when the turn closes twice', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-observe-dedupe-'))
   try {
     const h = harness()
-    plugin.apply(h.ctx, { nudge: { log: false } })
+    plugin.apply(h.ctx, { log: false })
 
     const parent = h.main('parent-63', [
       call(1, 'edit', { file_path: 'a.ts' }),
@@ -1368,10 +665,10 @@ test('one (session, turn) is observed once even when a steer runs another step',
     ], {}, 'session-63', dir)
     h.created(parent)
 
-    h.turnStopping(parent, 1) // delivers the nudge, then appends the row
-    h.turnStopping(parent, 1) // the post-steer step closes the same turn again
+    h.turnStopping(parent, 1) // the turn-end snapshot appends the row
+    h.turnStopping(parent, 1) // a second close for the same turn (post-steer step)
 
-    assert.equal(parent.messages.length, 1, 'the nudge itself still fires exactly once')
+    assert.equal(parent.messages.length, 0, '0.9.0: a write turn gets no turn-end reminder')
     const file = join(dir, 'dispatch', 'runs', 'session-63.jsonl')
     const rows = readFileSync(file, 'utf8').trim().split('\n').map(row => JSON.parse(row))
     assert.equal(rows.length, 1, '0.4.1: the second turn-stopping for the same turn adds no row')
@@ -1386,7 +683,7 @@ test('a commit-only turn leaves no observation row', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-observe-commit-'))
   try {
     const h = harness()
-    plugin.apply(h.ctx, { nudge: { log: false } })
+    plugin.apply(h.ctx, { log: false })
 
     const parent = h.main('parent-64', [
       call(1, 'pwsh', { command: 'git commit -m "x"' }),
@@ -1413,7 +710,7 @@ test('session-92f462d1 replay: six status polls with no write, dispatch or verif
   try {
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
-    plugin.apply(h.ctx, { nudge: { log } })
+    plugin.apply(h.ctx, { log })
 
     const parent = h.main('session-92f462d1', [
       call(1, 'list_agents', {}, 'poll-1'),
@@ -1445,7 +742,7 @@ test('session-92f462d1 replay: six status polls with no write, dispatch or verif
 
 test('a writing turn is not a waiting turn: six polls plus one write stay silent', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
+  plugin.apply(h.ctx, { log: false })
 
   const parent = h.main('session-gate-write', [
     call(1, 'list_agents', {}, 'poll-1'),
@@ -1464,7 +761,7 @@ test('a writing turn is not a waiting turn: six polls plus one write stay silent
 
 test('status polls below the threshold stay silent', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
+  plugin.apply(h.ctx, { log: false })
 
   const parent = h.main('session-gate-below', [
     call(1, 'list_agents', {}, 'poll-1'),
@@ -1483,7 +780,7 @@ test('session-92f462d1 replay: a write after the last successful verification an
   try {
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
-    plugin.apply(h.ctx, { nudge: { log } })
+    plugin.apply(h.ctx, { log })
 
     const parent = h.main('session-92f462d1-verify', [
       call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
@@ -1515,7 +812,7 @@ test('session-92f462d1 replay: a write after the last successful verification an
 
 test('a verification that is the last write keeps present silent', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
+  plugin.apply(h.ctx, { log: false })
 
   const parent = h.main('session-gate-clean', [
     call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
@@ -1533,7 +830,7 @@ test('a verification that is the last write keeps present silent', () => {
 
 test('present with no successful verification ever earns the verify gate', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
+  plugin.apply(h.ctx, { log: false })
 
   // 契约 §11-A：必须至少有一次写入，否则纯只读 present 不算「有 diff 可验」。
   const parent = h.main('session-gate-never', [
@@ -1552,7 +849,7 @@ test('a read-only present with no writes is not gated', () => {
   // 契约 §11-A：present 一份报告/计划、整会话零写入时没有 diff 可验，
   // 提醒只会让模型为空命令多花一步。
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
+  plugin.apply(h.ctx, { log: false })
 
   const parent = h.main('session-gate-read-only-present', [
     call(1, 'present', { file_path: 'report.md' }, 'present-1'),
@@ -1568,7 +865,7 @@ test('a failed verification does not count, so a later write plus present is gat
   try {
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
-    plugin.apply(h.ctx, { nudge: { log } })
+    plugin.apply(h.ctx, { log })
 
     const parent = h.main('session-gate-failed', [
       call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
@@ -1593,7 +890,7 @@ test('a git commit with no successful verification earns the verify gate', () =>
   try {
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
-    plugin.apply(h.ctx, { nudge: { log } })
+    plugin.apply(h.ctx, { log })
 
     const parent = h.main('session-gate-commit', [
       call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
@@ -1617,7 +914,7 @@ test('a git commit with no successful verification earns the verify gate', () =>
 
 test('gates can be disabled wholesale, and wait can be disabled alone', () => {
   const off = harness()
-  plugin.apply(off.ctx, { nudge: { log: false }, gates: { enabled: false } })
+  plugin.apply(off.ctx, { log: false, gates: { enabled: false } })
   const quietParent = off.main('session-gate-off', [
     call(1, 'list_agents', {}, 'poll-1'),
     call(1, 'list_agents', {}, 'poll-2'),
@@ -1628,7 +925,7 @@ test('gates can be disabled wholesale, and wait can be disabled alone', () => {
   assert.equal(quietParent.messages.length, 0, 'gates.enabled:false silences both gates')
 
   const waitOff = harness()
-  plugin.apply(waitOff.ctx, { nudge: { log: false }, gates: { wait: { enabled: false } } })
+  plugin.apply(waitOff.ctx, { log: false, gates: { wait: { enabled: false } } })
   const parent = waitOff.main('session-gate-wait-off', [
     call(1, 'list_agents', {}, 'poll-1'),
     call(1, 'list_agents', {}, 'poll-2'),
@@ -1648,7 +945,7 @@ test('gates can be disabled wholesale, and wait can be disabled alone', () => {
 
 test('a delivered checkpoint keeps the same turn to itself, so no gate fires', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
+  plugin.apply(h.ctx, { log: false })
 
   const parent = h.main('parent-gate-checkpoint', [
     call(1, 'list_agents', {}, 'poll-1'),
@@ -1688,7 +985,7 @@ test('gates config rejects values that would silently never fire', () => {
 
 test('gates only judge root-agent turns', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
+  plugin.apply(h.ctx, { log: false })
 
   // 子代理自己的写操作已经记在父回合里，且它不能再派发/提交；若闸门对子代理
   // 生效，只会重复父回合的提醒（契约 §5）。
@@ -1710,7 +1007,7 @@ test('gates only judge root-agent turns', () => {
 
 test('exactly threshold status polls already trigger the wait gate', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
+  plugin.apply(h.ctx, { log: false })
 
   const parent = h.main('session-gate-boundary', [
     call(1, 'list_agents', {}, 'poll-1'),
@@ -1724,9 +1021,9 @@ test('exactly threshold status polls already trigger the wait gate', () => {
   assert.match(parent.messages[0].text, /本回合 3 次状态查询/)
 })
 
-test('a delivered gate makes the nudge yield in the same turn', () => {
+test('a delivered gate owns the turn, so a write turn gets one reminder', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
+  plugin.apply(h.ctx, { log: false })
 
   const parent = h.main('session-gate-yield', [
     call(1, 'list_agents', {}, 'poll-1'),
@@ -1739,14 +1036,13 @@ test('a delivered gate makes the nudge yield in the same turn', () => {
   h.created(parent)
   h.turnStopping(parent, 1)
 
-  assert.equal(parent.messages.length, 1, 'the gate owns the turn, the nudge stays silent')
+  assert.equal(parent.messages.length, 1, 'the gate owns the turn')
   assert.match(parent.messages[0].text, /准备 present\/commit/)
-  assert.doesNotMatch(parent.messages[0].text, /不在主控白名单内/)
 })
 
 test('send_message and dispatch calls are not waiting', () => {
   const withMessage = harness()
-  plugin.apply(withMessage.ctx, { nudge: { log: false } })
+  plugin.apply(withMessage.ctx, { log: false })
   const messageParent = withMessage.main('session-gate-send-message', [
     call(1, 'list_agents', {}, 'poll-1'),
     call(1, 'list_agents', {}, 'poll-2'),
@@ -1761,7 +1057,7 @@ test('send_message and dispatch calls are not waiting', () => {
   assert.equal(messageParent.messages.length, 0, 'a delivered message is an action')
 
   const withDispatch = harness()
-  plugin.apply(withDispatch.ctx, { nudge: { log: false } })
+  plugin.apply(withDispatch.ctx, { log: false })
   const dispatchParent = withDispatch.main('session-gate-dispatch', [
     call(1, 'list_agents', {}, 'poll-1'),
     call(1, 'list_agents', {}, 'poll-2'),
@@ -1783,7 +1079,7 @@ test('gates validation still runs when the gates are disabled', () => {
 
 test('wait gate deduplicates tool names and joins them with commas', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
+  plugin.apply(h.ctx, { log: false })
 
   const parent = h.main('session-gate-dedupe', [
     call(1, 'list_agents', {}, 'poll-1'),
@@ -1808,7 +1104,7 @@ test('contract gate fires when a contract file is written while a child is activ
   try {
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
-    plugin.apply(h.ctx, { nudge: { log }, checkpoint: { enabled: false } })
+    plugin.apply(h.ctx, { log, checkpoint: { enabled: false } })
 
     const parent = h.main('session-contract-active', [
       call(1, 'write', { file_path: 'tmp/fix-contract.md' }, 'write-1'),
@@ -1830,7 +1126,7 @@ test('contract gate fires when a contract file is written while a child is activ
 
 test('contract gate stays silent when no child is active', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false }, checkpoint: { enabled: false } })
+  plugin.apply(h.ctx, { log: false, checkpoint: { enabled: false } })
 
   const parent = h.main('session-contract-idle', [
     call(1, 'write', { file_path: 'fix-contract.md' }, 'write-1'),
@@ -1843,7 +1139,7 @@ test('contract gate stays silent when no child is active', () => {
 
 test('contract gate stays silent after the child has ended', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false }, checkpoint: { enabled: false } })
+  plugin.apply(h.ctx, { log: false, checkpoint: { enabled: false } })
 
   const parent = h.main('session-contract-ended', [
     call(1, 'write', { file_path: 'fix-contract.md' }, 'write-1'),
@@ -1858,7 +1154,7 @@ test('contract gate stays silent after the child has ended', () => {
 
 test('contract gate ignores non-contract files', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false }, checkpoint: { enabled: false } })
+  plugin.apply(h.ctx, { log: false, checkpoint: { enabled: false } })
 
   const parent = h.main('session-contract-other', [
     call(1, 'write', { file_path: 'src/a.ts' }, 'write-1'),
@@ -1872,7 +1168,7 @@ test('contract gate ignores non-contract files', () => {
 
 test('contract gate stays silent when an active child exists but nothing was written', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false }, checkpoint: { enabled: false } })
+  plugin.apply(h.ctx, { log: false, checkpoint: { enabled: false } })
 
   const parent = h.main('session-contract-read', [
     call(1, 'read', { file_path: 'fix-contract.md' }, 'read-1'),
@@ -1891,7 +1187,7 @@ test('review gate fires when the parent writes after a completed read-only revie
     const events = []
     const h = harness()
     plugin.apply(h.ctx, {
-      nudge: { log }, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+      log, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
     })
 
     const parent = h.main('session-review-write', events)
@@ -1919,7 +1215,7 @@ test('review gate warns only once in the same review round', () => {
   const events = []
   const h = harness()
   plugin.apply(h.ctx, {
-    nudge: { log: false }, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+    log: false, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
   })
 
   const parent = h.main('session-review-once', events)
@@ -1939,7 +1235,7 @@ test('review gate fires again after a new read-only review starts', () => {
   const events = []
   const h = harness()
   plugin.apply(h.ctx, {
-    nudge: { log: false }, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+    log: false, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
   })
 
   const parent = h.main('session-review-rounds', events)
@@ -1962,7 +1258,7 @@ test('non-review child completion does not arm the review gate', () => {
   const events = []
   const h = harness()
   plugin.apply(h.ctx, {
-    nudge: { log: false }, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+    log: false, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
   })
 
   const parent = h.main('session-review-impl', events)
@@ -1978,7 +1274,7 @@ test('non-review child completion does not arm the review gate', () => {
 test('review gate stays silent when nothing was written after the review', () => {
   const h = harness()
   plugin.apply(h.ctx, {
-    nudge: { log: false }, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+    log: false, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
   })
 
   const parent = h.main('session-review-clean', [])
@@ -1995,7 +1291,7 @@ test('handoff gate fires on the first empty turn by default', () => {
   try {
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
-    plugin.apply(h.ctx, { nudge: { log } })
+    plugin.apply(h.ctx, { log })
 
     const parent = h.main('session-handoff-default', [])
     h.created(parent)
@@ -2014,7 +1310,7 @@ test('handoff gate fires on the first empty turn by default', () => {
 
 test('handoff gate ignores a turn that has text', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
+  plugin.apply(h.ctx, { log: false })
 
   const parent = h.main('session-handoff-text', [assistantMessage(1, '正在处理，稍后汇报。')])
   h.created(parent)
@@ -2025,7 +1321,7 @@ test('handoff gate ignores a turn that has text', () => {
 
 test('handoff gate with emptyTurns:2 waits for the second consecutive empty turn', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false }, gates: { handoff: { emptyTurns: 2 } } })
+  plugin.apply(h.ctx, { log: false, gates: { handoff: { emptyTurns: 2 } } })
 
   const parent = h.main('session-handoff-two', [])
   h.created(parent)
@@ -2039,7 +1335,7 @@ test('handoff gate with emptyTurns:2 waits for the second consecutive empty turn
 
 test('handoff gate never fires for a subagent turn', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false } })
+  plugin.apply(h.ctx, { log: false })
 
   const child = h.main('session-handoff-child', [], { origin: 'subagent', parentSession: 'parent-handoff' })
   h.created(child)
@@ -2073,25 +1369,28 @@ test('new gate defaults are the documented ones', () => {
 // ---------------------------------------------------------------------------
 // 0.7.0 amendment（契约 §11-A/B/E）
 
-test('a turn that already delivered a nudge cannot also deliver a gate', () => {
+test('a turn that already delivered a checkpoint cannot also deliver a gate', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-single-steer-'))
   try {
     const log = join(dir, 'decisions.jsonl')
-    const events = [
-      call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
-      call(1, 'write', { file_path: 'b.ts' }, 'write-2'),
-    ]
     const h = harness()
-    plugin.apply(h.ctx, { nudge: { log } })
+    plugin.apply(h.ctx, { log })
 
-    const parent = h.main('session-single-steer', events)
+    const parent = h.main('session-single-steer', [
+      call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
+    ])
     h.created(parent)
+    h.created(h.child('child-single-steer', 'session-single-steer', '实现 Task', [
+      call(1, 'write', { file_path: 'b.ts' }),
+    ]))
+    h.ended({ childId: 'child-single-steer', stopReason: 'completed' })
+
     h.turnStopping(parent, 1)
     assert.equal(parent.messages.length, 1)
-    assert.match(parent.messages[0].text, /不在主控白名单内/, 'close#1 delivers the nudge')
+    assert.match(parent.messages[0].text, /已完成/, 'close#1 delivers the checkpoint')
 
     // 同一回合追加 present：若不检查 lastDeliveredTurn，第二次收尾会再发 verify。
-    events.push(call(1, 'present', { file_path: 'report.md' }, 'present-1'))
+    parent.session.snapshotEvents().push(call(1, 'present', { file_path: 'report.md' }, 'present-1'))
     h.turnStopping(parent, 1)
 
     assert.equal(parent.messages.length, 1, 'one steer per turn, including across close#1/close#2')
@@ -2105,7 +1404,7 @@ test('a second completed review slice re-arms the gate with a new baseline', () 
   const events = []
   const h = harness()
   plugin.apply(h.ctx, {
-    nudge: { log: false }, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+    log: false, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
   })
 
   const parent = h.main('session-review-parallel', events)
@@ -2131,7 +1430,7 @@ test('a duplicate settle of the same review child does not re-arm the gate', () 
   const events = []
   const h = harness()
   plugin.apply(h.ctx, {
-    nudge: { log: false }, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+    log: false, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
   })
 
   const parent = h.main('session-review-duplicate', events)
@@ -2156,7 +1455,7 @@ test('writes before a review completes are not dirty', () => {
   ]
   const h = harness()
   plugin.apply(h.ctx, {
-    nudge: { log: false },
+    log: false,
     checkpoint: { enabled: false },
     gates: { verify: { enabled: false }, handoff: { enabled: false } },
   })
@@ -2173,7 +1472,7 @@ test('writes before a review completes are not dirty', () => {
 
 test('contract gate lists at most three files', () => {
   const h = harness()
-  plugin.apply(h.ctx, { nudge: { log: false }, checkpoint: { enabled: false } })
+  plugin.apply(h.ctx, { log: false, checkpoint: { enabled: false } })
 
   const parent = h.main('session-contract-three', [
     call(1, 'write', { file_path: 'fix-contract.md' }, 'write-1'),
@@ -2191,37 +1490,36 @@ test('contract gate lists at most three files', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 0.8.2 — 控制面路径豁免（契约 §2.4）
+// 0.9.0 — 计数工具复用写入守卫口径（原 0.8.2 控制面豁免）
 
-test('control-plane writes do not count toward the nudge', () => {
-  const config = resolveNudge({})
+test('control-plane writes are not execution work in the shared counter', () => {
   const events = [
     call(1, 'write', { file_path: 'dispatch/ledger/x.md' }),
     call(1, 'write', { file_path: 'docs/superpowers/specs/y.md' }),
-  ]
-
-  const summary = summarizeTurn(events, 1, config)
-  assert.equal(summary.writes, 0, '0.8.2: control-plane writes are not execution work')
-  assert.deepEqual(summary.files, [])
-  assert.equal(shouldNudge(summary, config), false, 'two control-plane files are not a missed dispatch')
-})
-
-test('a control-plane file does not count toward the nudge threshold', () => {
-  const config = resolveNudge({})
-  const events = [
-    call(1, 'write', { file_path: 'dispatch/ledger/x.md' }),
     call(1, 'write', { file_path: 'src/a.ts' }),
+    call(1, 'edit', { file_path: 'src/b.ts' }, 'call-b'),
+    result(1, 'call-b', true),
+    call(1, 'subagent', { description: '实现 X' }),
   ]
 
-  const summary = summarizeTurn(events, 1, config)
-  assert.equal(summary.writes, 1)
-  assert.deepEqual(summary.files, ['src/a.ts'], 'only the source file is counted')
-  assert.equal(shouldNudge(summary, config), false, 'one counted file is below the threshold')
+  const summary = summarizeTurn(events, 1, {
+    writeTools: ['write', 'edit'],
+    delegationTools: ['subagent', 'subagent_fork', 'workflow'],
+    controlPlanePatterns: DEFAULT_ALLOWLIST,
+  })
+  assert.equal(summary.writes, 1, '0.9.0: the counter uses the write-policy allowlist')
+  assert.deepEqual(summary.files, ['src/a.ts'], 'only the source file is execution work')
+  assert.equal(summary.failedWrites, 1, 'a refused write is counted as failed, not as a write')
+  assert.equal(summary.delegations, 1)
 
-  events.push(call(1, 'write', { file_path: 'src/b.ts' }))
-  const second = summarizeTurn(events, 1, config)
-  assert.equal(second.files.length, 2)
-  assert.equal(shouldNudge(second, config), true, 'the second source file crosses the threshold')
+  const second = summarizeTurn([...events, call(1, 'write', { file_path: 'src/c.ts' })], 1, {})
+  assert.deepEqual(second.files, ['src/a.ts', 'src/c.ts'],
+    'the default control-plane patterns still drop dispatch/ and spec files')
+  assert.equal(second.writes, 2)
+
+  const nullOptions = summarizeTurn(events, 1, null)
+  assert.equal(nullOptions.writes, 1, 'null options fall back to the defaults instead of throwing')
+  assert.equal(nullOptions.delegations, 1)
 })
 
 test('a control-plane edit after a successful verification leaves the verify gate silent', () => {
@@ -2263,17 +1561,7 @@ test('a control-plane write after a review does not invalidate it', () => {
   assert.deepEqual(review.files, ['src/a.ts'], 'the ledger path is not listed as a review-dirty file')
 })
 
-test('controlPlanePatterns is configurable on both sections and validated', () => {
-  const nudge = resolveNudge({ controlPlanePatterns: ['dispatch/notes/'] })
-  assert.deepEqual(nudge.controlPlanePatterns, ['dispatch/notes/'])
-
-  const customEvents = [
-    call(1, 'write', { file_path: 'dispatch/notes/x.md' }),
-    call(1, 'write', { file_path: 'src/a.ts' }),
-  ]
-  assert.equal(shouldNudge(summarizeTurn(customEvents, 1, nudge), nudge), false,
-    'the override moves the exemption to the custom fragment')
-
+test('controlPlanePatterns is configurable on the gate sections and validated', () => {
   const gates = resolveGates({ controlPlanePatterns: ['dispatch/notes/'] })
   assert.deepEqual(gates.controlPlanePatterns, ['dispatch/notes/'])
   assert.deepEqual(gates.verify.controlPlanePatterns, ['dispatch/notes/'], 'verify carries the same list')
@@ -2290,8 +1578,6 @@ test('controlPlanePatterns is configurable on both sections and validated', () =
   assert.deepEqual(DEFAULT_CONTROL_PLANE_PATTERNS,
     ['dispatch/state.md', 'dispatch/ledger/', 'docs/superpowers/specs/'])
 
-  assert.throws(() => resolveNudge({ controlPlanePatterns: [] }), /dispatch-protocol: nudge\.controlPlanePatterns/)
-  assert.throws(() => resolveNudge({ controlPlanePatterns: ['ok', 42] }), /dispatch-protocol: nudge\.controlPlanePatterns/)
   assert.throws(() => resolveGates({ controlPlanePatterns: [] }), /dispatch-protocol: gates\.controlPlanePatterns/)
   assert.throws(() => resolveGates({ controlPlanePatterns: ['ok', null] }), /dispatch-protocol: gates\.controlPlanePatterns/)
 })
@@ -2303,6 +1589,438 @@ test('the injected rules name the light-batch review exception and the ledger ca
 
   assert.match(text, /判为轻批的批次除外/, '0.8.2: gated does not re-open a light batch to review')
   assert.match(text, /任务清单或台账首行/, '0.8.2: grading may live in the ledger head instead of the task list')
+})
+
+// ---------------------------------------------------------------------------
+// 0.9.0 — 写入守卫（write policy，spec §4/§7）
+
+test('the plugin injects the tools service and registers exactly one guard', () => {
+  assert.ok(plugin.inject.includes('tools'), 'the guard needs the tools service')
+
+  const h = harness()
+  plugin.apply(h.ctx, { log: false })
+  assert.equal(h.guards.length, 1, 'apply() registers one guard')
+
+  const off = harness()
+  plugin.apply(off.ctx, { log: false, writePolicy: { enabled: false } })
+  assert.equal(off.guards.length, 0, 'writePolicy.enabled:false registers nothing')
+})
+
+test('a root write outside the allowlist is denied with the paths and the override hint', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-deny-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const root = h.main('session-policy-deny', [], {}, 'session-policy-deny', dir)
+
+    const verdict = h.guard({ agent: root, name: 'write', arguments: { file_path: 'server/src/x.ts' } })
+
+    assert.equal(typeof verdict, 'string', 'enforce mode returns the rejection text')
+    assert.match(verdict, /server\/src\/x\.ts/, 'the rejected path is named')
+    assert.match(verdict, /不在主控白名单内/, 'the allowlist is named')
+    assert.match(verdict, /dispatch\//, 'the control-plane prefixes are listed')
+    assert.match(verdict, /docs\/superpowers\/specs\//)
+    assert.match(verdict, /dispatch\/override\.json/, 'the single exemption file is named')
+    assert.match(verdict, /派给执行批/, 'the dispatch exit is stated')
+
+    const [row] = readRows(log)
+    assert.equal(row.kind, 'write-policy')
+    assert.equal(row.decision, 'denied')
+    assert.equal(row.reason, 'no-override')
+    assert.equal(row.turn, null, 'the guard is not tied to a turn')
+    assert.equal(row.tool, 'write')
+    assert.equal(row.file, 'server/src/x.ts')
+    assert.equal(row.mode, 'enforce')
+    assert.equal(row.session, 'session-policy-deny')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('control-plane writes pass without a decision-log line', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-allow-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const root = h.main('session-policy-allow', [], {}, 'session-policy-allow', dir)
+
+    const allowed = [
+      'dispatch/state.md',
+      'dispatch/ledger/x.md',
+      'docs/superpowers/specs/x.md',
+      join(dir, 'dispatch/state.md'),
+      join(dir, 'docs/superpowers/specs/x.md'),
+      'dispatch\\ledger\\x.md',
+      './dispatch/state.md',
+      'DISPATCH/STATE.MD',
+    ]
+    for (const file of allowed) {
+      assert.equal(h.guard({ agent: root, name: 'write', arguments: { file_path: file } }), undefined,
+        `control-plane write proceeds: ${file}`)
+      assert.equal(h.guard({ agent: root, name: 'edit', arguments: { file_path: file } }), undefined,
+        `control-plane edit proceeds: ${file}`)
+    }
+
+    assert.equal(existsSync(log), false, 'control-plane writes are deliberately not logged')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a subagent write is execution work and passes unguarded', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-child-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const child = h.main('child-policy', [], { origin: 'subagent', parentSession: 'parent-policy' }, 'child-policy', dir)
+
+    assert.equal(h.guard({ agent: child, name: 'write', arguments: { file_path: 'src/x.ts' } }), undefined)
+    assert.equal(h.guard({ agent: child, name: 'edit', arguments: { file_path: 'tests/y.test.ts' } }), undefined)
+    assert.equal(existsSync(log), false, 'a subagent write is never a guard decision')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a fresh override written in this session allows the write and logs reason override', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-override-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const createdAt = Date.now() - 60_000
+    const root = h.main('session-policy-override', [], {}, 'session-policy-override', dir, createdAt)
+
+    const overrideDir = join(dir, 'dispatch')
+    const overrideFile = join(overrideDir, 'override.json')
+    mkdirSync(overrideDir, { recursive: true })
+    writeFileSync(overrideFile, JSON.stringify({ reason: '用户要求直接修这 4 行', source: 'user' }))
+    assert.ok(statSync(overrideFile).mtimeMs >= createdAt, 'the fixture override is newer than the session')
+
+    assert.equal(h.guard({ agent: root, name: 'edit', arguments: { file_path: 'src/x.ts' } }), undefined,
+      'a valid override releases the write')
+
+    const [row] = readRows(log)
+    assert.equal(row.kind, 'write-policy')
+    assert.equal(row.decision, 'allowed')
+    assert.equal(row.reason, 'override')
+    assert.equal(row.turn, null)
+    assert.equal(row.tool, 'edit')
+    assert.equal(row.file, 'src/x.ts')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('an override older than the session is stale and denied', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-stale-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const createdAt = Date.now()
+    const root = h.main('session-policy-stale', [], {}, 'session-policy-stale', dir, createdAt)
+
+    const overrideDir = join(dir, 'dispatch')
+    const overrideFile = join(overrideDir, 'override.json')
+    mkdirSync(overrideDir, { recursive: true })
+    writeFileSync(overrideFile, JSON.stringify({ reason: '上一个会话留下的 override' }))
+    const old = new Date(createdAt - 120_000)
+    utimesSync(overrideFile, old, old)
+
+    const verdict = h.guard({ agent: root, name: 'write', arguments: { file_path: 'src/x.ts' } })
+    assert.equal(typeof verdict, 'string', 'a stale override does not release the write')
+
+    const [row] = readRows(log)
+    assert.equal(row.kind, 'write-policy')
+    assert.equal(row.decision, 'denied')
+    assert.equal(row.reason, 'stale', 'the freshness check is per session')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a malformed override is invalid and denied', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-invalid-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const root = h.main('session-policy-invalid', [], {}, 'session-policy-invalid', dir)
+
+    const overrideDir = join(dir, 'dispatch')
+    mkdirSync(overrideDir, { recursive: true })
+    writeFileSync(join(overrideDir, 'override.json'), '{ not json')
+
+    assert.equal(typeof h.guard({ agent: root, name: 'write', arguments: { file_path: 'src/x.ts' } }), 'string')
+
+    const [row] = readRows(log)
+    assert.equal(row.decision, 'denied')
+    assert.equal(row.reason, 'invalid', 'an unparsable override is not an exemption')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('an override without a non-empty reason is invalid and denied', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-noreason-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const root = h.main('session-policy-noreason', [], {}, 'session-policy-noreason', dir)
+
+    const overrideDir = join(dir, 'dispatch')
+    mkdirSync(overrideDir, { recursive: true })
+    writeFileSync(join(overrideDir, 'override.json'), JSON.stringify({ source: 'user', reason: '   ' }))
+
+    assert.equal(typeof h.guard({ agent: root, name: 'write', arguments: { file_path: 'src/x.ts' } }), 'string')
+
+    const [row] = readRows(log)
+    assert.equal(row.decision, 'denied')
+    assert.equal(row.reason, 'invalid', 'the reason must be a non-empty string')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('shadow mode logs the denial but lets the write through', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-shadow-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log, writePolicy: { mode: 'shadow' } })
+    const root = h.main('session-policy-shadow', [], {}, 'session-policy-shadow', dir)
+
+    assert.equal(h.guard({ agent: root, name: 'write', arguments: { file_path: 'server/src/x.ts' } }), undefined,
+      'shadow mode never blocks')
+
+    const [row] = readRows(log)
+    assert.equal(row.kind, 'write-policy')
+    assert.equal(row.decision, 'denied')
+    assert.equal(row.reason, 'no-override')
+    assert.equal(row.mode, 'shadow', 'the log distinguishes shadow from enforce')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('tools outside the write list, path-less calls and unscoped agents pass silently', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-exempt-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const root = h.main('session-policy-exempt', [], {}, 'session-policy-exempt', dir)
+
+    assert.equal(h.guard({ agent: root, name: 'read', arguments: { file_path: 'server/src/x.ts' } }), undefined,
+      'only the configured write tools are judged')
+    assert.equal(h.guard({ agent: root, name: 'write', arguments: {} }), undefined, 'no path, nothing to judge')
+    assert.equal(h.guard({ agent: root, name: 'edit', arguments: { file_path: '' } }), undefined)
+    assert.equal(h.guard({ name: 'write', arguments: { file_path: 'server/src/x.ts' } }), undefined,
+      'an unscoped host has no session to judge')
+    assert.equal(h.guard({ agent: null, name: 'write', arguments: { file_path: 'server/src/x.ts' } }), undefined)
+
+    assert.equal(existsSync(log), false, 'exemptions are not decisions')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('an absolute path outside the session cwd is denied', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-outside-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const root = h.main('session-policy-outside', [], {}, 'session-policy-outside', dir)
+
+    const outside = join(tmpdir(), `dispatch-protocol-outside-${process.pid}.ts`)
+    assert.equal(typeof h.guard({ agent: root, name: 'write', arguments: { file_path: outside } }), 'string',
+      'outside the cwd is outside the allowlist')
+
+    const [row] = readRows(log)
+    assert.equal(row.decision, 'denied')
+    assert.equal(row.reason, 'no-override')
+    assert.equal(row.file, outside)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a valid override without a session timestamp is allowed as override-unbounded', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-unbounded-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    // A minimal agent with no `createdAt` anywhere: the freshness check has no
+    // anchor, so it is skipped (fail-open) and the log says why.
+    const root = { session: { id: 'session-policy-unbounded', header: { origin: 'root' }, cwd: dir } }
+
+    const overrideDir = join(dir, 'dispatch')
+    mkdirSync(overrideDir, { recursive: true })
+    writeFileSync(join(overrideDir, 'override.json'), JSON.stringify({ reason: '用户要求直接修这 4 行' }))
+
+    assert.equal(h.guard({ agent: root, name: 'edit', arguments: { file_path: 'src/x.ts' } }), undefined,
+      'no session timestamp means the freshness check is skipped')
+
+    const [row] = readRows(log)
+    assert.equal(row.kind, 'write-policy')
+    assert.equal(row.decision, 'allowed')
+    assert.equal(row.reason, 'override-unbounded', 'an unbounded override is not logged as a fresh one')
+    assert.equal(row.file, 'src/x.ts')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('dot-dot segments are folded before the allowlist match', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-dotdot-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const root = h.main('session-policy-dotdot', [], {}, 'session-policy-dotdot', dir)
+
+    assert.equal(typeof h.guard({ agent: root, name: 'write', arguments: { file_path: 'dispatch/../src/x.ts' } }), 'string',
+      'dispatch/../src/x.ts escapes the control plane and is denied')
+
+    const [row] = readRows(log)
+    assert.equal(row.decision, 'denied')
+    assert.equal(row.reason, 'no-override')
+
+    assert.equal(h.guard({ agent: root, name: 'write', arguments: { file_path: 'dispatch/../dispatch/state.md' } }), undefined,
+      'dispatch/../dispatch/state.md folds back onto the control plane')
+    assert.equal(readRows(log).length, 1, 'the allowed write adds no log line')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the allowlist matches on a word boundary, so dispatch-notes.md is denied', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-boundary-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const root = h.main('session-policy-boundary', [], {}, 'session-policy-boundary', dir)
+
+    assert.equal(typeof h.guard({ agent: root, name: 'write', arguments: { file_path: 'dispatch-notes.md' } }), 'string',
+      'a dispatch/ entry must not leak to dispatch-notes.md')
+
+    const [row] = readRows(log)
+    assert.equal(row.decision, 'denied')
+    assert.equal(row.reason, 'no-override')
+    assert.equal(row.file, 'dispatch-notes.md')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a guard exception fails open so the host keeps working', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-failopen-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const broken = { get session() { throw new Error('host bug') } }
+
+    assert.equal(h.guard({ agent: broken, name: 'write', arguments: { file_path: 'server/src/x.ts' } }), undefined,
+      'a guard bug must never block a write')
+    assert.equal(existsSync(log), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('writePolicy carries the 0.9.0 defaults and rejects silent breakage', () => {
+  const resolved = resolveConfig({})
+  assert.deepEqual(resolved.writePolicy, {
+    enabled: true,
+    mode: 'enforce',
+    allowlist: DEFAULT_ALLOWLIST,
+    overridePath: 'dispatch/override.json',
+    tools: ['write', 'edit'],
+    delegationTools: ['subagent', 'subagent_fork', 'workflow'],
+  })
+  assert.deepEqual(DEFAULT_ALLOWLIST, ['dispatch/', 'docs/superpowers/specs/'])
+  assert.equal(DEFAULT_OVERRIDE_PATH, 'dispatch/override.json')
+  assert.equal(DEFAULT_WRITE_POLICY_MODE, 'enforce')
+  assert.equal(resolveWritePolicy({ enabled: false }).enabled, false)
+
+  assert.throws(() => resolveConfig({ writePolicy: { mode: 'monitor' } }), /writePolicy\.mode/)
+  assert.throws(() => resolveConfig({ writePolicy: { allowlist: [] } }), /writePolicy\.allowlist/)
+  assert.throws(() => resolveConfig({ writePolicy: { allowlist: 'dispatch/' } }), /writePolicy\.allowlist/)
+  assert.throws(() => resolveConfig({ writePolicy: { tools: [] } }), /writePolicy\.tools/)
+  assert.throws(() => resolveConfig({ writePolicy: { delegationTools: [] } }), /writePolicy\.delegationTools/)
+  assert.throws(() => resolveConfig({ writePolicy: { overridePath: '  ' } }), /writePolicy\.overridePath/)
+})
+
+test('the decision log defaults to the temp dir, accepts false and rejects non-paths', () => {
+  const resolved = resolveConfig({})
+  assert.match(resolved.log, /dispatch-protocol-decisions\.jsonl$/)
+  assert.equal(resolved.log, join(tmpdir(), 'dispatch-protocol-decisions.jsonl'))
+  assert.equal(resolveConfig({ log: false }).log, false, 'false silences every mechanism')
+  assert.equal(resolveConfig({ log: 'tmp/decisions.jsonl' }).log, 'tmp/decisions.jsonl')
+  assert.throws(() => resolveConfig({ log: 42 }), /log must be/)
+  assert.throws(() => resolveConfig({ log: '' }), /log/,
+    'an empty path must not silently fall back to the default log')
+  assert.throws(() => resolveConfig({ log: '   ' }), /log/,
+    'a whitespace path must not silently fall back to the default log')
+})
+
+test('the removed nudge section fails at load time with a migration hint', () => {
+  assert.throws(() => resolveConfig({ nudge: {} }), (error) => {
+    assert.match(error.message, /nudge/)
+    assert.match(error.message, /迁移/)
+    assert.match(error.message, /writePolicy\.delegationTools/)
+    assert.match(error.message, /dispatch\/override\.json/)
+    return true
+  })
+  assert.throws(() => resolveConfig({ nudge: { log: false } }), /nudge/)
+})
+
+test('rule 1 names the override file and carries no nudge prose', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+  const text = h.sections[0].text
+
+  assert.match(text, /dispatch\/override\.json/)
+  assert.match(text, /守卫只认这个文件/)
+  assert.match(text, /每会话有效，新会话需重写/)
+  assert.match(text, /被 `dispatch-protocol` 守卫拦截时/)
+  assert.match(text, /不要重试同一个调用/)
+  assert.match(text, /有界直改同样先写 override/)
+  assert.doesNotMatch(text, /记一行 override/, 'the 0.8.x prose exemption is gone')
+  assert.doesNotMatch(text, /nudge/i)
+})
+
+test('the observation shell tier drops git commit while the mutation tier keeps it', () => {
+  const commit = JSON.stringify({ command: 'git commit -m "x"' })
+  assert.equal(DEFAULT_PWSH_SHELL_PATTERN.test('git commit -m "x"'), false)
+  assert.equal(DEFAULT_PWSH_SHELL_PATTERN.test('git -C G:\\repo commit -m x'), false)
+  assert.equal(DEFAULT_PWSH_MUTATION_PATTERN.test('git commit -m x'), true)
+  assert.equal(DEFAULT_PWSH_MUTATION_PATTERN.test('git -C G:\\repo commit -m x'), true)
+  assert.equal(DEFAULT_PWSH_SHELL_PATTERN.test('git checkout -- a.md'), true,
+    'restoring a working-tree file is a content change')
+  assert.equal(DEFAULT_PWSH_SHELL_PATTERN.test('echo hi > out.txt'), true)
+
+  const events = [
+    call(1, 'pwsh', { command: 'git commit -m "x"' }),
+    call(1, 'write', { file_path: 'spec.md' }),
+  ]
+  const summary = summarizeTurn(events, 1, {})
+  assert.equal(summary.writes, 1)
+  assert.equal(summary.shellWrites, 0, 'the observation tier ignores a bare commit')
+  const full = summarizeTurn(events, 1, {}, DEFAULT_PWSH_MUTATION_PATTERN)
+  assert.equal(full.shellWrites, 1, 'the 4th argument restores the full mutation tier')
+
+  // The checkpoint tier still treats a committing child as execution-class.
+  assert.equal(callTouchesFile('pwsh', commit), true)
 })
 
 // ---------------------------------------------------------------------------
@@ -2351,9 +2069,11 @@ function splice(childId, target = 'next-step') {
   }
 }
 
-/** Build a fake host context: prompt registry, agents registry, event bus. */
+/** Build a fake host context: prompt registry, tools guard, agents registry, event bus. */
 function harness() {
   const sections = []
+  /** Registered `ctx.tools.guard(fn)` functions, in registration order. */
+  const guards = []
   const events = new Map()
   const agents = new Map()
   const agentHooks = new Map()
@@ -2362,6 +2082,13 @@ function harness() {
     systemPrompt: {
       section(section) {
         sections.push(section)
+        return () => {}
+      },
+    },
+    // 0.9.0 write guard: `guard(fn)` is sync and returns a disposer.
+    tools: {
+      guard(fn) {
+        guards.push(fn)
         return () => {}
       },
     },
@@ -2388,6 +2115,20 @@ function harness() {
   return {
     ctx,
     sections,
+    guards,
+    /**
+     * Replay one tool call through every registered guard. The host rejects a
+     * call on the first non-empty string; `undefined` means the call proceeds.
+     * @param exec - `{ agent?, name?, arguments? }`.
+     * @returns the rejection text, or undefined.
+     */
+    guard(exec) {
+      for (const fn of guards) {
+        const verdict = fn(exec)
+        if (typeof verdict === 'string' && verdict !== '') return verdict
+      }
+      return undefined
+    },
     parent(id) {
       const messages = []
       const agent = { id, messages, followup: record(messages), steer: record(messages) }
@@ -2407,9 +2148,12 @@ function harness() {
      * A live top-level agent with its own hook scope and session log.
      * `sessionId` defaults to `id`; pass a distinct value to model a host where
      * the agent handle and the session it belongs to are not the same string.
-     * `cwd` feeds the 0.4.0 observation rows (absent = observation skips).
+     * `cwd` feeds the observation rows and the write-policy path judgement
+     * (absent = observation skips and the guard cannot resolve control-plane
+     * prefixes); `createdAt` is the session start the override freshness check
+     * compares against, defaulting to now.
      */
-    main(id, sessionEvents = [], header = {}, sessionId = id, cwd) {
+    main(id, sessionEvents = [], header = {}, sessionId = id, cwd, createdAt = Date.now()) {
       const messages = []
       const hooks = new Map()
       const agent = {
@@ -2418,6 +2162,7 @@ function harness() {
         session: {
           id: sessionId,
           cwd,
+          createdAt,
           header: { origin: header.origin, parentSession: header.parentSession, delegationDepth: header.origin === 'subagent' ? 1 : 0 },
           snapshotEvents: () => sessionEvents,
         },

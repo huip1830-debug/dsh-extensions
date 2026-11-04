@@ -4,29 +4,31 @@
 //   1. One system-prompt section, so every request (main agent and every
 //      subagent) carries the six dispatch rules. Independent of which skills
 //      the model chose to load.
-//   2. A completion checkpoint: when a child agent finishes, the parent gets one
+//   2. A write guard at the tool boundary (0.9.0): a root agent's `write`/`edit`
+//      outside the control-plane allowlist is rejected before it runs, unless
+//      `dispatch/override.json` carries a reason written in this session. The
+//      rejection is a tool error — the turn continues — and it costs no model
+//      step, which is what the 0.8.x turn-end nudge could not do: all 45 located
+//      nudge deliveries happened after the final answer and none produced a
+//      dispatch (spec 2026-11-04-dispatch-write-policy.md §1). The correction
+//      point moved from "after the fact" to "before the action".
+//   3. A completion checkpoint: when a child agent finishes, the parent gets one
 //      short reminder to read the diff and re-run the command the child claims.
 //      Delivery waits for the parent's next turn-stopping, so a parent that
 //      already acted on the report is skipped instead of re-reminded.
 //      Static rules alone get skipped; a timed reminder does not.
-//   3. A missed-dispatch nudge: a turn that changed several files without
-//      delegating anything gets one reminder before it closes. The rules govern
-//      the *form* of a dispatch and can never require one, so "did this turn
-//      skip the dispatch?" is an observation, not an inference — counted from
-//      the committed `tool/call` log of that turn.
 //   4. 状态闸门（0.6.0/0.7.0）：WaitGate（等待期只读轮询）、VerifyGate（验证后
 //      又改却准备 present/commit）、ContractGate（有子代理在跑时改写契约文件）、
 //      ReviewGate（只读评审后改动工作区）与 HandoffGate（空回合兜底）各提醒一次。
-//      它们排在 checkpoint 之后、nudge 之前，每回合最多一条；判据只读已提交事件，
+//      它们排在 checkpoint 之后，每回合最多一条；判据只读已提交事件，
 //      不拦截任何工具调用。证据 session-92f462d1：66 次状态查询轮询；最终 diff
 //      在最后一次集成命令（事件 1112）之后又被改却准备收口；契约在线改写、评审
 //      后未重开、空回合中断也是同一会话的形态。
 //
-// The nudge yields to the checkpoint: a turn that delivered a checkpoint, or
-// that turned out to be an acceptance turn for a child report, or that directly
-// follows a delivered checkpoint (one-turn grace), is left alone. Every decision
-// — delivered or silenced — is appended to one shared decision log, so
-// "never fired" and "fired and was silenced" stay distinguishable.
+// Every guard decision that is not a control-plane write — allowed by override,
+// denied, or denied in shadow mode — is appended to one shared decision log, so
+// "never fired" and "fired and was silenced" stay distinguishable. Control-plane
+// writes are deliberately not logged: they are the main agent's legitimate work.
 //
 // Why a plugin instead of AGENTS.md: AGENTS.md is shared with Codex, OpenCode
 // and Claude Code, where this DSH-specific delegation discipline does not
@@ -34,13 +36,17 @@
 //
 // Extension points (installed dsh 0.2.1-rc.2):
 //   - `ctx.systemPrompt.section({ name, order, text, interpolate })`
+//   - `ctx.tools.guard(fn)` — sync and monotonic; a returned string rejects that
+//     one call and the model sees `Error: <reason>` while the turn continues.
+//     Registered as `ctx.effect(() => ctx.tools.guard(guard))` so the disposer
+//     removes it with the plugin.
 //   - `agent/created({ agent })` — subagent children carry
 //     `session.header.parentSession` and `origin === 'subagent'`.
 //   - `subagent/end(info)` — settlement; `stopReason` says how it ended.
 //   - `ctx.agents.get(parentSessionId).followup(userMessage)`.
 //   - per-agent `agent/turn-stopping({ turn, signal })` — serial, fired while the
 //     turn is about to close and before `turn/end` commits; a listener that
-//     steers runs another step in the same turn, so a nudge costs one step and
+//     steers runs another step in the same turn, so a reminder costs one step and
 //     cannot fire twice for the same turn.
 //   - `session.snapshotEvents()` — committed `tool/call` events carry their own
 //     `turn`, `name` and JSON `arguments`.
@@ -48,7 +54,8 @@ import { randomUUID } from 'node:crypto'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { resolveConfig } from './lib/config.mjs'
-import { callTouchesFile, renderNudge, shouldNudge, summarizeTurn, justifiedInTurn } from './lib/nudge.mjs'
+import { callTouchesFile, summarizeTurn } from './lib/tool-calls.mjs'
+import { evaluateWritePolicy, renderDenyText } from './lib/write-policy.mjs'
 import {
   evaluateContractGate, evaluateHandoffGate, evaluateReviewGate,
   evaluateVerifyGate, evaluateWaitGate,
@@ -56,7 +63,7 @@ import {
 } from './lib/gates.mjs'
 
 export const name = 'dispatch-protocol'
-export const inject = ['systemPrompt', 'agents']
+export const inject = ['systemPrompt', 'agents', 'tools']
 
 /**
  * Build a complete user-role message. `Agent.followup` takes a `UserMessage`,
@@ -76,7 +83,7 @@ function userMessage(text) {
 /**
  * 判定：子代理整个会话是否零写入（只读勘察）。
  *
- * 0.4.0 起与 nudge 共用 `callTouchesFile`：`write`/`edit` 尝试即算，`pwsh`
+ * 0.4.0 起与计数工具共用 `callTouchesFile`（现位于 `lib/tool-calls.mjs`）：`write`/`edit` 尝试即算，`pwsh`
  * 命中变更动词也算——样本 session-82db5b7d 的 W-5 用 `Remove-Item` 删死代码、
  * 零 write/edit，被判只读而静默。判定抛错时返回 `false`（按执行类处理），
  * 与检查点「宁可多提醒」的防御风格一致。
@@ -127,7 +134,7 @@ function steerText(agent, text) {
  * a full disk or a bad path must never close a turn.
  * @param log - the resolved decision-log path, or false when logging is off.
  * @param agent - the agent the decision belongs to.
- * @param payload - `{ turn, kind, decision, reason?, childId?, label?, writes?, files?, delegations?, gate?, observations?, changes?, lastVerify?, emptyTurns? }`.
+ * @param payload - `{ turn, kind, decision, reason?, childId?, label?, writes?, files?, delegations?, gate?, observations?, changes?, lastVerify?, emptyTurns?, tool?, file?, mode? }`.
  */
 function recordDecision(log, agent, payload) {
   if (log === false) return
@@ -139,13 +146,12 @@ function recordDecision(log, agent, payload) {
       kind: payload.kind,
       decision: payload.decision,
       ...(payload.reason === undefined ? {} : { reason: payload.reason }),
-      ...(payload.deferred === undefined ? {} : { deferred: payload.deferred }),
       ...(payload.childId === undefined ? {} : { childId: payload.childId }),
       ...(payload.label === undefined ? {} : { label: payload.label }),
       ...(payload.writes === undefined ? {} : { writes: payload.writes }),
       ...(payload.files === undefined ? {} : { files: payload.files }),
       ...(payload.delegations === undefined ? {} : { delegations: payload.delegations }),
-      // 0.6.0 状态闸门：与 checkpoint/nudge 共用同一份决定日志。`gate` 区分
+      // 0.6.0 状态闸门：与 checkpoint、写入守卫共用同一份决定日志。`gate` 区分
       // wait/verify；`observations` 与 `changes`/`lastVerify` 是各自的事实字段。
       ...(payload.gate === undefined ? {} : { gate: payload.gate }),
       ...(payload.observations === undefined ? {} : { observations: payload.observations }),
@@ -153,6 +159,12 @@ function recordDecision(log, agent, payload) {
       ...(payload.lastVerify === undefined ? {} : { lastVerify: payload.lastVerify }),
       // 0.7.0 HandoffGate：连续空回合数，供日志回答「到底空了多久」。
       ...(payload.emptyTurns === undefined ? {} : { emptyTurns: payload.emptyTurns }),
+      // 0.9.0 写入守卫：`tool`/`file` 是被放行或被拦下的具体调用，`mode` 区分
+      // enforce 与 shadow（shadow 只记日志、绝不拦）。守卫的记录没有回合，`turn`
+      // 落成 null。
+      ...(payload.tool === undefined ? {} : { tool: payload.tool }),
+      ...(payload.file === undefined ? {} : { file: payload.file }),
+      ...(payload.mode === undefined ? {} : { mode: payload.mode }),
     })
     appendFileSync(log, `${line}\n`)
   } catch {
@@ -160,39 +172,134 @@ function recordDecision(log, agent, payload) {
   }
 }
 
+/**
+ * 从工具调用参数里取目标路径。
+ *
+ * 只认 `file_path` 与 `path` 两个键（spec §4）：别的键既可能是目录也可能是
+ * 命令，猜错会误拦。取不到就是「没有写入路径」，守卫放行。
+ * @param args - `exec.arguments`（已解析的冻结对象）。
+ * @returns the path, or undefined when the call names none.
+ */
+function readArgumentPath(args) {
+  if (typeof args !== 'object' || args === null) return undefined
+  const path = args.file_path ?? args.path
+  return typeof path === 'string' && path !== '' ? path : undefined
+}
+
+/**
+ * 读会话开始时间（毫秒），用于 override 新鲜度判断。
+ *
+ * 宿主两个版本分别放在 `session.createdAt` 与 `session.header.createdAt`；取不到
+ * 就返回 undefined，判定退化为 fail-open（仍记 `reason: override-unbounded`）。
+ * @param session - the agent's session handle.
+ * @returns epoch milliseconds, or undefined.
+ */
+function readSessionStart(session) {
+  const start = session?.createdAt ?? session?.header?.createdAt
+  return typeof start === 'number' && Number.isFinite(start) ? start : undefined
+}
+
+/**
+ * Build the tool-boundary guard (0.9.0, spec §4).
+ *
+ * 豁免顺序：没有 `agent`（宿主无作用域）→ 子代理（执行面，`origin ===
+ * 'subagent'`）→ 工具不在 `writePolicy.tools` → 参数里没有路径。剩下的一律
+ * 交给 `evaluateWritePolicy` 判定；判定为名单内时不写日志（控制面写入不制造
+ * 噪音），override 放行记 `reason: 'override'`，拒绝记 `no-override`/`stale`/
+ * `invalid` 并在 enforce 下返回拒绝串。
+ *
+ * 整个守卫包在 try/catch 里：守卫的 bug 绝不能影响宿主，任何异常都按放行处理
+ * （fail-open）。
+ * @param config - the resolved plugin config.
+ * @returns a sync guard `(exec) => string | undefined`.
+ */
+function makeGuard(config) {
+  const policy = config.writePolicy
+  return (exec) => {
+    try {
+      const agent = exec?.agent
+      if (agent === undefined || agent === null) return undefined
+      const session = agent.session
+      // 子代理是执行面：它写 src/tests/scripts 正是派发要的结果。
+      if (session?.header?.origin === 'subagent') return undefined
+      const tool = exec?.name
+      if (typeof tool !== 'string' || !policy.tools.includes(tool)) return undefined
+      const file = readArgumentPath(exec?.arguments)
+      if (file === undefined) return undefined
+
+      const cwd = session?.cwd ?? session?.header?.cwd
+      const result = evaluateWritePolicy({
+        file, cwd, tool, config: policy, sessionStart: readSessionStart(session),
+      })
+
+      if (result.decision === 'allow') {
+        // 控制面写入是主控的合法动作：放行且不留噪音。
+        if (result.reason === 'allowlist') return undefined
+        recordDecision(config.log, agent, {
+          kind: 'write-policy', decision: 'allowed', reason: result.reason, tool, file,
+        })
+        return undefined
+      }
+
+      recordDecision(config.log, agent, {
+        kind: 'write-policy',
+        decision: 'denied',
+        reason: result.reason,
+        tool,
+        file,
+        mode: policy.mode,
+      })
+      if (policy.mode === 'shadow') return undefined
+      return renderDenyText({ tool, file, allowlist: policy.allowlist, overridePath: policy.overridePath })
+    } catch {
+      // 守卫自己出错时按放行处理：绝不影响宿主。
+      return undefined
+    }
+  }
+}
+
 export function apply(ctx, rawConfig) {
   const config = resolveConfig(rawConfig)
 
-  if (config.enabled) {
-    ctx.effect(() => ctx.systemPrompt.section({
-      name: 'dispatch-protocol',
-      order: config.order,
-      text: config.text,
-      interpolate: false,
-    }))
+  // 0.9.0：顶层 `enabled` 是**总开关**。0.8.x 里它只关提示词 section，写入守卫与
+  // 收尾提醒照旧注册——插件页上「关闭」和实际行为不一致（守卫仍在拦、提醒仍在
+  // 发）。关闭即什么都不注册：无 section、无写入守卫、无 checkpoint/观测/闸门。
+  if (!config.enabled) return
+
+  ctx.effect(() => ctx.systemPrompt.section({
+    name: 'dispatch-protocol',
+    order: config.order,
+    text: config.text,
+    interpolate: false,
+  }))
+
+  // 0.9.0 写入守卫：唯一能真正阻止一次写入的地方。`ctx.effect` 持有 disposer，
+  // 插件卸载时守卫一并消失；`inject` 里的 `'tools'` 保证 `ctx.tools` 存在。
+  if (config.writePolicy.enabled && typeof ctx.tools?.guard === 'function') {
+    ctx.effect(() => ctx.tools.guard(makeGuard(config)))
   }
 
-  registerReminders(ctx, config.nudge, config.checkpoint, config.observation, config.gates)
+  registerReminders(ctx, config)
 }
 
 /**
  * Run the reminders from one turn-stopping handler per agent.
  *
  * The completion checkpoint is judged first and a delivered checkpoint owns the
- * turn, so a gate or nudge never shares a turn with it — no dependence on
- * subscription order, and only one `steer` per turn. 0.6.0 inserts the event
- * gates between checkpoint and nudge; 0.7.0 extends the gate order to
- * Wait → Verify → Contract → Review → Handoff. A delivered gate also owns the
- * turn, so the nudge yields to it. Turn state is keyed by parent id;
- * `lastCheckpointTurn` is recorded for the later one-turn grace rule.
+ * turn, so a gate never shares a turn with it — no dependence on subscription
+ * order, and only one `steer` per turn. 0.6.0 inserts the event gates after the
+ * checkpoint; 0.7.0 extends the gate order to Wait → Verify → Contract → Review
+ * → Handoff. 0.9.0 removes the missed-dispatch nudge entirely: the write guard
+ * (see `makeGuard`) now owns that constraint at the tool boundary, so this
+ * function only accounts for checkpoint / observation / gate decisions. Turn
+ * state is keyed by parent id.
  * @param ctx - the plugin context.
- * @param nudge - the resolved `nudge` section.
- * @param checkpoint - the resolved `checkpoint` section.
- * @param observation - the resolved `observation` section (0.4.0).
- * @param gates - the resolved `gates` section (0.6.0).
+ * @param config - the resolved plugin config (`log`, `writePolicy`, `checkpoint`,
+ *   `observation`, `gates` are read here).
  */
-function registerReminders(ctx, nudge, checkpoint, observation, gates) {
-  if (!nudge.enabled && !checkpoint.enabled && !observation.enabled && !gates.enabled) return
+function registerReminders(ctx, config) {
+  const { log, writePolicy, checkpoint, observation, gates } = config
+  if (!checkpoint.enabled && !observation.enabled && !gates.enabled) return
 
   /** childId → `{ parentId, label, agent }` for settlement lookup. */
   const children = new Map()
@@ -202,15 +309,12 @@ function registerReminders(ctx, nudge, checkpoint, observation, gates) {
   /** Agent ids whose single `agent/turn-stopping` handler is already installed. */
   const watched = new Set()
 
-  // One log for every mechanism: `nudge.log` is the key (kept for compatibility),
-  // `false` silences checkpoint, nudge and state-gate decisions too.
-  const decisionLog = nudge.log
+  // One log for every mechanism: the top-level `log` key (0.9.0; it replaced
+  // `nudge.log`), `false` silences checkpoint, write-guard and state-gate
+  // decisions too.
+  const decisionLog = log
 
   const lastDeliveredTurn = new Map()
-  const lastCheckpointTurn = new Map()
-  const lastNudgedTurn = new Map()
-  /** parentId → last turn number that went through nudge evaluation (0.4.0). */
-  const lastEvaluatedTurn = new Map()
   /** parentId → last turn number that already produced one observation row (0.4.1). */
   const lastObservedTurn = new Map()
   /** parentId → last turn number that already produced one gate message (0.6.0). */
@@ -342,7 +446,8 @@ function registerReminders(ctx, nudge, checkpoint, observation, gates) {
    * 判定并投递本回合的状态闸门（0.6.0/0.7.0，契约 §3-§6）。
    *
    * 顺序固定 Wait → Verify → Contract → Review → Handoff：一个回合最多一条
-   * 闸门消息（`lastGateTurn` 去重），投递后设 `lastDeliveredTurn`，nudge 让位。
+   * 闸门消息（`lastGateTurn` 去重），投递后设 `lastDeliveredTurn`，本回合不再投
+   * 第二条提醒（0.9.0 起收尾只剩闸门与 checkpoint 两个候选）。
    * 只对根代理生效：子代理不能再派发，它们的写入也已经记在父回合里，提醒子
    * 代理只会多一条噪音。全程 try/catch——闸门读的是宿主日志，解析失败或宿主
    * 接口变动都不该让回合失败（与 observation 的防御口径一致）。
@@ -354,7 +459,7 @@ function registerReminders(ctx, nudge, checkpoint, observation, gates) {
    */
   const evaluateGates = (target, parentId, turn, isRootAgent) => {
     if (!gates.enabled || !isRootAgent) return false
-    // 同回合已经投递过任何提醒（checkpoint/nudge/闸门）就不再投闸门：那条
+    // 同回合已经投递过任何提醒（checkpoint/闸门）就不再投闸门：那条
     // steer 已让本回合多跑一步，第二次收尾再发就是同回合两条 steer。契约
     // §11-A 的硬边界；`lastGateTurn` 只防闸门自己重复。
     if (!Number.isInteger(turn)
@@ -362,7 +467,7 @@ function registerReminders(ctx, nudge, checkpoint, observation, gates) {
       || lastDeliveredTurn.get(parentId) === turn) return false
     try {
       const events = target?.session?.snapshotEvents?.() ?? []
-      /** 投递一条闸门消息：steer + 决定日志 + 本回合去重 + nudge 让位。 */
+      /** 投递一条闸门消息：steer + 决定日志 + 本回合去重。 */
       const deliver = (text, payload) => {
         steerText(target, text)
         recordDecision(decisionLog, target, { turn, kind: 'gate', decision: 'delivered', ...payload })
@@ -370,9 +475,9 @@ function registerReminders(ctx, nudge, checkpoint, observation, gates) {
         lastDeliveredTurn.set(parentId, turn)
         return true
       }
-      // 派发工具名复用 nudge 的解析结果：两套名单若各写一份，配置改了其中
-      // 一处就会出现「nudge 认为派发过、闸门认为干等」的矛盾（契约 §3）。
-      const wait = evaluateWaitGate(events, turn, gates, nudge.delegationTools)
+      // 派发工具名复用写入守卫的解析结果：两套名单若各写一份，配置改了其中
+      // 一处就会出现「守卫认为派发过、闸门认为干等」的矛盾（spec §3）。
+      const wait = evaluateWaitGate(events, turn, gates, writePolicy.delegationTools)
       if (wait !== null) return deliver(renderWaitGate(gates.wait.text, wait), { gate: 'wait', observations: wait.count })
 
       const verify = evaluateVerifyGate(events, turn, gates)
@@ -408,61 +513,6 @@ function registerReminders(ctx, nudge, checkpoint, observation, gates) {
   }
 
   /**
-   * Evaluate one turn for a missed dispatch and maybe deliver the nudge.
-   *
-   * The nudge yields in this order: a checkpoint already delivered this turn
-   * (handled before the call, so nothing is logged twice), the turn is an
-   * acceptance turn for a child report (`handled`), the previous turn received a
-   * checkpoint (`grace`), or the turn's own prose already explained the skip.
-   * Each of the three logged silences is written only when the nudge condition
-   * itself holds, so a quiet ordinary turn adds no lines.
-   *
-   * 0.4.0: the evaluator returns whether it delivered, marks the turn as
-   * evaluated (for the deferred check), and accepts `deferred` — a turn closed
-   * by interruption never reaches `agent/turn-stopping`, so its evaluation runs
-   * when the NEXT turn closes, and the decision line carries `deferred: true`.
-   * @param target - the agent whose turn is closing.
-   * @param parentId - that agent's session id.
-   * @param turn - the turn being evaluated.
-   * @param isRootAgent - whether the agent may be nudged at all.
-   * @param options - `{ handled, deferred }`.
-   * @returns true when the nudge was delivered.
-   */
-  const evaluateNudgeTurn = (target, parentId, turn, isRootAgent, { handled = false, deferred = false } = {}) => {
-    // Children cannot delegate, and their writes are already covered by the
-    // parent's own turn — nudging them would only add noise.
-    if (!nudge.enabled || !isRootAgent) return false
-    if (!Number.isInteger(turn) || lastNudgedTurn.get(parentId) === turn) return false
-    if (lastDeliveredTurn.get(parentId) === turn) return false
-    lastEvaluatedTurn.set(parentId, turn)
-    const events = target?.session?.snapshotEvents?.() ?? []
-    const summary = summarizeTurn(events, turn, nudge)
-    if (!shouldNudge(summary, nudge)) return false
-    lastNudgedTurn.set(parentId, turn)
-    const withTurn = { ...summary, turn, ...(deferred ? { deferred: true } : {}) }
-    if (handled) {
-      recordDecision(decisionLog, target, { ...withTurn, kind: 'nudge', decision: 'suppressed', reason: 'handled' })
-      return false
-    }
-    // Known cost: a real miss right after an acceptance turn goes unreminded.
-    // The direction is deliberate — fewer interruptions over one lost nudge.
-    if (lastCheckpointTurn.get(parentId) === turn - 1) {
-      recordDecision(decisionLog, target, { ...withTurn, kind: 'nudge', decision: 'suppressed', reason: 'grace' })
-      return false
-    }
-    // A turn that already said why it skipped the dispatch gets no message:
-    // repeating it back is pure noise. The decision is still logged.
-    if (justifiedInTurn(events, turn, nudge.justifiedPatterns)) {
-      recordDecision(decisionLog, target, { ...withTurn, kind: 'nudge', decision: 'suppressed', reason: 'justified' })
-      return false
-    }
-    steerText(target, renderNudge(nudge.text, withTurn))
-    recordDecision(decisionLog, target, { ...withTurn, kind: 'nudge', decision: 'delivered' })
-    lastDeliveredTurn.set(parentId, turn)
-    return true
-  }
-
-  /**
    * Append one observation row for a root-agent turn that wrote or delegated
    * (0.4.0, G1/G7 evidence floor).
    *
@@ -492,7 +542,13 @@ function registerReminders(ctx, nudge, checkpoint, observation, gates) {
       const cwd = target?.session?.cwd ?? target?.session?.header?.cwd
       if (typeof cwd !== 'string' || cwd === '') return
       const events = target?.session?.snapshotEvents?.() ?? []
-      const summary = summarizeTurn(events, turn, nudge)
+      // 口径来自写入守卫：写入工具、派发工具、控制面名单都只有这一份真相
+      // （0.9.0；此前复用的是 nudge 段）。
+      const summary = summarizeTurn(events, turn, {
+        writeTools: writePolicy.tools,
+        delegationTools: writePolicy.delegationTools,
+        controlPlanePatterns: writePolicy.allowlist,
+      })
       if (summary.writes === 0 && summary.shellWrites === 0 && summary.delegations === 0) return
       const dir = join(cwd, observation.dir)
       mkdirSync(dir, { recursive: true })
@@ -526,42 +582,22 @@ function registerReminders(ctx, nudge, checkpoint, observation, gates) {
     const handle = ({ agent: scopedAgent, turn } = {}) => {
       try {
         const target = scopedAgent ?? agent
-        // Deferred evaluation (0.4.0, N2): a turn closed by user interruption
-        // never fires this hook — exactly the turns that most need the nudge
-        // (session-82db5b7d T5: 43 edits / 14 files / 0 dispatches, aborted by
-        // the user's "为什么不派发子智能体？"). Only the immediate predecessor
-        // is re-checked, and only after some turn was already evaluated, so a
-        // freshly attached session never retro-nudges its backlog.
-        const lastEvaluated = lastEvaluatedTurn.get(parentId)
-        let deferredDelivered = false
-        if (Number.isInteger(turn) && lastEvaluated !== undefined && lastEvaluated < turn - 1) {
-          deferredDelivered = evaluateNudgeTurn(target, parentId, turn - 1, isRootAgent, { deferred: true })
-        }
         const verdict = checkpoint.enabled
           ? drain(parentId, target, turn)
           : { delivered: false, handled: false, readOnly: false, empty: true }
         if (verdict.delivered) {
-          if (Number.isInteger(turn)) {
-            lastDeliveredTurn.set(parentId, turn)
-            lastCheckpointTurn.set(parentId, turn)
-          }
+          if (Number.isInteger(turn)) lastDeliveredTurn.set(parentId, turn)
           observeTurn(target, parentId, turn, isRootAgent)
           return
         }
-        // 0.6.0：闸门排在 checkpoint 之后、nudge 之前（契约 §5）。checkpoint
-        // 已投递会直接 return，所以这里只在它让位时执行。闸门投递后设
-        // `lastDeliveredTurn` 让 nudge 让位，但仍补一条观测行保持语义。
-        // 若 deferred（N−1）nudge 已经占用这次收尾，本回合不再叠加闸门——
-        // 宁可少一条提醒，也不要一次收尾投递两条 steer。
-        if (!deferredDelivered && evaluateGates(target, parentId, turn, isRootAgent)) {
+        // 0.6.0：闸门排在 checkpoint 之后（契约 §5）。checkpoint 已投递会直接
+        // return，所以这里只在它让位时执行。闸门投递后设 `lastDeliveredTurn`，
+        // 但仍补一条观测行保持语义。0.9.0 之后本回合不再有第二个提醒候选——
+        // 漏派发约束已前移到工具边界（`makeGuard`），收尾只做观测。
+        if (evaluateGates(target, parentId, turn, isRootAgent)) {
           observeTurn(target, parentId, turn, isRootAgent)
           return
         }
-        // When the deferred nudge already consumed this turn's one reminder,
-        // the current turn is deliberately left unevaluated: the next closing
-        // turn picks it up through the same deferred path, so no fact is lost
-        // and no turn ever carries two nudges.
-        if (!deferredDelivered) evaluateNudgeTurn(target, parentId, turn, isRootAgent, { handled: verdict.handled })
         observeTurn(target, parentId, turn, isRootAgent)
       } catch {
         // Observation is advisory: never fail a turn on it.

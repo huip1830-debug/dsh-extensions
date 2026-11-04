@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Dispatch Protocol",
-    "description": "Inject always-on delegation discipline into the system prompt: survey before dispatch, self-contained briefs, the dispatcher runs one integrated verification, reviews cover only the change set, the dispatcher owns commits."
+    "description": "Inject always-on delegation discipline into the system prompt, checkpoint each completed child agent, and guard the tool boundary: a root agent's write/edit outside the control-plane allowlist is rejected unless dispatch/override.json carries a reason written in this session."
   }
 }

@@ -14,8 +14,8 @@
 // 不阻断任何工具调用。判定与投递失败一律吞掉——闸门是提醒，不是门禁。
 
 import {
-  DEFAULT_CONTROL_PLANE_PATTERNS, DEFAULT_PWSH_NUDGE_SHELL_PATTERN, DEFAULT_WRITE_TOOLS, isControlPlanePath,
-} from './nudge.mjs'
+  DEFAULT_CONTROL_PLANE_PATTERNS, DEFAULT_PWSH_SHELL_PATTERN, DEFAULT_WRITE_TOOLS, isControlPlanePath,
+} from './tool-calls.mjs'
 
 /** await 闸门的默认查询工具：全是「只读状态」类工具，不产生新证据。 */
 export const DEFAULT_WAIT_TOOLS = ['list_agents', 'job_list', 'schedule_list', 'get_goal']
@@ -32,7 +32,7 @@ export const DEFAULT_VERIFY_COMMANDS = ['npm test', 'npm run build', 'dotnet tes
 /**
  * 收口动作里的 commit/push 识别（字符串形式，加载期编译）。
  *
- * 与 nudge 的 shell 变更档位不同，这里专门匹配 git commit / push——它们是
+ * 与观测档位的 shell 变更判定不同，这里专门匹配 git commit / push——它们是
  * 「宣布改动完成」的动作，而不是又一次文件写入。`-C <path>` 的三种写法沿用
  * 0.4.1 的修复口径（S6 t6 曾整条漏判）。
  */
@@ -171,7 +171,7 @@ export function resolveGates(source = {}) {
 /**
  * 从工具调用参数里取 shell 命令。
  *
- * nudge.mjs 里有同名私有实现；白名单不允许改它，所以这里保留一份最小副本。
+ * tool-calls.mjs 里有同名私有实现；白名单不允许改它，所以这里保留一份最小副本。
  * 解析失败返回 undefined——参数坏了不能让闸门判定抛错。
  * @param raw - `tool/call` 里 JSON 编码的 arguments。
  * @returns 命令文本，或 undefined。
@@ -189,7 +189,7 @@ function readCommand(raw) {
 /**
  * 从工具调用参数里取目标路径（0.7.0 ContractGate/ReviewGate 共用）。
  *
- * nudge.mjs 有同名私有实现；白名单不允许改它，所以这里保留最小副本。路径
+ * tool-calls.mjs 有同名私有实现；白名单不允许改它，所以这里保留最小副本。路径
  * 缺失或参数损坏时返回 undefined——匹配不到就不提醒，绝不能抛错。
  * @param raw - `tool/call` 里 JSON 编码的 arguments。
  * @returns 路径文本，或 undefined。
@@ -283,8 +283,8 @@ function touchedWorkingTree(call, results, patterns = DEFAULT_CONTROL_PLANE_PATT
   }
   if (name !== 'pwsh') return false
   const command = readCommand(data?.arguments)
-  if (command === undefined || !DEFAULT_PWSH_NUDGE_SHELL_PATTERN.test(command)) return false
-  // 复用 nudge 档位：git commit 不是工作树内容变更，不能把「收口动作」本身
+  if (command === undefined || !DEFAULT_PWSH_SHELL_PATTERN.test(command)) return false
+  // 复用观测档位：git commit 不是工作树内容变更，不能把「收口动作」本身
   // 算成一次新的脏改动（0.4.1 I3）。
   const message = results.get(data?.callId)
   return message === undefined || message.isError !== true
@@ -343,7 +343,7 @@ export function analyzeVerification(events, verify) {
  * @param events - `session.snapshotEvents()`。
  * @param turn - 正在收尾的回合。
  * @param gates - 解析后的 `gates` 段。
- * @param delegationTools - 派发工具名（复用 `nudge.delegationTools`，契约 §3）。
+ * @param delegationTools - 派发工具名（复用 `writePolicy.delegationTools`，契约 §3）。
  * @returns `{ count, tools }`，不该提醒时返回 null。
  */
 export function evaluateWaitGate(events, turn, gates, delegationTools = []) {

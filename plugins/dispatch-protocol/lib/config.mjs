@@ -33,8 +33,15 @@
 // capped by file count.
 // Ceremony scales with risk (0.8.1): the control plane, a light batch, a full
 // batch, and the bounded direct edit below.
+//
+// 0.9.0: the discipline moved from a turn-end reminder (nudge) to the tool
+// boundary (write policy). Rule 1 therefore names the exemption artifact —
+// `dispatch/override.json` — instead of asking for a prose override line; the
+// rest of the rules, the footer and the gate texts are unchanged.
 
-import { resolveNudge } from './nudge.mjs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { resolveWritePolicy } from './write-policy.mjs'
 import { resolveGates } from './gates.mjs'
 
 // 0.6.0/0.7.0 状态闸门的默认值统一从 config.mjs 导出（契约 §7）：默认值只有
@@ -48,9 +55,18 @@ export {
   DEFAULT_WAIT_TEXT, DEFAULT_WAIT_THRESHOLD, DEFAULT_WAIT_TOOLS,
 } from './gates.mjs'
 
+// 0.9.0 写入守卫的默认值同样从这里转出：README/配置表与测试都只认这一个入口。
+export {
+  DEFAULT_ALLOWLIST, DEFAULT_OVERRIDE_PATH, DEFAULT_WRITE_POLICY_MODE,
+  evaluateWritePolicy, isAllowedPath, readOverride, renderDenyText, resolveWritePolicy,
+} from './write-policy.mjs'
+
+/** 决策日志默认路径（checkpoint + 写入守卫 + 状态闸门共用一份）。 */
+export const DEFAULT_LOG = join(tmpdir(), 'dispatch-protocol-decisions.jsonl')
+
 /** The six non-negotiable rules; overridable through `config.rules`. */
 export const DEFAULT_RULES = [
-  '主控只做控制面，不做执行面：允许的动作只有七类——问用户、冻结契约与账本（只写 dispatch/state.md、dispatch/ledger/*、docs/superpowers/specs/*、验收台账）、派发与调度、裁决子代理证据（只读报告 + diff + 指定行）、跑唯一一条集成命令、提交交付、结束回合等事件。执行面一律派发：src/**、tests/**、scripts/** 的任何写入，真实环境/账套排错，构建与失败测试修复，文档正文，测试，评审与评审修复；唯一例外是用户显式要求主控亲自做，记一行 override。有界直改：已闭合批次上的收尾修复，允许主控直接改单文件 ≤10 行，改完记一行台账并重开受影响评审切片；同一批次累计 ≤20 行，第二个文件或超限即停手转派。先勘察后派发：派发前把「文件:行号 + 相关代码 + 结论 + 不确定项」写成现状文件并在派发中引用，同时给出可改文件白名单（逐条列名；以「全批结束后能用一条集成命令验收」为界）；勘察批次的唯一触发条件是主控现有上下文写不出这份现状，刚读过相关模块或属已知模式克隆时免派勘察。禁止把「调研 X 然后实现」交给执行类子代理。',
+  '主控只做控制面，不做执行面：允许的动作只有七类——问用户、冻结契约与账本（只写 dispatch/state.md、dispatch/ledger/*、docs/superpowers/specs/*、验收台账）、派发与调度、裁决子代理证据（只读报告 + diff + 指定行）、跑唯一一条集成命令、提交交付、结束回合等事件。执行面一律派发：src/**、tests/**、scripts/** 的任何写入，真实环境/账套排错，构建与失败测试修复，文档正文，测试，评审与评审修复；唯一例外是用户显式要求主控亲自做：先在 `dispatch/override.json` 写 `{"reason":"…","source":"…"}` 再动手，守卫只认这个文件（每会话有效，新会话需重写）；有界直改同样先写 override。有界直改：已闭合批次上的收尾修复，允许主控直接改单文件 ≤10 行，改完记一行台账并重开受影响评审切片；同一批次累计 ≤20 行，第二个文件或超限即停手转派。先勘察后派发：派发前把「文件:行号 + 相关代码 + 结论 + 不确定项」写成现状文件并在派发中引用，同时给出可改文件白名单（逐条列名；以「全批结束后能用一条集成命令验收」为界）；勘察批次的唯一触发条件是主控现有上下文写不出这份现状，刚读过相关模块或属已知模式克隆时免派勘察。禁止把「调研 X 然后实现」交给执行类子代理。被 `dispatch-protocol` 守卫拦截时，按错误信息二选一（派发 / 写 override），不要重试同一个调用。',
   '执行类派发必须自包含：至少含【现状】【允许修改/允许读取】【验证：唯一一条命令——必须是覆盖本批改动的窄命令，全量构建/全量测试归派发方的集成命令】【预算：墙钟与步数上限】【输出格式】。预算过半时必须发一条一句话进度（改到哪、还差什么、有无契约疑点）；超预算先报阻塞点再停，不得自行续期。子代理遇到清单外信息或现状与代码不符时停报 NEEDS_CONTEXT，不得自行扩大范围。派发即冻结：该批运行期间，白名单外的契约面（src/schema/类型/路由）只读；派发方必须改时先停子代理（interrupt）、改完重派并注明「契约已变」。',
   '验收与等待：验收分两层，执行性验证只归派发方——子代理只跑自己那部分的窄验证（负责归因），派发方在相关子代理全部结束后跑那条集成命令（负责集成状态）并留存退出码；宽窄混用会让两边都失真，同一条命令全系统只跑一次，不重复付费。前提：那条集成命令必须覆盖各批窄验证断言点的并集；某批窄验证断言了集成命令覆盖不到的行为时，该批窄命令由派发方自己再跑——这是唯一的复跑例外。派发后不要守着：一批最多一次主动检查（预算过半时），其余时间结束回合等完成事件；不要用一串 Start-Sleep/list_agents 轮询。未跑集成命令不得标记完成。',
   '评审只审变更集，不审仓库：命中 gated 的批次另派只读评审子代理（其中判为轻批的批次除外——gated 是需求级判定，不改变轻批免独立评审），输入只有需求原文、冻结契约、本批白名单并集的 diff（不是工作区快照）、派发方复跑的集成结果（退出码与输出全文）。逐条给 PASS|FAIL + 文件:行号，不逐文件通读未改动文件；需求本身是全局不变量（「彻底统一」「不得残留」「所有调用方」这类）时加一栏「全仓不变量核查」：给定检索词与目录，输出命中点排除表，用户可见的遗漏判 FAIL。包超过 20 个文件或 3 个契约面就按契约面切片；单个契约面自身超 20 个文件时按读写路径再切，并在评审报告里写明切法；跨切片一致性另设一包，只核接口/类型/别名表/路由边界，不重复逐文件。评审只做 read/grep 语义核对（纯读取的 git diff、Select-String、程序化比对都算），禁止重跑构建/测试/集成命令，不得采信实现者的自述或其测试通过，全 PASS 须说明每条例子的验证方式；可给建议但不得改文件，裁决归派发方。评审后任何改动（含派发方自修）重开受影响切片。',
@@ -148,14 +164,29 @@ export function resolveConfig(config = {}) {
     footer,
   ].join('\n')
 
-  // Validated even when the checkpoint is the only mechanism in use: a typo in
-  // `nudge.threshold` must fail at load time, not silently never fire.
-  const nudge = resolveNudge(source.nudge)
+  // 0.9.0：`nudge` 段出现即加载期抛错——静默忽略会让旧配置以为提醒仍在生效，
+  // 实际一条都不认；消息里直接给迁移指引（spec §3）。
+  if (source.nudge !== undefined) {
+    throw new Error('dispatch-protocol: `nudge` 段已在 0.9.0 移除（漏派发提醒换成写入守卫 writePolicy）。迁移：nudge.log → log；nudge.delegationTools → writePolicy.delegationTools；nudge.justifiedPatterns 废弃，豁免改由 dispatch/override.json 承载；nudge.enabled/threshold/text/writeTools/controlPlanePatterns 删除（writeTools → writePolicy.tools，controlPlanePatterns → writePolicy.allowlist）')
+  }
+
+  // `log` 取代 `nudge.log`：checkpoint、写入守卫与状态闸门共用一份决策日志，
+  // false 关闭全部日志。加载期校验，避免路径拼错时静默不写；空串按非法处理
+  // （回落默认路径会让 README 的「non-empty path」承诺与实现不一致）。
+  if (source.log !== undefined && source.log !== false
+    && (typeof source.log !== 'string' || source.log.trim() === '')) {
+    throw new Error('dispatch-protocol: log must be a non-empty path or false')
+  }
+  const log = source.log === false ? false : (source.log ?? DEFAULT_LOG)
+
+  // 写入守卫同样在加载期校验（spec §3）：`mode` 拼错或 `tools: []` 若静默降级，
+  // 守卫会「永远放行」或「永远不拦」，和「配置正确但没命中」在日志里无法区分。
+  const writePolicy = resolveWritePolicy(source.writePolicy)
 
   // 0.6.0 状态闸门同样在加载期校验（契约 §6）：`threshold: 0` 或一条无法编译的
   // commitPattern 若静默降级，闸门会「永远不触发」，和「配置正确但没命中」
   // 在日志里无法区分。即使 gates.enabled 为 false 也照样校验。
   const gates = resolveGates(source.gates)
 
-  return { enabled: source.enabled !== false, order, rules, footer, text, checkpoint, observation, nudge, gates }
+  return { enabled: source.enabled !== false, order, rules, footer, text, checkpoint, observation, writePolicy, log, gates }
 }

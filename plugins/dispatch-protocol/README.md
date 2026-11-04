@@ -2,11 +2,11 @@
 
 > 部署状态不在本文档硬编码：desktop 的实际版本以 profile 安装为准（`dsh plugin --profile desktop list` 或 `profiles/desktop/node_modules/dispatch-protocol/package.json`）；probe 为 `link:` → 直接吃工作区。发布顺序固定为：提交推送 → `dsh plugin --profile desktop update dispatch-protocol` → 重启 DSH → 台账记一笔。没走完不算发布。
 
-把「派发纪律」常驻注入 DSH。四个机制，都不拦截任何调用：
+把「派发纪律」常驻注入 DSH。四个机制：三个不拦截调用（注入文本 + 收尾提醒 + 状态闸门），一个在工具边界拦截越界写入：
 
 1. **系统提示词 section**：每次请求（主控与每个子代理）都会看到六条规则，且**按职责排序**（主控只做什么 → 子代理可碰什么、能花多久 → 谁付执行成本、怎么等 → 评审看什么 → 谁拥有提交权 → 什么能并行、怎么判级）。规则在插件里，不依赖模型是否加载了某个 skill。
 2. **完成检查点**：子代理结束（`stopReason === 'completed'`）时只登记「待验收」，等父代理下一个回合收尾（`agent/turn-stopping`）才判定：已验收就静默丢弃，未验收才提醒读 diff、核对它报告的退出码，并在全批结束后跑一次集成命令。静态规则容易被跳过，时点提醒不会；**父代理已经按子代理汇报处理过的不再重复提醒**。
-3. **漏派发提示**：一回合改了多个文件却一次没派发时，在本回合收尾前给主控一条提醒。0.8.0 起规则 1 是硬边界：执行面的产出物一律由子代理写；提醒只负责在越界发生时把事实摆出来，不负责批准越界。
+3. **写入守卫（0.9.0）**：工具边界拦截。根代理用 `write`/`edit` 写控制面名单（`dispatch/`、`docs/superpowers/specs/`）之外的文件时，DSH 的 `ctx.tools.guard` 当场拒绝这一次调用——模型看到 `Error: <reason>`，回合继续；唯一豁免凭据是本会话写下的 `dispatch/override.json`。纠正点因此从「回合收尾」前移到「动作之前」，零模型步进。详见「写入守卫（0.9.0）」。
 4. **状态闸门（0.6.0/0.7.0）**：等待期只读轮询（WaitGate）、「验证之后又改却准备 present/commit」（VerifyGate）、有子代理在跑时改写契约文件（ContractGate）、只读评审后改动工作区（ReviewGate）、空回合兜底（HandoffGate）各提醒一次；同样只读事件、不拦截调用，详见「状态闸门（0.6.0/0.7.0）」。
 
 ## 为什么不用 AGENTS.md
@@ -19,7 +19,7 @@
 
 默认六条规则 + 一段收口（`lib/config.mjs` 的 `DEFAULT_RULES` / `DEFAULT_FOOTER`）。顺序按「谁决定什么」排，不按加入时间排，这样以后改规则只会落在对应那一条上，不会习惯性追加第七条：
 
-1. **主控只做控制面，不做执行面**：允许的动作只有七类（问用户、冻结契约与账本、派发与调度、裁决子代理证据、跑唯一一条集成命令、提交交付、结束回合等事件）；`src/**`、`tests/**`、`scripts/**` 的任何写入、真实环境/账套排错、构建与失败测试修复、文档正文、测试、评审与评审修复一律派发，唯一例外是用户显式要求主控亲自做（记一行 override）。**先勘察后派发**：派发前把「文件:行号 + 相关代码 + 结论 + 不确定项」写成现状文件并在派发中引用，同时给出可改文件白名单（逐条列名；以「全批结束后能用一条集成命令验收」为界）；勘察批次的唯一触发条件是主控现有上下文写不出这份现状——刚读过相关模块或属已知模式克隆时免派勘察。禁止把「调研 X 然后实现」交给执行类子代理。**有界直改**：已闭合批次的收尾修复可由主控直接改单文件 ≤10 行（同批累计 ≤20 行），记一行台账并重开受影响评审切片；第二个文件或超限即转派。
+1. **主控只做控制面，不做执行面**：允许的动作只有七类（问用户、冻结契约与账本、派发与调度、裁决子代理证据、跑唯一一条集成命令、提交交付、结束回合等事件）；`src/**`、`tests/**`、`scripts/**` 的任何写入、真实环境/账套排错、构建与失败测试修复、文档正文、测试、评审与评审修复一律派发，唯一例外是用户显式要求主控亲自做：先在 `dispatch/override.json` 写 `{"reason":"…","source":"…"}` 再动手，守卫只认这个文件（每会话有效，新会话需重写）；被守卫拦截时按错误信息二选一（派发 / 写 override），不要重试同一个调用。**先勘察后派发**：派发前把「文件:行号 + 相关代码 + 结论 + 不确定项」写成现状文件并在派发中引用，同时给出可改文件白名单（逐条列名；以「全批结束后能用一条集成命令验收」为界）；勘察批次的唯一触发条件是主控现有上下文写不出这份现状——刚读过相关模块或属已知模式克隆时免派勘察。禁止把「调研 X 然后实现」交给执行类子代理。**有界直改**：已闭合批次的收尾修复可由主控直接改单文件 ≤10 行（同批累计 ≤20 行），同样先写 override，记一行台账并重开受影响评审切片；第二个文件或超限即转派。
 2. **执行类派发必须自包含**：至少含【现状】【允许修改/允许读取】【验证：唯一一条命令】【预算：墙钟与步数上限】【输出格式】。验证必须是覆盖本批改动的**窄命令**——全量构建/全量测试归派发方的集成命令；预算过半时发一句进度（改到哪、还差什么、有无契约疑点），超预算先报阻塞点再停、不得自行续期。子代理遇到清单外信息或现状与代码不符时停报 `NEEDS_CONTEXT`，不得自行扩大范围。**派发即冻结**：该批运行期间白名单外的契约面（`src`/schema/类型/路由）只读，必须改时先 `interrupt_agent` 停批、改完重派并注明「契约已变」。
 3. **验收与等待**：验收分两层，执行性验证只归派发方——子代理只跑自己那部分的窄验证（负责归因），派发方在相关子代理全部结束后跑那条集成命令（负责集成状态）并留存退出码；宽窄混用会让两边都失真，同一条命令全系统只跑一次、不重复付费。**前提（0.5.4 起写进规则文本）**：集成命令必须覆盖各批窄验证断言点的并集；某批窄验证断言了集成命令覆盖不到的行为时，该批窄命令由派发方自己再跑——这是唯一的复跑例外。派发后结束回合等完成事件：预算过半时的一次主动检查是唯一例外，不要用一串 `Start-Sleep`/`list_agents` 轮询。未跑集成命令不得标记完成。
 4. **评审只审变更集，不审仓库**：命中 gated 的批次另派只读评审子代理（其中判为轻批的批次除外——gated 是需求级判定，不改变轻批免独立评审），输入只有需求原文、冻结契约、本批白名单并集的 diff、派发方复跑的集成结果；逐条给 `PASS|FAIL + 文件:行号`。范围、切片与方法是独立的一节，见「评审」。
@@ -64,12 +64,12 @@
 
 - 父代理有 hook 作用域：settle 时登记 pending，并给该父代理挂一个（每个父代理只挂一次）`agent/turn-stopping` 监听；回合收尾时逐个判定，判定完立即从 pending 移除，后续回合不会重复发。
 - 已验收（汇报后整回合有 `tool/call`，且子代理汇报后没再写文件）→ **静默丢弃**：零消息、零额外步骤。
-- 未验收 → `steer` 一条提醒（与 nudge 同机制：回合还开着，花一步）。
+- 未验收 → `steer` 一条提醒（与状态闸门同机制：回合还开着，花一步）。
 - 父代理没有 hook 作用域（如嵌套子代理作父等异常形态）→ **回退**为 settle 时立即 `followup`，判定顺序不变。
 
 真机依据：`session-96dda908` 的父会话 seq——241 子代理汇报 splice → 246 settle（旧版在这里判定）→ 247 检查点误发 → 249 父代理才第一次 `tool/call`（读 diff）。判定比验收早了 3 个事件，正是 0.3.4 要消除的赛跑。离线用例覆盖：settle 后 0 条、回合收尾才补验收仍 0 条（时序赛跑回归）；判定后不重复发；同回合多个 pending 合并为一条波次消息（`checkpoint.waveText`，`{count}`/`{labels}` 占位），已验收的静默丢弃（决定日志仍每个子代理一行）。
 
-**只读跳过（0.3.3 起）**：子代理**整个会话**没有任何一次文件变更调用时，检查点**不发**（0.3.4 起该判定同样挪到 `agent/turn-stopping` 执行）。勘察类子代理只读文件、跑命令、汇报结论，既没有 diff 可读，也没有退出码可核对，提醒只会空转。判定只看 `session.snapshotEvents()` 里 `tool/call`，**尝试即算**——写入被拒绝或抛错也算执行类，照旧发（判定抛错同样照旧发）。判定与 nudge 共用 `callTouchesFile`：`pwsh` 命中变更动词（`Remove-Item`/`Set-Content`/重定向等）也算写——样本 `session-82db5b7d` 的 W-5 纯用 `pwsh` 删文件、零 `write`/`edit`，被判只读而漏验收。真机依据：`session-03f065ca` 回合 3 的勘察子代理 `56f7d82d` 汇报「未修改任何文件」、主控 0 次工具调用，检查点仍然发出，主控只能在回合 4 补一句「只读任务、无命令可复跑」。
+**只读跳过（0.3.3 起）**：子代理**整个会话**没有任何一次文件变更调用时，检查点**不发**（0.3.4 起该判定同样挪到 `agent/turn-stopping` 执行）。勘察类子代理只读文件、跑命令、汇报结论，既没有 diff 可读，也没有退出码可核对，提醒只会空转。判定只看 `session.snapshotEvents()` 里 `tool/call`，**尝试即算**——写入被拒绝或抛错也算执行类，照旧发（判定抛错同样照旧发）。判定与回合观测共用 `lib/tool-calls.mjs` 的 `callTouchesFile`：`pwsh` 命中变更动词（`Remove-Item`/`Set-Content`/重定向等）也算写——样本 `session-82db5b7d` 的 W-5 纯用 `pwsh` 删文件、零 `write`/`edit`，被判只读而漏验收。真机依据：`session-03f065ca` 回合 3 的勘察子代理 `56f7d82d` 汇报「未修改任何文件」、主控 0 次工具调用，检查点仍然发出，主控只能在回合 4 补一句「只读任务、无命令可复跑」。
 
 **去重（0.3.2 起）**：子代理通常先用 `send_message` 汇报，父代理会当场读 diff + 跑集成命令；等 `subagent/end` 再提醒同一件事，父代理只能回一个空回合。所以投递前先判定「父代理是否已经按这份汇报动过手」，满足下列全部条件就**不发**（条件与内部逻辑自 0.3.2 起不变；0.3.4 起判定时机随投递一起挪到 `agent/turn-stopping`，看的是父代理整个回合）：
 
@@ -79,59 +79,71 @@
 
 任一条不成立就照旧发；判定抛错、父代理没有日志、子代理没汇报过，也一律照旧发。**已知边界**：条件 2 不区分那次调用是不是针对这个子代理，属有意近似——宁可少提醒一次，也不要在已验收后重复打扰。
 
-## 漏派发提示
+## 写入守卫（0.9.0）
 
-**0.7.0 及以前**，六条规则只约束派发的**形式**，没有任何机制要求「必须派发」；0.8.0 起规则 1 把执行面划给子代理。历史样本：实测就有会话全程不派发：`session-a80150dd`（2 回合 / 56 步 / 67 次工具调用 / 0 次派发）把 5 个 XAML 同性质改动判成「小改豁免」自己做了，全程没有任何提示。
+**0.7.0 及以前**，六条规则只约束派发的**形式**，没有任何机制要求「必须派发」；0.8.0 起规则 1 把执行面划给子代理。0.8.x 的「漏派发 nudge」在回合收尾才评估，实测投递全部发生在最终答复之后、从未促成派发（2 次投递均误报，历史 45 次去重投递 0 次促成派发，合计 9.45M cache-read，见变更历史 0.9.0）。0.9.0 把约束前移到**工具调用边界**：
 
-本机制把「漏派发」变成可观测事实：
+- **注册**：`apply()` 里 `ctx.effect(() => ctx.tools.guard(guard))`，`inject` 增加 `'tools'`，插件卸载时守卫随 disposer 一起移除；`writePolicy.enabled: false` 或宿主没有 `ctx.tools.guard` 时不注册。
+- **`ctx.tools.guard` 语义**：同步、单调；返回字符串即拒绝**这一次**工具调用，模型收到 `Error: <reason>`，**回合继续**（不是回合级中断）；整个守卫包在 try/catch 里，任何异常按放行处理（fail-open），绝不影响宿主。
+- **判定顺序**：①控制面 allowlist（`writePolicy.allowlist`，默认 `dispatch/`、`docs/superpowers/specs/`）→ 放行，**不写日志**（控制面写入是主控的合法动作，不制造噪音）；②`overridePath` 指向的 override 有效 → 放行，日志 `reason: 'override'`（取不到会话时间戳时记 `override-unbounded`）；③否则拒绝，`reason` 为 `no-override`/`stale`/`invalid`——`mode: enforce` 返回拒绝串，`shadow` 放行且日志带 `mode: 'shadow'`。
+- **豁免（不进入判定）**：没有 `agent`（宿主无作用域）；子代理（`session.header.origin === 'subagent'`，执行面本来就该写）；工具不在 `writePolicy.tools`（默认 `write`/`edit`）；参数里既无 `file_path` 也无 `path`。
+- **路径口径**：`\` → `/`、去 `./`、折叠 `..`；相对路径相对 `session.cwd ?? session.header.cwd`；绝对路径先转 cwd 相对，cwd 外一律视为不在名单；名单大小写不敏感，带尾 `/` 按前缀匹配，无尾 `/` 按词边界（条目本身或 `条目 + '/'`）——避免 `dispatch-notes.md` 被 `dispatch` 误放行。
+- **拒绝串**（模型在 `Error: ` 之后看到的内容，单条模板）：
 
-- **触发点**：`agent/turn-stopping`（serial，回合即将收尾、`turn/end` 提交之前）。这里 `steer` 会让本回合再跑一步，因此提醒只花一步，且**每回合最多一次**（按回合号去重，模型回一句「收到」后继续改文件也不会再触发）。
-- **被打断回合补评估**：回合 N 收尾时，若 N−1 从未做过 nudge 评估且满足条件（≥2 去重文件、0 派发、正文无解释），补发一条；决定行带 `deferred: true`；补评估投递过的回合不再评自己（交给下一回合接手），刚挂上的会话不追溯 backlog。
-- **计数来源**：该回合已提交的 `tool/call` 事件。事件自带 `turn`，所以不需要任何跨回合状态，恢复的会话算出的数字与实时一致。
-- **失败不计数**：写调用的结局要看它的 `tool/result`——`isError === true` 的写入没有落盘，不计入 `writes`/`files`；没有 `callId` 或找不到结果的调用照旧计数（回合被打断时不能把写入抹掉）。
-- **控制面路径豁免（0.8.2 起）**：`dispatch/state.md`、`dispatch/ledger/*`、`docs/superpowers/specs/*` 的 `write`/`edit` 不计入 `writes`/`files`（片段可用 `nudge.controlPlanePatterns` 覆盖）——这些是规则 1 明许的主控控制面写入，不是漏派发信号。
-- **触发条件**：本回合**去重文件数 + shell 变更数** ≥ `nudge.threshold`（默认 2；同一文件多次编辑只算 1；nudge 档不把 `git commit` 算作 shell 变更）**且**派发调用（`subagent`/`subagent_fork`/`workflow`）为 0。
-- **动作**：给主控发一条 `{fileCount}`/`{writes}`/`{files}`/`{turn}` 渲染的提醒，文案为「本回合写入 N 个文件（M 次）：…。这些写入不在主控白名单内——源码/测试/脚本/文档正文一律由子代理写。停止本回合，把剩余工作派成循环批或下一批；只有白名单状态文件可以直接写。」（纯 shell 回合形如「写入 0 个文件（0 次）：另有 2 条 shell 变更命令」），并往决定日志（`nudge.log`，默认 `%TEMP%\dispatch-protocol-decisions.jsonl`，一行一条 JSON）记一笔 `"kind":"nudge"` 的决定。
-- **已解释则静默（0.3.6 起）**：本回合的 `assistant/message` 正文里若已出现 `nudge.justifiedPatterns` 中的任一词（默认 `豁免` / `不派发` / `未派发` / `无需派发` / `不需要派发` / `直接做` / `一条命令验完` / `一处改动的` / `镜像面`），**不发消息**，只往日志记一行 `"decision":"suppressed","reason":"justified"`。多文件写入是常态，模型常常在同一回合已经写清「为什么自己改」，再把问题复述一遍只会让会话窗口多一条噪音——实测 `session-a2e9f600` 的 turn 3：主控正文已写「4 个文件是同一处文案的 4 个镜像面…属于豁免」，提醒仍照样发出，用户只得到一条重复消息。判定只看 `assistant/message`（模型说的话），不看 `tool/result` 文本；只认本回合，别的回合解释过不算。
-- **不适用于子代理**：子代理本身不能再派发，其写操作已经记在父回合里。
+```text
+[dispatch-protocol] 拦截：write 要写 src/service.ts，不在主控白名单内（dispatch/、docs/superpowers/specs/）。
+两条出路：①把这项写入派给执行批；②若用户本轮明确要求主控亲自做，先写 dispatch/override.json（如 {"reason":"用户要求直接修这 4 行"}）再重试。
+```
 
-`write`/`edit` 按**结果**算——成功才计数，被策略拒绝或抛错的调用（`tool/result.isError === true`）不计；`pwsh` 命中变更正则才算 shell 变更；nudge 档不含 `git commit`，checkpoint 档仍含。计数按去重路径：同一文件改多次只算 1 个文件。
+- **override 文件**：`<cwd>/<writePolicy.overridePath>`，默认 `dispatch/override.json`；schema 为 `{"reason":"…","source":"…","createdAt":"…"}`——`reason` 必填且为非空字符串，`source`/`createdAt` 可选、仅供记录。有效性 = JSON 可解析 + `reason` 非空 + **本会话写下**（`mtimeMs >= session.createdAt ?? session.header.createdAt`）。**每会话有效**：新会话不继承，必须重写；取不到会话开始时间时跳过新鲜度判断（fail-open），日志记 `reason: 'override-unbounded'` 以区分。
+- **不适用于子代理**：子代理是执行面，守卫直接放行——派发要的正是它在 `src`/`tests`/`scripts` 里写。
+- **日志**：控制面放行不写行；override 放行、enforce/shadow 下的拒绝都往共用决定日志写一行 `kind: "write-policy"`（守卫没有回合概念，`turn` 恒为 `null`；字段 `tool`/`file`/`mode`/`reason`）。
+
+```json
+{"time":"...","session":"...","turn":null,"kind":"write-policy","decision":"denied","reason":"no-override","tool":"write","file":"src/service.ts","mode":"enforce"}
+```
+
+**已知边界**：
+
+- **`pwsh` 写不拦**：守卫只看 `write`/`edit` 的参数；`pwsh` 里的 `Set-Content`/`Remove-Item`/重定向仍只进回合观测的 `shellWrites`（二期再议）。
+- **只识别 `file_path`/`path`**：两个键都没有时不判定（宁可放行，不猜目录或命令）；工具若改用别的键名，守卫不会拦。
+- **与观测/闸门的口径不同**：观测行按 `writePolicy.tools`/`writePolicy.delegationTools`/`writePolicy.allowlist` 计数，但 `gates` 的 VerifyGate/ReviewGate 仍用旧的 `gates.controlPlanePatterns`（大小写不敏感子串，默认 `dispatch/state.md`、`dispatch/ledger/`、`docs/superpowers/specs/`）——同一份控制面在两处判定宽度不同，属**已知不一致**，二期收敛到 `writePolicy.allowlist`。
+- **`dispatch/override.json` 写入不留守卫日志**：它在主控白名单 `dispatch/` 内，写入照常放行且**不写** `write-policy` 行——它是机器可读的**记录**而非审批门（没有「批准/拒绝」动作，守卫只读它的 `reason` 与 mtime）。审计时直接看该文件与 `dispatch/state.md` 台账（谁在什么时候豁免了什么），不要指望决定日志里出现 override 的写入行。
+- **fail-open**：守卫内部异常一律按放行处理，宿主稳定性优先于拦截完整性；日志写入失败也不会影响调用。
 
 ## 提醒让位（0.3.10 起）
 
-两个提醒与五个状态闸门由同一个 `agent/turn-stopping` 处理器按固定顺序判定：**先 checkpoint，再按 Wait → Verify → Contract → Review → Handoff 顺序判定状态闸门，最后 nudge**，不依赖订阅顺序。同一回合号不同时发 checkpoint 与 nudge（deferred 补评估属于 N−1，可能在同一次回合收尾里与本回合 checkpoint 各发一条）；闸门投递后 nudge 让位；nudge 每回合至多一条，checkpoint 每个未验收子代理一条。
+完成检查点与五个状态闸门由同一个 `agent/turn-stopping` 处理器按固定顺序判定：**先 checkpoint，再按 Wait → Verify → Contract → Review → Handoff 顺序判定状态闸门**，不依赖订阅顺序。`steer` 会让本回合再跑一步，所以同一收尾最多投递一条提醒：checkpoint 占用回合后闸门让位，任一闸门投递后也不再投第二条。**0.9.0 起收尾只剩这一条提醒链**——写入越界由工具边界的写入守卫拦截，属于「动作之前」而不是「回合收尾」。
 
 | 优先级 | 提醒 | 触发 | 让位/静默 |
 |---|---|---|---|
 | 1 | 完成检查点 | 子代理 `completed` + 父代理未验收 | 只读子代理；父代理已按汇报动过手 |
-| 2 | WaitGate | 回合内状态查询 ≥ 阈值且无写入/派发/验证 | 本回合已投递 checkpoint；N−1 的 deferred nudge 已投递；每回合最多一条 |
+| 2 | WaitGate | 回合内状态查询 ≥ 阈值且无写入/派发/验证 | 本回合已投递 checkpoint；每回合最多一条 |
 | 3 | VerifyGate | present/commit 且有成功写入未验证、验证后又脏 | 纯只读 present（零写入）；上一条闸门已投递；每回合最多一条 |
 | 4 | ContractGate | 有未结束子代理时改写契约文件 | 收尾时无活跃子代理；每回合最多一条 |
 | 5 | ReviewGate | 只读评审完成后父代理又写工作区 | 同一轮评审已提醒（warned）；每个 completed 建立新基线；每回合最多一条 |
 | 6 | HandoffGate | 连续空回合 ≥ `emptyTurns` | 回合有工具调用或非空文本；子代理回合；每回合最多一条 |
-| 7 | 漏派发提示 | ≥2 去重文件 + 0 派发 + 正文未解释 | 本回合是验收回合；上一回合（turn-1）刚投递过检查点（一回合宽限）；闸门已投递 |
 
-- **checkpoint 先占用回合**：本回合投递了 checkpoint 就不再评估 nudge。
-- **验收回合静默**：checkpoint 判 `handled`（父代理已按汇报动过手）时，本回合 nudge 不发——这回合本来就在验收，不是漏派。
-- **一回合宽限**：上一回合投递过 checkpoint，本回合 nudge 静默。已知代价：刚验收完确实漏派会少提醒一次，方向是「宁可少打扰」。
-- **checkpoint 自身被跳过**（只读/已验收）时，nudge 仍按自身条件判定；`read-only` 不占用回合。
+- **checkpoint 先占用回合**：本回合投递了 checkpoint，闸门不再评估。
+- **checkpoint 自身被跳过**（只读/已验收）时，闸门仍按自身条件判定；`read-only` 不占用回合，也不写 `lastDeliveredTurn`。
 
 ## 决定日志（0.3.10 起）
 
-checkpoint 与 nudge 的每次判定都写一行，suppressed 也写——否则日志分不清「没触发」和「触发后被静默」；**状态闸门只记 delivered**（闸门不产生 suppressed 行）。默认 `%TEMP%\dispatch-protocol-decisions.jsonl`，`nudge.log` 键名保留：`false` 三个机制都不记，字符串则覆盖路径（checkpoint、nudge 与闸门写同一文件）。
+checkpoint 与写入守卫的每次判定都写一行（守卫的控制面放行除外），checkpoint 的 suppressed 也写——否则日志分不清「没触发」和「触发后被静默」；**状态闸门只记 delivered**（闸门不产生 suppressed 行）。日志键是顶层 `log`（0.9.0 起，取代 `nudge.log`）：默认 `%TEMP%\dispatch-protocol-decisions.jsonl`，`false` 三个机制都不记，字符串则覆盖路径（checkpoint、写入守卫与闸门写同一文件）。
 
 ```json
-{"time":"...","session":"...","turn":36,"kind":"checkpoint|nudge|gate","decision":"delivered|suppressed","reason":"justified|handled|read-only|grace","writes":3,"files":[...],"delegations":0,"gate":"wait|verify|contract|review|handoff","observations":6,"changes":2,"lastVerify":"npm test","emptyTurns":1}
+{"time":"...","session":"...","turn":36,"kind":"checkpoint|gate","decision":"delivered|suppressed","reason":"handled|read-only","childId":"...","label":"...","gate":"wait|verify|contract|review|handoff","observations":6,"changes":2,"lastVerify":"npm test","emptyTurns":1}
+{"time":"...","session":"...","turn":null,"kind":"write-policy","decision":"allowed|denied","reason":"override|override-unbounded|no-override|stale|invalid","tool":"write","file":"src/service.ts","mode":"enforce"}
 ```
 
-- 公共字段：`time`、`session`、`turn`、`kind`、`decision`；`reason` 只在 `suppressed` 时出现。
+- 公共字段：`time`、`session`、`turn`、`kind`、`decision`；`reason` 只在 suppressed 时出现（写入守卫行也带 `reason`）。
 - checkpoint 行额外带 `childId`、`label`（每个 pending 子代理一行）；没有回合可用（无 hook 作用域的回退 `followup`）时 `turn` 为 `null`。
-- nudge 行额外带 `writes`、`files`、`delegations`。补评估行额外带 `deferred: true`。
 - 闸门行额外带 `gate`（`wait`/`verify`/`contract`/`review`/`handoff`）：wait 行带 `observations`（查询次数）；verify 行带 `changes`（脏改动数）与 `lastVerify`（命令或 `null`）；contract/review 行带 `files`（命中的去重路径）；handoff 行带 `emptyTurns`（连续空回合数）。
+- 写入守卫行：`turn` 恒为 `null`（守卫没有回合概念）；`decision` 为 `allowed`（override 放行）或 `denied`；`reason` 为 `override`/`override-unbounded`/`no-override`/`stale`/`invalid`；`tool`/`file` 是被判定或拦下的具体调用（`file` 为模型原样给出的路径），`mode` 只在拒绝行出现。控制面名单内放行**不写行**。
 
 ## 回合观测
 
-根代理回合只要发生了写入或派发（写入次数、shell 变更次数、委派次数任一非零），其中控制面路径（state/ledger/specs）的写入不计入，收尾时往 `<cwd>/dispatch/runs/<sessionId>.jsonl` 追加一行，一行一条 JSON：
+根代理回合只要发生了写入或派发（写入次数、shell 变更次数、委派次数任一非零），其中控制面路径（`writePolicy.allowlist`，默认 `dispatch/`、`docs/superpowers/specs/`）的写入不计入，收尾时往 `<cwd>/dispatch/runs/<sessionId>.jsonl` 追加一行，一行一条 JSON：
 
 ```json
 {"time":"...","session":"...","turn":36,"writes":3,"files":["a.ts","b.ts"],"shellWrites":1,"failedWrites":0,"delegations":0}
@@ -139,6 +151,7 @@ checkpoint 与 nudge 的每次判定都写一行，suppressed 也写——否则
 
 - 一行写明：时间、回合号、文件集、写入次数、shell 变更次数、委派次数。
 - **同一 `(session, turn)` 只保留首行**：`steer` 会让同一回合再跑一步、`agent/turn-stopping` 二次触发，此时丢弃 steer 之后那行快照——首行才是自然的回合末快照。
+- **写调用按结果算**：`write`/`edit` 成功才计数（`tool/result.isError === true` 的失败调用计入 `failedWrites`、不进 `files`；没有对应结果的调用照算，回合被打断时不能把写入抹掉）；`pwsh` 命中 `DEFAULT_PWSH_SHELL_PATTERN` 才算 `shellWrites`，观测档不计 `git commit`。写入守卫只看 `write`/`edit` 的参数路径，不解析 `pwsh`。
 - **观测不是门禁**：不回读、不阻断任何事，写盘失败静默吞掉（目录不可写、磁盘满都不会让回合失败）。
 - **开关**：`observation.enabled: false` 关闭；`observation.dir: false` 一并关闭；字符串则改目录（相对会话 cwd，默认 `dispatch/runs`）。
 
@@ -156,14 +169,14 @@ checkpoint 与 nudge 的每次判定都写一行，suppressed 也写——否则
 
 - **验证成功口径**：`pwsh` 命中 `gates.verify.commands`（大小写不敏感子串），有对应 `tool/result`、`isError !== true`、结果文本无 `exit code: N` 或 `N === 0`。失败的验证不算验证——一条红的 `npm test` 不能把闸门永久静音。
 - **纯只读 present 不提醒**：整会话零写入、也从未验证时没有 diff 可验（例如 present 一份报告/计划），VerifyGate 不触发（契约 §11-A）。
-- **脏判定**：最近一次成功验证之后，存在成功的 write/edit，或命中 `DEFAULT_PWSH_NUDGE_SHELL_PATTERN` 的 pwsh（复用 nudge 档位，不计 `git commit`）。没有对应结果的调用按脏处理——宁可多提醒，也不要把被中断的写入抹掉。
-- **控制面路径豁免（0.8.2 起）**：VerifyGate 的脏判定与 ReviewGate 的写入扫描都跳过 `dispatch/state.md`、`dispatch/ledger/*`、`docs/superpowers/specs/*`（`gates.controlPlanePatterns`，解析后同时挂到 `gates.verify`/`gates.review`），控制面写入不计入提醒，不会让验证或评审失效、也不会强制冗余复跑。
+- **脏判定**：最近一次成功验证之后，存在成功的 write/edit，或命中 `DEFAULT_PWSH_SHELL_PATTERN` 的 pwsh（观测档，不计 `git commit`）。没有对应结果的调用按脏处理——宁可多提醒，也不要把被中断的写入抹掉。
+- **控制面路径豁免（0.8.2 起）**：VerifyGate 的脏判定与 ReviewGate 的写入扫描都跳过 `dispatch/state.md`、`dispatch/ledger/*`、`docs/superpowers/specs/*`（`gates.controlPlanePatterns`，解析后同时挂到 `gates.verify`/`gates.review`），控制面写入不计入提醒，不会让验证或评审失效、也不会强制冗余复跑。**口径注意**：这里仍是 0.8.2 的子串粗判，与写入守卫的 `writePolicy.allowlist`（前缀 + 词边界）不同源，属已知不一致，二期收敛。
 - **ContractGate 只看收尾时刻**：`activeChildren` 在 `agent/created` 登记、`subagent/end` 标 `ended`；子代理在写入之后、回合收尾之前结束的，本闸门不会触发（契约 §3 已知边界）。契约文件按路径大小写不敏感子串识别，默认只认 `contract`。**误报**：`src/contracts.ts`、`tmp/contract-notes.md` 在子代理运行时同样命中（`patterns` 是路径子串，不是文件类型），且失败的 write（`isError`）也按 §3 字面视为写入——提醒是建议性的，按需缩小 `patterns`。
 - **ReviewGate 只看「有评审完成 + 之后有写入」**：label 以 `gates.review.labelPrefixes` 开头（默认 `只读评审`/`只读复审`）；任一评审子代理 completed 都建立新基线（`since=max(旧基线,当前父事件长度)`、`warned=false`）；不解析评审报告的 PASS/FAIL——FAIL 后返修同样应重开，方向一致。非评审子代理（勘察/实现）不改变状态（契约 §4 已知边界）。**`warned` 在下一轮评审 `created` 或任一评审 `completed` 时重置；每个基线只提醒一次；同一波次里第二个评审切片完成会重新建立基线。** 同一 childId 的重复 settle 不会重建基线（契约 §12-B）。
 - **HandoffGate 是 best-effort**：若宿主在空流/中断回合根本不再触发 `agent/turn-stopping`，本闸门无法提醒；连续空回合会在下一个空回合再次提醒（弱提醒，不阻断）。**空回合口径**：只认 `type:'text'` 非空文本，仅 reasoning、无 text 的回合也算空回合。
-- **让位顺序**：checkpoint → Wait → Verify → Contract → Review → Handoff → nudge。前一环投递后，后面的机制让位；闸门投递后设 `lastDeliveredTurn`，nudge 让位；闸门投递仍写回合观测行。**同回合已投递过任何提醒（checkpoint/nudge/闸门）→ 后续收尾不再发闸门**（契约 §11-A：一条 steer 之后不叠加第二条）。若 N−1 的 deferred nudge 已占用本次收尾，本回合不再叠加闸门（宁可少一条提醒，也不要一次收尾投递两条 steer）。
-- **配置边界**：派发工具名复用 `nudge.delegationTools`（不新增配置键）；`{lastVerify}` 为 `null` 时文案渲染「从未验证」。
-- **已知误报与边界**：`present` 只按工具名识别；`pwsh` 里的 `git commit` 即使写在未执行分支也会触发（与 nudge 的过度包含口径一致）；验证命令按子串匹配，`npm test -- --watch=false` 也算 `npm test`。**子串匹配的误报**：`Get-Content tsconfig.json` 会命中 `tsc`、`cat jest.config.js` 会命中 `jest`，非代码会话请按需追加 `gates.verify.commands`。子代理回合不判定。闸门是提醒而非门禁——它不会阻止 `present`/`commit`，只要求模型先补一次集成命令。
+- **让位顺序**：checkpoint → Wait → Verify → Contract → Review → Handoff。前一环投递后，后面的机制让位；闸门投递后设 `lastDeliveredTurn`；闸门投递仍写回合观测行。**同回合已投递过任何提醒（checkpoint/闸门）→ 后续收尾不再发闸门**（契约 §11-A：一条 steer 之后不叠加第二条）。
+- **配置边界**：派发工具名复用 `writePolicy.delegationTools`（与观测行、WaitGate 共用一份名单）；`{lastVerify}` 为 `null` 时文案渲染「从未验证」。
+- **已知误报与边界**：`present` 只按工具名识别；`pwsh` 里的 `git commit` 即使写在未执行分支也会触发（与观测的过度包含口径一致）；验证命令按子串匹配，`npm test -- --watch=false` 也算 `npm test`。**子串匹配的误报**：`Get-Content tsconfig.json` 会命中 `tsc`、`cat jest.config.js` 会命中 `jest`，非代码会话请按需追加 `gates.verify.commands`。子代理回合不判定。闸门是提醒而非门禁——它不会阻止 `present`/`commit`，只要求模型先补一次集成命令。
 
 ## 交接（0.7.0）
 
@@ -190,7 +203,7 @@ HandoffGate 只提醒「这个回合什么都没产出」，它不写文件（�
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
-| `enabled` | `true` | 关闭后不注册任何 section |
+| `enabled` | `true` | `false` = 总开关关闭：不注入提示词、不注册写入守卫、不投递任何提醒（0.9.0 起） |
 | `order` | `500` | 在系统提示词中的排序（必须有限数字） |
 | `rules` | 六条默认 | 非空字符串数组，整体替换默认规则 |
 | `footer` | 白名单与循环批（含循环批格式、风险前置、对称预算） | 追加在规则之后；`''` 关闭该段 |
@@ -199,14 +212,13 @@ HandoffGate 只提醒「这个回合什么都没产出」，它不写文件（�
 | `checkpoint.waveText` | 内置模板 | 波次聚合文案，支持 `{count}` / `{labels}` |
 | `observation.enabled` | `true` | 是否写回合观测行（不是门禁） |
 | `observation.dir` | `dispatch/runs` | 观测行目录（相对会话 cwd）；`false` 关闭 |
-| `nudge.enabled` | `true` | 是否检查「漏派发」（验收回合与宽限回合仍会静默） |
-| `nudge.threshold` | `2` | 本回合去重文件数 + shell 变更数 ≥ 该值且 0 派发时提醒（正整数；nudge 档不计 `git commit`） |
-| `nudge.controlPlanePatterns` | `['dispatch/state.md','dispatch/ledger/','docs/superpowers/specs/']` | 控制面路径豁免：命中的 write/edit 不计入 nudge 的 `writes`/`files`（大小写不敏感子串，反斜杠归一为正斜杠） |
-| `nudge.writeTools` | `['write','edit']` | 计入「改动」的工具名 |
-| `nudge.delegationTools` | `['subagent','subagent_fork','workflow']` | 计入「已派发」的工具名 |
-| `nudge.justifiedPatterns` | 见上（0.3.8 起 9 条） | 本回合正文命中任一即静默（子串匹配，NFKC 归一） |
-| `nudge.text` | 内置模板 | 覆盖提醒文案，支持 `{fileCount}` / `{writes}` / `{files}` / `{turn}` |
-| `nudge.log` | `%TEMP%\dispatch-protocol-decisions.jsonl` | 决定日志：checkpoint/nudge 写 delivered 与 suppressed，状态闸门只写 delivered；`false` 三个机制都不记 |
+| `log` | `%TEMP%\dispatch-protocol-decisions.jsonl` | 共用决定日志（checkpoint / write-policy / gate）；`false` 三个机制都不记 |
+| `writePolicy.enabled` | `true` | 是否注册写入守卫（宿主没有 `ctx.tools.guard` 时静默跳过） |
+| `writePolicy.mode` | `enforce` | `enforce` 拦截并返回拒绝串；`shadow` 只记日志、不拦 |
+| `writePolicy.allowlist` | `['dispatch/','docs/superpowers/specs/']` | 主控可直接写的前缀（cwd 相对、大小写不敏感；尾 `/` 前缀匹配，无尾 `/` 词边界）；命中放行且不写日志 |
+| `writePolicy.overridePath` | `dispatch/override.json` | 唯一豁免凭据（cwd 相对）；`{"reason":"…"}` 且本会话写下才有效 |
+| `writePolicy.tools` | `['write','edit']` | 守卫检查的工具名 |
+| `writePolicy.delegationTools` | `['subagent','subagent_fork','workflow']` | 观测行与 WaitGate 复用的「已派发」工具名 |
 | `gates.enabled` | `true` | 五个事件闸门（Wait/Verify/Contract/Review/Handoff）总开关 |
 | `gates.controlPlanePatterns` | `['dispatch/state.md','dispatch/ledger/','docs/superpowers/specs/']`（解析后同时挂到 `gates.verify`/`gates.review`） | 控制面路径豁免：命中的 write/edit 不计为 VerifyGate 的脏改动或 ReviewGate 的评审失效（大小写不敏感子串，反斜杠归一为正斜杠） |
 | `gates.wait.enabled` | `true` | 是否提醒等待期的只读状态轮询 |
@@ -227,7 +239,23 @@ HandoffGate 只提醒「这个回合什么都没产出」，它不写文件（�
 | `gates.handoff.emptyTurns` | `1` | 连续空回合达到该值才提醒（正整数） |
 | `gates.handoff.text` | 内置模板 | 覆盖交接提醒，支持 `{emptyTurns}` |
 
-非法配置（`order` 非有限数字、`rules` 为空/非数组、`footer`/`checkpoint.text` 非字符串、`nudge.threshold` 非正整数、工具名单为空数组、`nudge.justifiedPatterns` 为空数组或含空白串、`nudge.log` 既非路径也非 `false`、`gates.wait.threshold` 非正整数、`gates.wait.tools`/`gates.verify.commands`/`gates.contract.patterns`/`gates.review.labelPrefixes` 为空数组、`gates.handoff.emptyTurns` 非正整数、`gates.*.text` 为空白串、`gates.verify.commitPattern` 无法编译、`gates.contract`/`gates.review`/`gates.handoff` 非对象）在插件加载时直接报错，不会静默降级。
+非法配置（`order` 非有限数字、`rules` 为空/非数组、`footer`/`checkpoint.text` 非字符串、`log` 既非非空路径（字符串或空白串）也非 `false`、`writePolicy.mode` 不是 `enforce`/`shadow`、`writePolicy.allowlist`/`writePolicy.tools`/`writePolicy.delegationTools` 为空数组或含空白串、`writePolicy.overridePath` 为空白串、`nudge` 段出现、`gates.wait.threshold` 非正整数、`gates.wait.tools`/`gates.verify.commands`/`gates.contract.patterns`/`gates.review.labelPrefixes` 为空数组、`gates.handoff.emptyTurns` 非正整数、`gates.*.text` 为空白串、`gates.verify.commitPattern` 无法编译、`gates.contract`/`gates.review`/`gates.handoff` 非对象）在插件加载时直接报错，不会静默降级。
+
+## 从 0.8.x 迁移到 0.9.0
+
+0.9.0 删除漏派发 nudge，改为工具边界写入守卫；配置随之换名。**`nudge` 段一旦出现就在加载期抛错**（消息带迁移指引），不会静默忽略——静默忽略会让人以为提醒还在生效。
+
+| 0.8.x | 0.9.0 |
+|---|---|
+| `nudge.log` | `log`（checkpoint、写入守卫、闸门共用） |
+| `nudge.delegationTools` | `writePolicy.delegationTools`（观测行与 WaitGate 复用） |
+| `nudge.writeTools` | `writePolicy.tools` |
+| `nudge.controlPlanePatterns` | `writePolicy.allowlist`（口径更严：cwd 相对前缀 + 词边界，不再是子串） |
+| `nudge.justifiedPatterns` | 删除；豁免只认 `dispatch/override.json` |
+| `nudge.enabled` / `nudge.threshold` / `nudge.text` | 删除；漏派发提醒整体由写入守卫取代 |
+| —（新增） | `writePolicy.enabled` / `writePolicy.mode` / `writePolicy.overridePath` |
+
+override 文件 schema：`{"reason":"…","source":"…","createdAt":"…"}`——`reason` 必填非空，`source`/`createdAt` 可选、仅供记录。**每会话有效**：`mtimeMs >=` 会话开始时间才认（`session.createdAt ?? session.header.createdAt`）；取不到时间戳时跳过新鲜度判断（fail-open）并记 `reason: override-unbounded`。新会话不继承 override，必须重写。
 
 ## 设计取舍
 
@@ -263,6 +291,7 @@ HandoffGate 只提醒「这个回合什么都没产出」，它不写文件（�
 | 0.8.0 | 注入文本改按产出物归属判定：规则 1 改为「主控只做控制面，不做执行面」（七类动作、执行面一律派发、用户显式 override、先勘察后派发）；footer 改为「白名单与循环批」（循环批六要素、`NEEDS_DECISION` 分叉、实测契约表、风险前置、对称预算）；nudge 文案改为「不在主控白名单内」；移除单文件/纯文案豁免与微批分流表。 | `session-e691e70b`：主控 172 次写盘、T+ 排错 84 分钟/173 步/23.9M cache 读；改为产出物归属判定 + 循环批 + 风险前置 + 对称预算。 |
 | 0.8.1 | 交付通道分档：控制面 / 轻批 / 全批；有界直改（单文件 ≤10 行、同批 ≤20 行、记账、重开评审切片）；规则 6 的微批改为轻批。 | 用户实测反馈：0.8.0 文本批约 30 分钟，直接改约 10–15 分钟；固定成本 8–20 分钟/批，小任务被仪式拖慢。 |
 | 0.8.2 | 控制面路径豁免：nudge 计数器与 VerifyGate/ReviewGate 不再把 dispatch/state.md、dispatch/ledger/*、docs/superpowers/specs/* 的写入计为违规/脏改动（新增 nudge.controlPlanePatterns、gates.controlPlanePatterns 配置）；规则 4 明确 gated 需求内的轻批仍免独立评审；规则 6 判级载体放宽为任务清单或台账首行。 | 0.8.1 实测（dispatch/ledger/2026-10-30-dispatch-0.8.1-verification.md）：3 会话 9+ 次控制面误报；cea2278e 轻批 0 使用；6/6 会话判级未进任务清单。 |
+| 0.9.0 | 删除漏派发 nudge（评估/投递/延迟评估全删），改为工具边界写入守卫：`ctx.tools.guard` 拦截根代理名单外的 `write`/`edit`，`dispatch/override.json` 成为唯一豁免凭据（每会话有效）；配置 `nudge.*` → `log` + `writePolicy.*`，`nudge` 段出现即加载期报错；`lib/nudge.mjs` 更名 `lib/tool-calls.mjs` 并裁剪；规则 1 改为先写 override 再动手；顶层 `enabled` 改为总开关（此前只关提示词、守卫仍拦）。 | 2026-11-04 决策日志：nudge 投递 2 次全部误报（一次是用户显式授权、一次是控制面文件不在豁免），历史 45 次去重投递 45/45 在最终答复之后、0 次促成派发，合计 9.45M cache-read。 |
 
 ## 验证
 
@@ -281,25 +310,23 @@ dsh --profile probe headless "不要调用任何工具，只回答：你的系�
 
 预期：模型复述出「主控只做控制面，不做执行面」「执行类派发必须自包含」「验收与等待」「评审只审变更集，不审仓库」「提交权归派发方」「并行只读，互斥并行写」六条。
 
-漏派发提示的真机口径：一个回合内连续改 2 个以上**去重文件**（同一文件多次编辑只算 1）且不派发、正文也没写不派发理由时，收尾时会多出一段以 `[dispatch-protocol]` 开头的提醒；`%TEMP%\dispatch-protocol-decisions.jsonl` 同时多一行 `{"kind":"nudge","decision":"delivered","session":…,"turn":…,"writes":…,"files":[…]}`；被静默的那次是同一行改为 `"decision":"suppressed"` 并带 `reason`（`justified`/`handled`/`grace`）。
+写入守卫的真机口径（需重装 profile 插件并重启 DSH）：主控会话里直接 `write` 一个 `src/` 下的文件，应看到工具错误以 `[dispatch-protocol] 拦截：` 开头、回合继续；`%TEMP%\dispatch-protocol-decisions.jsonl` 出现一行 `kind:'write-policy'` 的拒绝记录（`reason` 为 `no-override`，`mode` 为 `enforce`，`turn:null`）。写 `dispatch/state.md` 这类控制面文件不产生该行；`shadow` 模式下同样的写入放行、日志带 `mode:'shadow'`。
 
-**0.3.6 真机证据（2026-10-22，desktop 0.3.6）**：
+**0.3.6 真机证据（只读并行，2026-10-22，desktop 0.3.6）**：
 
-- 抑制路径：一个回合改 3 个文件、0 派发、正文含「不派发」→ 日志写 `"decision":"suppressed","reason":"justified"`（0.3.10 前的旧格式为 `"suppressed":"justified"`），会话 0 条提醒。对照同文件更早的 `turn:6`（0.3.5）：0 派发、15 次写入、**无**抑制字段，随后照常发出提醒。两行的差异就是 0.3.6 的全部作用。
 - 只读并行：同一条消息发出两个只读子代理，`childCreatedAt` 相差 1 ms、运行区间重叠 16.7 s（19.1 s 与 16.8 s 两个区间），两个都没有触发完成检查点。并行由模型在同一 assistant 消息里发两个 `subagent` 调用驱动，宿主不自动派生。
-- **口径提醒**：回合里只要有派发（`subagent`/`subagent_fork`/`workflow`），`shouldNudge` 直接为假，**既不进抑制判定也不写日志**——「没看到提醒」在这个前提下不能当作抑制生效的证据，这是真机上踩过一次的假阳性。
 
 ## 已知坑
 
 - **系统提示词改动会影响 KV 缓存前缀**：`order` 与文本变化会让后续请求失去前缀复用；规则固定后不要频繁改。
 - **section 名重复会报错**：同一 profile 只能挂一个 `dispatch-protocol`；改配置用同 id 覆盖，不要重复插入。
-- **规则是建议不是强制**：模型仍可无视。要硬拦截需要 `tools/pre-execute` 那类插件（本项目评估后不做）。
-- **漏派发提示要花一步**：`agent/turn-stopping` 里 `steer` 会让本回合再跑一步。按回合去重，一回合最多一次；模型可以只在补充说明里写「为什么没派」而不真的派发——提醒不是强制。
-- **静默判定是关键词粗判**：引述提醒里的词（例如写「属于豁免」）也会被当成已解释，`不 派 发` 这种被空格切开的写法则**不会**命中。两个方向都是有意的：宁可少发一次提醒，也不要每次打扰。误报多就调 `nudge.justifiedPatterns`，不必改代码。**词表只按实测漏报加词**：0.3.8 补的 `一条命令验完` / `一处改动的` / `镜像面` 都来自真机上一次「解释了但没命中旧词」的回合，不是预先猜的；每加一条都要配一条断言和这一节的记录。
-- **检查点只在未验收时花一步**：0.3.4 起 settle 只登记，回合收尾判定已验收就零消息、零额外步骤（比 0.3.2/0.3.3 的 settle 即发更省）；未验收才 `steer` 一条，花一步，与 nudge 同价。父代理没有 hook 作用域时仍回退为 settle 时 `followup`，行为同 0.3.3。
-- **触发看文件数、判定看调用名**：是否提醒按去重路径计（同一文件多次编辑算 1 个）；「哪些调用算改动」仍按工具名判断——`pwsh` 里的 `Set-Content`/`dotnet format` 等副作用不计；`write`/`edit` 以 `tool/result.isError` 为准，失败的不计（无结果可查时照算）。
-- **检查点的只读判定按调用名、尝试即算**：`write`/`edit` 只要出现在子代理的 `tool/call` 里就算执行类，**不解析 `tool/result`**——失败或被拒绝的写入也不豁免检查点。这与 nudge「成功才计数」的口径不同，是有意的保守方向：宁可多提醒一次，也不要漏掉真正的执行类子代理。
-- **记账在 TEMP 里**：`nudge.log` 默认落在系统临时目录（`dispatch-protocol-decisions.jsonl`，checkpoint、nudge 与状态闸门共用），不随仓库版本化；要长期留档就把路径指到固定位置（或 `false` 全关）。
+- **规则是建议，守卫只覆盖一个面**：六条规则仍可能被无视；目前唯一的硬拦截是写入守卫（根代理 `write`/`edit` 的越界写入，见「写入守卫（0.9.0）」），`pwsh` 写、`git` 操作与其它工具都不拦。
+- **守卫零模型步进**：拒绝发生在工具边界，模型看到 `Error: ...` 后在同一回合改走派发或写 override；被拦下的调用本身不计写入（观测行按 `tool/result.isError` 排除）。
+- **override 是文件不是散文**：只能通过 `dispatch/override.json` 放行，正文里写「豁免」「直接做」彻底无效；每会话有效，新会话必须重写。取不到会话开始时间时会 fail-open（日志 `override-unbounded`），此时旧 override 也会生效。
+- **检查点只在未验收时花一步**：0.3.4 起 settle 只登记，回合收尾判定已验收就零消息、零额外步骤（比 0.3.2/0.3.3 的 settle 即发更省）；未验收才 `steer` 一条，花一步，与状态闸门同价。父代理没有 hook 作用域时仍回退为 settle 时 `followup`，行为同 0.3.3。
+- **观测计数与守卫是两套口径**：观测行按去重路径计（同一文件多次编辑算 1 个）；`write`/`edit` 以 `tool/result.isError` 为准，失败的不计（无结果可查时照算）；`pwsh` 命中变更正则才算 `shellWrites`，`dotnet format` 等间接副作用不计。守卫只看 `write`/`edit` 的参数路径，不解析 `pwsh`。
+- **检查点的只读判定按调用名、尝试即算**：`write`/`edit` 只要出现在子代理的 `tool/call` 里就算执行类，**不解析 `tool/result`**——失败或被拒绝的写入也不豁免检查点。这与观测行「成功才计数」的口径不同，是有意的保守方向：宁可多提醒一次，也不要漏掉真正的执行类子代理。
+- **记账在 TEMP 里**：`log` 默认落在系统临时目录（`dispatch-protocol-decisions.jsonl`，checkpoint、写入守卫与状态闸门共用），不随仓库版本化；要长期留档就把路径指到固定位置（或 `false` 全关）。
 - **profile 插件不支持热加载**：装完必须重启 DSH，新会话才生效。
 - **update 失败会留下半残目录，且可能卡成 delete-pending**：`dsh plugin --profile desktop update` 先把 `node_modules/<pkg>` 整块 rename 掉；任一步失败就可能只剩一半文件，而失败时被打开的子目录（实测是 `lib/`）会进入 delete-pending —— 之后**连改父目录、删除、读 ACL 都 Access denied**，`diagnose-windows-sandbox-acl` 报 `VERDICT=UNREADABLE`、Restart Manager 返回 `ACCESS_DENIED`，只有**重启 Windows** 能清。2026-10-22 踩过一次。
   - 预防：**完全退出 DSH → update → 启动**；确认没有遗留的 `robocopy`/`pnpm` 子进程再跑（那次真正的持有者是一条被我挂住的 robocopy）。
