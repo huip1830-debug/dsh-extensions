@@ -15,7 +15,9 @@
 //      dsh-client-ui-approval/lib/client.js:180,
 //      dsh-client-ui-user-questions/lib/client.js:185).
 //   - sessions.list: { phase, ids, byId }; rows carry title / updatedAt /
-//     retainedBy.mainView (dsh-client-ui-workspace/lib/client.js:1059-1073).
+//     origin / retainedBy.mainView (dsh-client-ui-workspace/lib/client.js:
+//     1059-1073). origin === 'subagent' marks subagent children, the same field
+//     the official sidebar hides on (same file 964-965).
 //   - workspaces.list: { items[] }; items carry workspaceId / title / path /
 //     sessionIds (dsh-client-ui-workspace/lib/client.js:1027-1046).
 //   - uiWorkspace.selection: snapshot store { sessionId, subagentAddress? }
@@ -168,8 +170,29 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Ids the session list marks as subagent children.
+     * Frozen signal: sessions.list.byId[id].origin === 'subagent', the same
+     * field the official sidebar's sessionVisible() hides on
+     * (dsh-client-ui-workspace/lib/client.js:964-965). Ids absent from byId are
+     * never excluded: an orphan status row cannot be proven a subagent, so it is
+     * kept (one extra row beats a lost top-level session).
+     * @param sessions - sessions.list snapshot or anything.
+     * @returns Set of subagent session ids (empty for malformed input).
+     */
+    function subagentIdsOf(sessions) {
+      const byId = sessions !== null && typeof sessions === 'object' && sessions.byId !== null && typeof sessions.byId === 'object' ? sessions.byId : {}
+      const excluded = new Set()
+      for (const sessionId of Object.keys(byId)) {
+        const summary = byId[sessionId]
+        if (summary !== null && typeof summary === 'object' && summary.origin === 'subagent') excluded.add(sessionId)
+      }
+      return excluded
+    }
+
+    /**
      * Build the pending list: filter, map, and sort.
      * Blocking entries come first; each group is newest-first by updatedAt.
+     * Subagent sessions are dropped here so they neither list nor count.
      * @param input - { statuses, sessions, workspaces } snapshots.
      * @returns sorted item array (each item is plain data).
      */
@@ -178,6 +201,7 @@ window.__ModuleLoader__.load({
       const statuses = source.statuses instanceof Map ? source.statuses : new Map(Object.entries(source.statuses ?? {}))
       const sessions = source.sessions !== null && typeof source.sessions === 'object' ? source.sessions : {}
       const byId = sessions.byId !== null && typeof sessions.byId === 'object' ? sessions.byId : {}
+      const excluded = subagentIdsOf(sessions)
       const listed = Array.isArray(sessions.ids) ? sessions.ids : []
       const order = [...listed]
       const seen = new Set(listed)
@@ -188,6 +212,7 @@ window.__ModuleLoader__.load({
       }
       const items = []
       for (const sessionId of order) {
+        if (excluded.has(sessionId)) continue
         const status = statuses.get(sessionId)
         const kind = pendingKindOf(status)
         if (kind === undefined) continue
@@ -245,14 +270,19 @@ window.__ModuleLoader__.load({
      * notification).
      * @param previous - Set of pending session ids at the previous publish.
      * @param statuses - uiSession.sessionStatus snapshot.
+     * @param excluded - optional subagent ids to ignore; they never enter
+     *   `current`, so they neither notify nor occupy an episode. Omitted means
+     *   no filtering (backward compatible).
      * @returns { current, fresh } where fresh lists newly pending ids.
      */
-    function detectFresh(previous, statuses) {
+    function detectFresh(previous, statuses, excluded) {
       const before = previous instanceof Set ? previous : new Set(previous ?? [])
       const entries = statuses instanceof Map ? statuses : new Map(Object.entries(statuses ?? {}))
+      const skip = excluded instanceof Set ? excluded : new Set(excluded ?? [])
       const current = new Set()
       const fresh = []
       for (const [sessionId, status] of entries) {
+        if (skip.has(sessionId)) continue
         if (pendingKindOf(status) === undefined) continue
         current.add(sessionId)
         if (!before.has(sessionId)) fresh.push(sessionId)
@@ -352,7 +382,9 @@ window.__ModuleLoader__.load({
           ? this.ctx.uiWorkspace.selection.getSnapshot()
           : undefined
         const mainSessionId = pickMainSessionId(selection, sessions)
-        return { statuses, all: buildItems({ statuses, sessions, workspaces }), mainSessionId }
+        // Same consistent read: one subagent set feeds both the list filter
+        // (buildItems derives its own copy from `sessions`) and the edge filter.
+        return { statuses, subagentIds: subagentIdsOf(sessions), all: buildItems({ statuses, sessions, workspaces }), mainSessionId }
       }
 
       /** Publish the visible projection. Never exposes raw interaction objects. */
@@ -385,7 +417,7 @@ window.__ModuleLoader__.load({
           console.warn('pending-sessions: cannot read session status', error)
           return
         }
-        const { current, fresh } = detectFresh(this.pendingIds, collected.statuses)
+        const { current, fresh } = detectFresh(this.pendingIds, collected.statuses, collected.subagentIds)
         this.pendingIds = current
         this.publish(collected)
         if (!this.primed) {
@@ -608,6 +640,7 @@ window.__ModuleLoader__.load({
     exports.dictionaries = { zh, en }
     exports.pure = {
       pendingKindOf,
+      subagentIdsOf,
       buildItems,
       excludeMain,
       pickMainSessionId,

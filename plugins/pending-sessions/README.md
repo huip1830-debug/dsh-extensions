@@ -15,6 +15,7 @@ DSH GUI 插件：**全局右下角悬浮条，列出等你处理的会话**—�
 | 回合跑完但回复未读（`completionUnread`） | 算待处理，归「未读类」 |
 | 两类混合 | 阻塞类整体在前，未读类在后；两类内部各自按会话更新时间倒序（最新在前） |
 | 当前主视图会话 | 不进列表（已经在眼前） |
+| 子智能体会话（`origin: 'subagent'`） | **不出现在列表与通知中**：不计数、不触发系统通知；孤儿 id（状态里有、会话列表里没有）无法证明是子智能体，照常列出 |
 | 列表为空 | 整个悬浮条隐藏 |
 | 收起态 | 药丸 `● N`；有阻塞类时警示色 |
 | 展开态 | 列表项 = 状态点 + 类型标签（等批准 / 等回答 / 计划复核 / 未读回复）+ 工作区名 + 会话标题 |
@@ -65,7 +66,7 @@ profile 层插件不支持热加载，**改完必须重启 DSH**；`client.js` �
 | 当前主视图会话 id：`uiWorkspace.selection` 快照存储的 `sessionId`（由 `replaceMain` 写入）；回退 `retainedBy.mainView > 0` | `dsh-client-ui-workspace/lib/client.js:1369`、`1652-1675`、`3544`；`dsh-client-ui-session/lib/client.js:973-975` |
 | 悬浮条落点 `shell.overlay`（list/root）；overlay 容器 `absolute; inset:0; pointer-events:none`，子元素 `pointer-events:auto` | `dsh-client-ui-workspace/lib/client.js:5306`（注册先例）；`dsh-client-ui-layout/lib/client.js:73`（容器 CSS） |
 
-决策逻辑（过滤 / 排序 / 工作区映射 / 主视图排除 / 通知边沿、节流、合并）全部是 `client.js` 导出的纯函数（`exports.pure`），可在 node 下零依赖回归。
+决策逻辑（过滤 / 排序 / 工作区映射 / 主视图排除 / 子智能体过滤 / 通知边沿、节流、合并）全部是 `client.js` 导出的纯函数（`exports.pure`），可在 node 下零依赖回归。
 
 ## 离线回归
 
@@ -73,7 +74,7 @@ profile 层插件不支持热加载，**改完必须重启 DSH**；`client.js` �
 node test.mjs          # 在插件目录内执行；或在仓库根 node plugins/pending-sessions/test.mjs
 ```
 
-23 个用例，覆盖：三类阻塞信号、未读信号、混合排序（阻塞在前、组内按更新时间倒序）、无归属工作区、`default-workspace` 名称回退、只在状态里出现的会话、当前主视图排除、主视图 id 的两种取法、空列表、通知边沿 / 同 episode 只一次 / 批量合并摘要 / 聚焦不弹 / 权限被拒静默、服务缺失时 `apply` 只告警不激活，以及清单字段与 `locale/*.json`（含与 `client.js` 内置字典的逐键同步）。
+29 个用例，覆盖：三类阻塞信号、未读信号、混合排序（阻塞在前、组内按更新时间倒序）、无归属工作区、`default-workspace` 名称回退、只在状态里出现的会话、当前主视图排除、子智能体过滤（`origin: 'subagent'` 的会话既不列表也不通知、孤儿 id 保留、`detectFresh` 缺省无排除集时行为不变）、主视图 id 的两种取法、空列表、通知边沿 / 同 episode 只一次 / 批量合并摘要 / 聚焦不弹 / 权限被拒静默、服务缺失时 `apply` 只告警不激活，以及清单字段与 `locale/*.json`（含与 `client.js` 内置字典的逐键同步）。
 
 ## 人工验收
 

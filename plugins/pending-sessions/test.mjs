@@ -48,6 +48,7 @@ const plugin = registrations[0].factory((specifier) => {
 
 const {
   pendingKindOf,
+  subagentIdsOf,
   buildItems,
   excludeMain,
   pickMainSessionId,
@@ -68,6 +69,10 @@ const idle = (extra = {}) => ({
 const running = (extra = {}) => idle({ running: true, ...extra })
 
 const row = (id, title, updatedAt) => ({ id, title, updatedAt, retainedBy: {} })
+
+// Frozen signal: sessions.list.byId[id].origin === 'subagent' (official
+// sidebar sessionVisible() hides on the same field).
+const subagentRow = (id, title, updatedAt) => ({ ...row(id, title, updatedAt), origin: 'subagent' })
 
 const list = (rows, extra = {}) => ({
   phase: 'ready',
@@ -128,6 +133,59 @@ test('pendingInteraction wins over completionUnread and unknown kinds stay block
   assert.equal(pendingKindOf(idle({ pendingInteraction: { kind: 'something-new' } })), 'pending')
   assert.equal(pendingKindOf(idle({ pendingInteraction: {} })), 'pending')
   assert.equal(pendingKindOf(idle({ completionUnread: true })), 'unread')
+})
+
+// --- subagent filter --------------------------------------------------------
+
+test('subagentIdsOf reads only the frozen origin signal', () => {
+  assert.deepEqual([...subagentIdsOf(list([row('top', 'T', 1), subagentRow('child', 'C', 2)]))], ['child'])
+  assert.deepEqual([...subagentIdsOf(list([row('a', 'A', 1), { ...row('b', 'B', 2), origin: 'main' }]))], [])
+  assert.deepEqual([...subagentIdsOf(undefined)], [])
+  assert.deepEqual([...subagentIdsOf({ phase: 'pending', ids: [], byId: {} })], [])
+  assert.deepEqual([...subagentIdsOf({ ids: [] })], [])
+})
+
+test('buildItems drops subagent sessions from the list and the count', () => {
+  const statuses = new Map([
+    ['top-approval', idle({ pendingInteraction: { kind: 'approval' } })],
+    ['child-question', idle({ pendingInteraction: { kind: 'question' } })],
+    ['child-unread', idle({ completionUnread: true })],
+  ])
+  const items = buildItems({
+    statuses,
+    sessions: list([
+      row('top-approval', 'Top', 1),
+      subagentRow('child-question', 'Child Q', 2),
+      subagentRow('child-unread', 'Child U', 3),
+    ]),
+    workspaces: workspaceList(workspace('w1', 'ws', 'C:\\p\\ws', ['top-approval', 'child-question', 'child-unread'])),
+  })
+  assert.deepEqual(items.map((item) => item.sessionId), ['top-approval'])
+})
+
+test('a subagent id that left the list is still dropped while its row is present', () => {
+  const items = buildItems({
+    statuses: new Map([
+      ['child', idle({ pendingInteraction: { kind: 'approval' } })],
+      ['top', idle({ completionUnread: true })],
+    ]),
+    // ids does not list the child, but byId still carries its origin.
+    sessions: { phase: 'ready', ids: ['top'], byId: { child: subagentRow('child', 'C', 5), top: row('top', 'T', 1) } },
+    workspaces: workspaceList(),
+  })
+  assert.deepEqual(items.map((item) => item.sessionId), ['top'])
+})
+
+test('an orphan id (status without a list row) is kept, never guessed a subagent', () => {
+  const items = buildItems({
+    statuses: new Map([
+      ['orphan', idle({ pendingInteraction: { kind: 'approval' } })],
+      ['child', idle({ completionUnread: true })],
+    ]),
+    sessions: list([subagentRow('child', 'C', 1)]),
+    workspaces: workspaceList(),
+  })
+  assert.deepEqual(items.map((item) => item.sessionId), ['orphan'])
 })
 
 // --- sort -------------------------------------------------------------------
@@ -280,6 +338,37 @@ test('a batch of simultaneous entries reports every fresh session once', () => {
   const { fresh, current } = detectFresh(new Set(), statuses)
   assert.deepEqual(fresh, ['a', 'b'])
   assert.deepEqual([...current], ['a', 'b'])
+})
+
+test('detectFresh drops excluded subagents from current and fresh', () => {
+  const statuses = new Map([
+    ['child', idle({ pendingInteraction: { kind: 'approval' } })],
+    ['top', idle({ completionUnread: true })],
+  ])
+  const excluded = new Set(['child'])
+  const first = detectFresh(new Set(), statuses, excluded)
+  assert.deepEqual(first.fresh, ['top'])
+  assert.deepEqual([...first.current], ['top'])
+
+  // The child is already pending next round: still no edge, still no episode.
+  const same = detectFresh(first.current, statuses, excluded)
+  assert.deepEqual(same.fresh, [])
+  assert.deepEqual([...same.current], ['top'])
+
+  // Top-level session clears and re-enters: that is a new episode.
+  const cleared = detectFresh(same.current, new Map([['child', idle({ pendingInteraction: { kind: 'approval' } })]]), excluded)
+  assert.deepEqual(cleared.fresh, [])
+  assert.deepEqual([...cleared.current], [])
+  assert.deepEqual(detectFresh(cleared.current, statuses, excluded).fresh, ['top'])
+})
+
+test('detectFresh without the third argument keeps the old behaviour', () => {
+  const statuses = new Map([['child', idle({ completionUnread: true })]])
+  for (const excluded of [undefined, new Set()]) {
+    const { current, fresh } = detectFresh(new Set(), statuses, excluded)
+    assert.deepEqual([...current], ['child'])
+    assert.deepEqual(fresh, ['child'])
+  }
 })
 
 test('notifications require an unfocused window, a fresh edge and usable permission', () => {

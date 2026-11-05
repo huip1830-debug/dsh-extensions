@@ -98,3 +98,15 @@ plugins/pending-sessions/
 
 - 风险轴：无契约面改动、无外部环境 → 非 gated；
 - 规模轴：单文件 client.js 预计 400–600 行手写（超轻批上限）→ **全批**（spec 冻结 + 实现批 + 评审可因非 gated 简化为主控复跑 + diff 自查；若实施中改动面扩大须重新判级）。
+
+## 10. 修订（2026-11-05 第二轮）：过滤子智能体
+
+用户要求：悬浮条与系统通知**一律不列子智能体会话**，只呈现顶层会话。
+
+- **判定信号（实测契约）**：`sessions.list` 的 `byId[id].origin === 'subagent'` 即子智能体。依据：官方侧边栏 `sessionVisible()` 用同一字段把子智能体隐藏（app.asar 内 `dsh/node_modules/@deepseek-ai/dsh-client-ui-workspace/lib/client.js:964-965`，注释「Subagent children use their parent header catalog」）。与 Host 侧 `session.header.origin === 'subagent'`（dispatch-protocol、subagent-model-pin 同款）同源。
+- **过滤点**：
+  1. `buildItems`：子智能体 id 直接跳过（不进列表、不计数）；
+  2. `detectFresh`：增加排除集参数，子智能体不进入 `pendingIds`——既不触发系统通知，也不占用 episode 记录；
+  3. `statuses` 里有而 `sessions.byId` 里没有的孤儿 id：无法证明是子智能体 → **保留**（宁可多列，不漏顶层会话）。
+- **不变**：排序、消失、通知节流/合并、集成命令（`node plugins/pending-sessions/test.mjs`）。
+- **判级**：非 gated（无契约面/外部环境）；改动约 client.js ≤20 行 + test.mjs 用例 + README 一行 + package.json patch 版本，3–4 文件非机械 → 全批，免独立评审，主控复跑集成命令 + diff 自查。
