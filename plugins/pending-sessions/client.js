@@ -758,7 +758,10 @@ window.__ModuleLoader__.load({
           pillProps.type = 'button'
           pillProps.onClick = () => {
             // A muted pill restores first, then opens; otherwise it just opens.
-            if (pill.mode === 'collapsed') props.restore()
+            // Key on the snapshot flag, not pill.mode: running outranks
+            // collapsed in pillStateOf, so a running+collapsed pill must
+            // restore too (spec §11.2: click the muted pill = restore + open).
+            if (collapsed) props.restore()
             setExpanded(true)
           }
         } else {
