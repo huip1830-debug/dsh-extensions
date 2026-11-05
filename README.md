@@ -24,6 +24,7 @@ plugins/
 | 插件 | 作用 |
 |------|------|
 | [`subagent-model-pin`](plugins/subagent-model-pin/README.md) | 子 agent 默认跑低成本模型，委派时显式传 `provider`/`model` 可升级 |
+| [`pending-sessions`](plugins/pending-sessions/README.md) | 右下角悬浮条：列出等你处理的会话（等批准/等回答/计划复核/未读回复），失焦时弹系统通知 |
 | [`dispatch-protocol`](plugins/dispatch-protocol/README.md) | 把派发纪律常驻注入系统提示词 + 子代理完成检查点 + 工具边界写入守卫（DSH 专属，不影响 Codex/OpenCode） |
 
 ### 已归档（未安装、不进 CI）

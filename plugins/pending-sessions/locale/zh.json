@@ -1,0 +1,22 @@
+{
+  "meta": {
+    "title": "待处理会话",
+    "description": "全局悬浮条：列出等你处理的会话（等批准 / 等回答 / 计划复核 / 未读回复），窗口失焦时尽力弹系统通知。"
+  },
+  "ui": {
+    "title": "待处理会话",
+    "pillAria": "{count} 个会话待处理",
+    "collapse": "收起",
+    "untitled": "未命名会话",
+    "defaultWorkspace": "默认工作区",
+    "kindApproval": "等批准",
+    "kindQuestion": "等回答",
+    "kindPlanReview": "计划复核",
+    "kindUnread": "未读回复",
+    "kindPending": "待处理",
+    "notificationDenied": "系统通知未授权",
+    "notificationUnsupported": "当前环境不支持系统通知",
+    "notifyDigestTitle": "{count} 个会话待处理",
+    "notifyDigestMore": "还有 {count} 个"
+  }
+}

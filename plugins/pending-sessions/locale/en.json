@@ -1,0 +1,22 @@
+{
+  "meta": {
+    "title": "Pending Sessions",
+    "description": "Global floating bar listing sessions that wait for the user (approval, question, plan review, or an unread completed turn), with best-effort OS notifications while the window is unfocused."
+  },
+  "ui": {
+    "title": "Pending sessions",
+    "pillAria": "{count} sessions need attention",
+    "collapse": "Collapse",
+    "untitled": "Untitled session",
+    "defaultWorkspace": "Default workspace",
+    "kindApproval": "Awaiting approval",
+    "kindQuestion": "Awaiting answer",
+    "kindPlanReview": "Plan review",
+    "kindUnread": "Unread reply",
+    "kindPending": "Pending",
+    "notificationDenied": "System notifications not authorized",
+    "notificationUnsupported": "System notifications unavailable in this environment",
+    "notifyDigestTitle": "{count} sessions need attention",
+    "notifyDigestMore": "+{count} more"
+  }
+}

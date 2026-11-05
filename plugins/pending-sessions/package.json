@@ -1,0 +1,38 @@
+{
+  "name": "pending-sessions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH profile plugin: a global floating bar listing sessions that wait for the user (blocking interactions and unread completed turns), with best-effort OS notifications while the window is unfocused.",
+  "license": "MIT",
+  "main": "./plugin.mjs",
+  "exports": {
+    ".": "./plugin.mjs",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "plugin.mjs",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  }
+}

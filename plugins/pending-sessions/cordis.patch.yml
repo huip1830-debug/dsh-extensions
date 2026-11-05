@@ -1,0 +1,11 @@
+# Bundle layer: applied when the profile selects this package (dsh.profile.bundles).
+#
+# The feature itself is the browser half (client.js). This Host row still has to
+# exist because the client module system discovers client bundles per *active
+# Loader entry*: it walks ctx.loader.entries(), skips rows without a mounted
+# fiber and resolves exports["./client"] from the row's package
+# (dsh-client-modules/lib/index.js:854-889, 720-750). A package that only ships
+# client.js would never be scanned, so plugin.mjs is an intentional no-op.
+- insert:
+    - id: pending-sessions
+      name: pending-sessions
