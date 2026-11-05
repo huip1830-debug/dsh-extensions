@@ -55,6 +55,16 @@ window.__ModuleLoader__.load({
       kindPlanReview: '计划复核',
       kindUnread: '未读回复',
       kindPending: '待处理',
+      pillRunning: '{count} 运行中',
+      pillRunningAria: '{count} 个会话运行中',
+      pillIdle: '全部空闲',
+      pillIdleAria: '所有会话空闲',
+      pillCollapsed: '已收起',
+      pillCollapsedAria: '待处理已暂时收起',
+      summaryPending: '{count} 待处理',
+      collapsePending: '暂时收起',
+      restorePending: '恢复',
+      collapsedHint: '待处理已暂时收起，点「恢复」重新提醒',
       notificationDenied: '系统通知未授权',
       notificationUnsupported: '当前环境不支持系统通知',
       notifyDigestTitle: '{count} 个会话待处理',
@@ -72,6 +82,16 @@ window.__ModuleLoader__.load({
       kindPlanReview: 'Plan review',
       kindUnread: 'Unread reply',
       kindPending: 'Pending',
+      pillRunning: '{count} running',
+      pillRunningAria: '{count} sessions running',
+      pillIdle: 'All idle',
+      pillIdleAria: 'All sessions are idle',
+      pillCollapsed: 'Collapsed',
+      pillCollapsedAria: 'Pending items are temporarily collapsed',
+      summaryPending: '{count} pending',
+      collapsePending: 'Collapse for now',
+      restorePending: 'Restore',
+      collapsedHint: 'Pending items are temporarily collapsed; choose Restore to bring them back',
       notificationDenied: 'System notifications not authorized',
       notificationUnsupported: 'System notifications unavailable in this environment',
       notifyDigestTitle: '{count} sessions need attention',
@@ -88,16 +108,31 @@ window.__ModuleLoader__.load({
       '.psess-pill{display:inline-flex;align-items:center;gap:7px;padding:6px 13px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);box-shadow:0 6px 18px rgba(0,0,0,.18);cursor:pointer;font-family:inherit;font-size:13px}',
       '.psess-pill:hover{background:var(--dsw-alias-interactive-bg-hover)}',
       '.psess-pillAlert{border-color:var(--dsw-alias-state-warn-primary)}',
+      '.psess-pillLow{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-border-l4);color:var(--dsw-alias-label-tertiary);box-shadow:0 4px 12px rgba(0,0,0,.12);font-size:12px;padding:4px 11px}',
+      '.psess-pillLow:hover{color:var(--dsw-alias-label-secondary)}',
+      '.psess-pillIdle{cursor:default}',
+      '.psess-pillIdle:hover{background:var(--dsw-alias-bg-layer-2)}',
       '.psess-dot{width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-brand-primary);flex:none}',
       '.psess-pillAlert .psess-dot{background:var(--dsw-alias-state-warn-primary)}',
+      '.psess-pillLow .psess-dot{background:var(--dsw-alias-label-tertiary);opacity:.55}',
+      '.psess-pillRunning .psess-dot{animation:psess-pulse 1.6s ease-in-out infinite}',
+      '@keyframes psess-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.78)}}',
+      '@media (prefers-reduced-motion: reduce){.psess-pillRunning .psess-dot{animation:none}}',
       '.psess-count{font-variant-numeric:tabular-nums}',
+      '.psess-sep{color:var(--dsw-alias-label-tertiary)}',
+      '.psess-mutedText{color:var(--dsw-alias-label-tertiary);font-size:12px}',
       '.psess-panel{width:324px;max-height:60vh;display:flex;flex-direction:column;background:var(--dsw-alias-bg-layer-2);border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-lg);box-shadow:0 12px 32px rgba(0,0,0,.22);overflow:hidden}',
       '.psess-panelAlert{border-color:var(--dsw-alias-state-warn-primary)}',
-      '.psess-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:.5px solid var(--dsw-alias-border-l4)}',
+      '.psess-head{display:flex;flex-direction:column;gap:2px;padding:10px 12px;border-bottom:.5px solid var(--dsw-alias-border-l4)}',
+      '.psess-headRow{display:flex;align-items:center;gap:8px}',
+      '.psess-summary{color:var(--dsw-alias-label-tertiary);font-size:11px}',
       '.psess-title{font-weight:600;color:var(--dsw-alias-label-primary)}',
       '.psess-total{color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}',
-      '.psess-collapse{margin-left:auto;border:0;background:0 0;color:var(--dsw-alias-label-tertiary);cursor:pointer;font-size:16px;line-height:1;padding:2px 4px}',
+      '.psess-action{margin-left:auto;border:0;background:0 0;color:var(--dsw-alias-label-tertiary);cursor:pointer;font-size:12px;padding:2px 6px;border-radius:var(--dsw-radius-md)}',
+      '.psess-action:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}',
+      '.psess-collapse{border:0;background:0 0;color:var(--dsw-alias-label-tertiary);cursor:pointer;font-size:16px;line-height:1;padding:2px 4px}',
       '.psess-collapse:hover{color:var(--dsw-alias-label-primary)}',
+      '.psess-note{padding:6px 12px 0;color:var(--dsw-alias-label-tertiary);font-size:11px}',
       '.psess-hint{margin:0;padding:8px 12px 0;color:var(--dsw-alias-state-warn-label);font-size:12px}',
       '.psess-list{list-style:none;margin:0;padding:6px;overflow:auto;min-height:0}',
       '.psess-item{display:flex;align-items:flex-start;gap:7px;width:100%;text-align:left;padding:7px 8px;border:0;border-radius:var(--dsw-radius-md);background:0 0;color:var(--dsw-alias-label-primary);cursor:pointer;font-size:13px}',
@@ -147,6 +182,24 @@ window.__ModuleLoader__.load({
         return PENDING_KINDS.has(kind) ? kind : 'pending'
       }
       return status.completionUnread === true ? 'unread' : undefined
+    }
+
+    /**
+     * Count sessions that are actively running.
+     * Deliberately counts every sessionStatus entry, subagents included: this is
+     * the whole-client activity indicator (spec §11.1). The pending list and the
+     * notifications filter subagents through subagentIdsOf instead; the two
+     * directions are intentional.
+     * @param statuses - uiSession.sessionStatus snapshot (Map or plain object).
+     * @returns the number of entries whose `running === true`.
+     */
+    function runningCountOf(statuses) {
+      const entries = statuses instanceof Map ? statuses : new Map(Object.entries(statuses ?? {}))
+      let count = 0
+      for (const status of entries.values()) {
+        if (status !== null && typeof status === 'object' && status.running === true) count += 1
+      }
+      return count
     }
 
     /** Reverse-look-up the Workspace owning a Session (official same approach). */
@@ -327,6 +380,86 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** Normalize a count-ish input to a non-negative integer (pure helper). */
+    function countOf(value) {
+      return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0
+    }
+
+    /**
+     * Presentation state of the always-visible pill (spec §11.1).
+     * Priority: running > pending > idle. A temporarily collapsed list keeps the
+     * running animation but hides the pending count and the warning colour
+     * (spec §11.2).
+     * @param input - { running, pending, blocking?, collapsed? }.
+     * @returns { mode, pulse, alert, showPendingCount } where mode is
+     *   'running' | 'pending' | 'collapsed' | 'idle'.
+     */
+    function pillStateOf(input) {
+      const source = input !== null && typeof input === 'object' ? input : {}
+      const running = countOf(source.running)
+      const pending = countOf(source.pending)
+      const collapsed = source.collapsed === true && pending > 0
+      if (running > 0) return { mode: 'running', pulse: true, alert: false, showPendingCount: pending > 0 && !collapsed }
+      if (collapsed) return { mode: 'collapsed', pulse: false, alert: false, showPendingCount: false }
+      if (pending > 0) return { mode: 'pending', pulse: false, alert: source.blocking === true, showPendingCount: true }
+      return { mode: 'idle', pulse: false, alert: false, showPendingCount: false }
+    }
+
+    /**
+     * Parts of the expanded panel's status summary line; the renderer localizes
+     * each part and joins them with ' · '.
+     * @param input - { running, pending, collapsed? }.
+     * @returns [{ key, count }] — a single pillIdle part for the idle state.
+     */
+    function summaryOf(input) {
+      const source = input !== null && typeof input === 'object' ? input : {}
+      const running = countOf(source.running)
+      const pending = countOf(source.pending)
+      const parts = []
+      if (running > 0) parts.push({ key: 'pillRunning', count: running })
+      if (pending > 0) parts.push({ key: 'summaryPending', count: pending })
+      if (source.collapsed === true && pending > 0) parts.push({ key: 'pillCollapsed', count: 0 })
+      if (parts.length === 0) parts.push({ key: 'pillIdle', count: 0 })
+      return parts
+    }
+
+    /**
+     * Fold the in-memory temporary-collapse set (spec §11.2).
+     * - `action: 'collapse'` stores every pending id (the panel's button).
+     * - `action: 'restore'` forgets the whole set (manual restore).
+     * - otherwise the set is pruned to ids that are still pending, then cleared
+     *   when a session outside the set newly entered pending. Pruning runs
+     *   first, so a collapsed session that leaves pending and later re-enters is
+     *   no longer in the set: its new episode cannot be suppressed.
+     * @param previous - Set of collapsed ids (undefined on a fresh mount).
+     * @param input - { pending?, fresh?, action? }.
+     * @returns { collapsed: Set, restored: boolean, changed: boolean }.
+     */
+    function nextCollapsed(previous, input) {
+      const before = previous instanceof Set ? previous : Array.isArray(previous) ? new Set(previous) : new Set()
+      const source = input !== null && typeof input === 'object' ? input : {}
+      const pending = source.pending instanceof Set ? source.pending : new Set(source.pending ?? [])
+      if (source.action === 'restore') {
+        return { collapsed: new Set(), restored: before.size > 0, changed: before.size > 0 }
+      }
+      if (source.action === 'collapse') {
+        let changed = pending.size !== before.size
+        for (const id of pending) {
+          if (changed) break
+          if (!before.has(id)) changed = true
+        }
+        return { collapsed: new Set(pending), restored: false, changed }
+      }
+      const kept = new Set()
+      for (const id of before) if (pending.has(id)) kept.add(id)
+      const fresh = Array.isArray(source.fresh) ? source.fresh : []
+      for (const id of fresh) {
+        if (kept.has(id)) continue
+        return { collapsed: new Set(), restored: kept.size > 0, changed: kept.size > 0 }
+      }
+      return { collapsed: kept, restored: false, changed: kept.size !== before.size }
+    }
+
     // --- controller --------------------------------------------------------
 
     /** Minimal snapshot store with the { getSnapshot, subscribe } shape slots hooks expect. */
@@ -355,9 +488,12 @@ window.__ModuleLoader__.load({
     class PendingSessionsController {
       constructor(ctx) {
         this.ctx = ctx
-        this.store = createStore({ items: [], blocking: 0, notification: 'unknown' })
+        this.store = createStore({ items: [], pending: 0, blocking: 0, running: 0, collapsed: false, collapsedCount: 0, notification: 'unknown' })
         this.unsubscribers = []
         this.pendingIds = new Set()
+        // Temporary collapse lives in memory only (spec §11.2): a page refresh
+        // starts from an empty set, exactly like the notification episodes.
+        this.collapsedIds = new Set()
         this.primed = false
         this.disposed = false
         this.notification = 'unknown'
@@ -400,9 +536,15 @@ window.__ModuleLoader__.load({
           }
         }
         const visible = excludeMain(data.all, data.mainSessionId)
+        const collapsedCount = visible.filter((item) => this.collapsedIds.has(item.sessionId)).length
         this.store.set({
           items: visible,
+          pending: visible.length,
           blocking: visible.filter((item) => item.blocking).length,
+          // Running counts every observed session, subagents included (§11.1).
+          running: runningCountOf(data.statuses),
+          collapsed: collapsedCount > 0,
+          collapsedCount,
           notification: this.notification,
         })
       }
@@ -419,6 +561,11 @@ window.__ModuleLoader__.load({
         }
         const { current, fresh } = detectFresh(this.pendingIds, collected.statuses, collected.subagentIds)
         this.pendingIds = current
+        // Temporary collapse is a client-only fold: prune ids that left pending,
+        // then auto-restore when a session outside the set newly entered. The
+        // baseline snapshot is not an edge, so it never collapses or restores.
+        const fold = nextCollapsed(this.collapsedIds, { pending: current, fresh: this.primed ? fresh : [] })
+        this.collapsedIds = fold.collapsed
         this.publish(collected)
         if (!this.primed) {
           // First snapshot is the baseline: sessions already pending when the
@@ -482,6 +629,20 @@ window.__ModuleLoader__.load({
         this.publish()
       }
 
+      /** Temporarily collapse every pending session (memory only, no disk). */
+      collapse() {
+        if (this.disposed) return
+        this.collapsedIds = nextCollapsed(this.collapsedIds, { pending: this.pendingIds, action: 'collapse' }).collapsed
+        this.publish()
+      }
+
+      /** Manual restore: forget the collapse set and surface the list again. */
+      restore() {
+        if (this.disposed) return
+        this.collapsedIds = nextCollapsed(this.collapsedIds, { action: 'restore' }).collapsed
+        this.publish()
+      }
+
       start() {
         if (this.disposed) return
         const track = (store, listener) => {
@@ -509,6 +670,7 @@ window.__ModuleLoader__.load({
         }
         this.unsubscribers = []
         this.pendingIds = new Set()
+        this.collapsedIds = new Set()
         this.primed = false
         this.notification = 'unknown'
         this.start()
@@ -547,40 +709,103 @@ window.__ModuleLoader__.load({
       const snapshot = props.usePendingSessions((state) => state)
       const [expanded, setExpanded] = useState(false)
       const items = Array.isArray(snapshot.items) ? snapshot.items : []
-      if (items.length === 0) return null
+      const pending = Number.isFinite(snapshot.pending) ? snapshot.pending : items.length
+      const running = Number.isFinite(snapshot.running) ? snapshot.running : 0
+      const collapsed = snapshot.collapsed === true
       const blocking = snapshot.blocking > 0
+      const pill = pillStateOf({ running, pending, blocking, collapsed })
       const hint = snapshot.notification === 'denied'
         ? props.t('notificationDenied')
         : snapshot.notification === 'unsupported'
           ? props.t('notificationUnsupported')
           : undefined
 
-      if (!expanded) {
-        return h('div', { className: 'psess-root' },
-          h('button', {
-            type: 'button',
-            className: blocking ? 'psess-pill psess-pillAlert' : 'psess-pill',
-            title: hint,
-            'aria-label': props.t('pillAria', { count: items.length }),
-            onClick: () => setExpanded(true),
-          },
-          h('span', { className: 'psess-dot' }),
-          h('span', { className: 'psess-count' }, items.length)))
+      // The pill is always on screen (spec §11.1): running, pending, collapsed
+      // pending, or the quiet idle state.
+      const pillClasses = ['psess-pill']
+      if (pill.alert) pillClasses.push('psess-pillAlert')
+      if (pill.mode === 'running') pillClasses.push('psess-pillRunning')
+      if (pill.mode === 'idle' || pill.mode === 'collapsed') pillClasses.push('psess-pillLow')
+      if (pill.mode === 'idle') pillClasses.push('psess-pillIdle')
+
+      const pillText = []
+      if (pill.mode === 'running') {
+        pillText.push(h('span', { key: 'running', className: 'psess-count' }, props.t('pillRunning', { count: running })))
+        if (pill.showPendingCount) {
+          pillText.push(h('span', { key: 'sep', className: 'psess-sep' }, '·'))
+          pillText.push(h('span', { key: 'pending', className: 'psess-count' }, props.t('summaryPending', { count: pending })))
+        }
+      } else if (pill.mode === 'pending') {
+        pillText.push(h('span', { key: 'pending', className: 'psess-count' }, pending))
+      } else if (pill.mode === 'collapsed') {
+        pillText.push(h('span', { key: 'collapsed', className: 'psess-mutedText' }, props.t('pillCollapsed')))
+      } else {
+        pillText.push(h('span', { key: 'idle', className: 'psess-mutedText' }, props.t('pillIdle')))
       }
+
+      const ariaLabel = pill.mode === 'running'
+        ? props.t('pillRunningAria', { count: running })
+        : pill.mode === 'pending'
+          ? props.t('pillAria', { count: pending })
+          : pill.mode === 'collapsed'
+            ? props.t('pillCollapsedAria')
+            : props.t('pillIdleAria')
+
+      if (!expanded || items.length === 0) {
+        const interactive = pill.mode !== 'idle'
+        const pillProps = { className: pillClasses.join(' '), title: hint, 'aria-label': ariaLabel }
+        if (interactive) {
+          pillProps.type = 'button'
+          pillProps.onClick = () => {
+            // A muted pill restores first, then opens; otherwise it just opens.
+            if (pill.mode === 'collapsed') props.restore()
+            setExpanded(true)
+          }
+        } else {
+          pillProps.role = 'status'
+        }
+        return h('div', { className: 'psess-root' },
+          h(interactive ? 'button' : 'div', pillProps,
+            h('span', { className: 'psess-dot' }),
+            ...pillText))
+      }
+
+      const summary = summaryOf({ running, pending, collapsed })
+        .map((part) => props.t(part.key, { count: part.count }))
+        .join(' · ')
 
       return h('div', { className: 'psess-root' },
         h('div', { className: blocking ? 'psess-panel psess-panelAlert' : 'psess-panel' },
           h('div', { className: 'psess-head' },
-            h('span', { className: 'psess-title' }, props.t('title')),
-            h('span', { className: 'psess-total' }, items.length),
-            h('button', {
-              type: 'button',
-              className: 'psess-collapse',
-              title: props.t('collapse'),
-              'aria-label': props.t('collapse'),
-              onClick: () => setExpanded(false),
-            }, '×')),
+            h('div', { className: 'psess-headRow' },
+              h('span', { className: 'psess-title' }, props.t('title')),
+              h('span', { className: 'psess-total' }, items.length),
+              collapsed
+                ? h('button', {
+                  type: 'button',
+                  className: 'psess-action',
+                  title: props.t('restorePending'),
+                  onClick: () => props.restore(),
+                }, props.t('restorePending'))
+                : h('button', {
+                  type: 'button',
+                  className: 'psess-action',
+                  title: props.t('collapsePending'),
+                  onClick: () => {
+                    props.collapse()
+                    setExpanded(false)
+                  },
+                }, props.t('collapsePending')),
+              h('button', {
+                type: 'button',
+                className: 'psess-collapse',
+                title: props.t('collapse'),
+                'aria-label': props.t('collapse'),
+                onClick: () => setExpanded(false),
+              }, '×')),
+            h('span', { className: 'psess-summary' }, summary)),
           hint === undefined ? null : h('p', { className: 'psess-hint' }, hint),
+          collapsed ? h('p', { className: 'psess-note' }, props.t('collapsedHint')) : null,
           h('ul', { className: 'psess-list' }, items.map((item) => h('li', { key: item.sessionId },
             h('button', {
               type: 'button',
@@ -629,6 +854,8 @@ window.__ModuleLoader__.load({
         inject: () => ({
           hooks: { pendingSessions: controller.store },
           openSession: (sessionId) => controller.open(sessionId),
+          collapse: () => controller.collapse(),
+          restore: () => controller.restore(),
         }),
       }, PendingSessionsOverlay)), 'pending-sessions: overlay')
     }
@@ -640,6 +867,7 @@ window.__ModuleLoader__.load({
     exports.dictionaries = { zh, en }
     exports.pure = {
       pendingKindOf,
+      runningCountOf,
       subagentIdsOf,
       buildItems,
       excludeMain,
@@ -647,6 +875,9 @@ window.__ModuleLoader__.load({
       detectFresh,
       shouldNotify,
       formatNotification,
+      pillStateOf,
+      summaryOf,
+      nextCollapsed,
     }
     return module.exports
   },

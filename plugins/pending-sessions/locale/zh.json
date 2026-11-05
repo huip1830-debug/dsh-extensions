@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "待处理会话",
-    "description": "全局悬浮条：列出等你处理的会话（等批准 / 等回答 / 计划复核 / 未读回复），窗口失焦时尽力弹系统通知。"
+    "description": "全局悬浮条：列出等你处理的会话（等批准 / 等回答 / 计划复核 / 未读回复），常显运行/空闲状态，支持临时收起；窗口失焦时尽力弹系统通知。"
   },
   "ui": {
     "title": "待处理会话",
@@ -14,6 +14,16 @@
     "kindPlanReview": "计划复核",
     "kindUnread": "未读回复",
     "kindPending": "待处理",
+    "pillRunning": "{count} 运行中",
+    "pillRunningAria": "{count} 个会话运行中",
+    "pillIdle": "全部空闲",
+    "pillIdleAria": "所有会话空闲",
+    "pillCollapsed": "已收起",
+    "pillCollapsedAria": "待处理已暂时收起",
+    "summaryPending": "{count} 待处理",
+    "collapsePending": "暂时收起",
+    "restorePending": "恢复",
+    "collapsedHint": "待处理已暂时收起，点「恢复」重新提醒",
     "notificationDenied": "系统通知未授权",
     "notificationUnsupported": "当前环境不支持系统通知",
     "notifyDigestTitle": "{count} 个会话待处理",

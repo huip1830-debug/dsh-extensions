@@ -48,6 +48,7 @@ const plugin = registrations[0].factory((specifier) => {
 
 const {
   pendingKindOf,
+  runningCountOf,
   subagentIdsOf,
   buildItems,
   excludeMain,
@@ -55,6 +56,9 @@ const {
   detectFresh,
   shouldNotify,
   formatNotification,
+  pillStateOf,
+  summaryOf,
+  nextCollapsed,
 } = plugin.pure
 
 // --- fixtures ---------------------------------------------------------------
@@ -308,6 +312,123 @@ test('main session id prefers uiWorkspace.selection and falls back to retainedBy
 test('empty inputs produce an empty list', () => {
   assert.deepEqual(buildItems({ statuses: new Map(), sessions: { phase: 'pending', ids: [], byId: {} }, workspaces: { phase: 'pending', items: [] } }), [])
   assert.deepEqual(buildItems({}), [])
+})
+
+// --- running count / three-state pill ---------------------------------------
+
+test('runningCountOf counts every running session, subagent children included', () => {
+  const statuses = new Map([
+    ['top-running', running()],
+    ['child-running', running()],
+    ['idle', idle()],
+    ['unread-only', idle({ completionUnread: true })],
+  ])
+  const sessions = list([
+    row('top-running', 'Top', 1),
+    subagentRow('child-running', 'Child', 2),
+    row('idle', 'Idle', 3),
+    row('unread-only', 'Unread', 4),
+  ])
+  // The pending list filters the child out; the activity count deliberately
+  // keeps it (spec §11.1).
+  assert.equal(subagentIdsOf(sessions).has('child-running'), true)
+  assert.equal(runningCountOf(statuses), 2)
+  assert.equal(runningCountOf(new Map()), 0)
+  assert.equal(runningCountOf(undefined), 0)
+  assert.equal(runningCountOf({ a: running(), b: idle(), c: null }), 1)
+})
+
+test('the always-visible pill prioritises running over pending over idle', () => {
+  assert.deepEqual(pillStateOf({ running: 2, pending: 1, blocking: true }), { mode: 'running', pulse: true, alert: false, showPendingCount: true })
+  assert.deepEqual(pillStateOf({ running: 0, pending: 1, blocking: true }), { mode: 'pending', pulse: false, alert: true, showPendingCount: true })
+  assert.deepEqual(pillStateOf({ running: 0, pending: 2, blocking: false }), { mode: 'pending', pulse: false, alert: false, showPendingCount: true })
+  assert.deepEqual(pillStateOf({ running: 0, pending: 0 }), { mode: 'idle', pulse: false, alert: false, showPendingCount: false })
+  // Collapsed: no pending count, no warning colour; the running animation is
+  // unaffected (spec §11.2).
+  assert.deepEqual(
+    pillStateOf({ running: 0, pending: 2, blocking: true, collapsed: true }),
+    { mode: 'collapsed', pulse: false, alert: false, showPendingCount: false },
+  )
+  assert.deepEqual(
+    pillStateOf({ running: 1, pending: 2, collapsed: true }),
+    { mode: 'running', pulse: true, alert: false, showPendingCount: false },
+  )
+  assert.deepEqual(pillStateOf(undefined), { mode: 'idle', pulse: false, alert: false, showPendingCount: false })
+})
+
+test('the header summary mirrors the three states', () => {
+  assert.deepEqual(summaryOf({ running: 2, pending: 1 }), [{ key: 'pillRunning', count: 2 }, { key: 'summaryPending', count: 1 }])
+  assert.deepEqual(summaryOf({ running: 0, pending: 0 }), [{ key: 'pillIdle', count: 0 }])
+  assert.deepEqual(summaryOf({ running: 0, pending: 1, collapsed: true }), [{ key: 'summaryPending', count: 1 }, { key: 'pillCollapsed', count: 0 }])
+  assert.deepEqual(summaryOf({ running: 1, pending: 0, collapsed: true }), [{ key: 'pillRunning', count: 1 }])
+  assert.deepEqual(summaryOf(undefined), [{ key: 'pillIdle', count: 0 }])
+})
+
+// --- temporary collapse -----------------------------------------------------
+
+test('collapsing stores every pending id in memory and manual restore forgets it', () => {
+  const fold = nextCollapsed(new Set(), { pending: new Set(['a', 'b']), action: 'collapse' })
+  assert.deepEqual([...fold.collapsed].sort(), ['a', 'b'])
+  assert.equal(fold.restored, false)
+  assert.equal(fold.changed, true)
+
+  const restored = nextCollapsed(fold.collapsed, { action: 'restore' })
+  assert.deepEqual([...restored.collapsed], [])
+  assert.equal(restored.restored, true)
+
+  // Nothing collapsed: manual restore is a no-op.
+  assert.deepEqual(
+    nextCollapsed(new Set(), { action: 'restore' }),
+    { collapsed: new Set(), restored: false, changed: false },
+  )
+})
+
+test('a fresh session outside the collapsed set auto-restores the list', () => {
+  const collapsed = new Set(['a'])
+  const fold = nextCollapsed(collapsed, { pending: new Set(['a', 'b']), fresh: ['b'] })
+  assert.deepEqual([...fold.collapsed], [])
+  assert.equal(fold.restored, true)
+
+  // A fresh id already inside the set is the same episode: no restore.
+  const same = nextCollapsed(collapsed, { pending: new Set(['a']), fresh: ['a'] })
+  assert.deepEqual([...same.collapsed], ['a'])
+  assert.equal(same.restored, false)
+  assert.equal(same.changed, false)
+})
+
+test('a collapsed id that leaves pending is pruned, so its re-entry is a new episode', () => {
+  const collapsed = new Set(['a'])
+  const left = nextCollapsed(collapsed, { pending: new Set(), fresh: [] })
+  assert.deepEqual([...left.collapsed], [])
+  assert.equal(left.restored, false)
+
+  // 'a' re-enters: it is no longer collapsed, so nothing suppresses the list.
+  const again = nextCollapsed(left.collapsed, { pending: new Set(['a']), fresh: ['a'] })
+  assert.deepEqual([...again.collapsed], [])
+
+  // Enter -> leave -> re-enter is the existing episode semantics, so the
+  // re-entry notifies like any new episode.
+  const pendingStatus = new Map([['a', idle({ completionUnread: true })]])
+  const first = detectFresh(new Set(), pendingStatus)
+  assert.deepEqual(first.fresh, ['a'])
+  const cleared = detectFresh(first.current, new Map([['a', idle()]]))
+  assert.deepEqual(cleared.fresh, [])
+  assert.deepEqual(detectFresh(cleared.current, pendingStatus).fresh, ['a'])
+})
+
+test('the collapse set starts empty on every mount (refresh resets it)', () => {
+  // A fresh controller has no previous set: sessions already pending at mount
+  // are not treated as collapsed.
+  const mount = nextCollapsed(undefined, { pending: new Set(['a', 'b']), fresh: ['a', 'b'] })
+  assert.equal(mount.collapsed instanceof Set, true)
+  assert.deepEqual([...mount.collapsed], [])
+  assert.equal(mount.restored, false)
+
+  // The fold never aliases the caller's set: state is rebuilt, not mutated.
+  const previous = new Set(['a'])
+  const folded = nextCollapsed(previous, { pending: new Set(['a']) })
+  assert.notEqual(folded.collapsed, previous)
+  assert.deepEqual([...folded.collapsed], ['a'])
 })
 
 // --- notifications ----------------------------------------------------------

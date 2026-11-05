@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Pending Sessions",
-    "description": "Global floating bar listing sessions that wait for the user (approval, question, plan review, or an unread completed turn), with best-effort OS notifications while the window is unfocused."
+    "description": "Global floating bar listing sessions that wait for the user (approval, question, plan review, or an unread completed turn), always showing running/idle status with a temporary collapse, plus best-effort OS notifications while the window is unfocused."
   },
   "ui": {
     "title": "Pending sessions",
@@ -14,6 +14,16 @@
     "kindPlanReview": "Plan review",
     "kindUnread": "Unread reply",
     "kindPending": "Pending",
+    "pillRunning": "{count} running",
+    "pillRunningAria": "{count} sessions running",
+    "pillIdle": "All idle",
+    "pillIdleAria": "All sessions are idle",
+    "pillCollapsed": "Collapsed",
+    "pillCollapsedAria": "Pending items are temporarily collapsed",
+    "summaryPending": "{count} pending",
+    "collapsePending": "Collapse for now",
+    "restorePending": "Restore",
+    "collapsedHint": "Pending items are temporarily collapsed; choose Restore to bring them back",
     "notificationDenied": "System notifications not authorized",
     "notificationUnsupported": "System notifications unavailable in this environment",
     "notifyDigestTitle": "{count} sessions need attention",
