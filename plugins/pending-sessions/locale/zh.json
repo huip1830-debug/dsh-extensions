@@ -27,6 +27,7 @@
     "notificationDenied": "系统通知未授权",
     "notificationUnsupported": "当前环境不支持系统通知",
     "notifyDigestTitle": "{count} 个会话待处理",
-    "notifyDigestMore": "还有 {count} 个"
+    "notifyDigestMore": "还有 {count} 个",
+    "dragHint": "长按拖动换位"
   }
 }

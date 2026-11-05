@@ -26,8 +26,14 @@
 //     (same file 3544; dsh-client-ui-session/lib/client.js:973-975).
 //
 // Everything decision-shaped (filter / sort / workspace mapping / main-view
-// exclusion / notification edges / throttle / merge) is a pure exported
-// function under `pure`, so test.mjs covers it in node with zero dependencies.
+// exclusion / notification edges / throttle / merge / pill position / drag
+// gesture / panel placement) is a pure exported function under `pure`, so
+// test.mjs covers it in node with zero dependencies.
+//
+// Pill position (spec §12): free placement inside the viewport (no snapping),
+// persisted as a UI preference in localStorage["pending-sessions/pill-position"],
+// the one explicit exception to "no self-made persistent state". The expanded
+// panel follows the pill's half of the viewport.
 
 window.__ModuleLoader__.load({
   id: 'pending-sessions',
@@ -37,7 +43,7 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const h = React.createElement
-    const { useState } = React
+    const { useEffect, useState } = React
 
     /** Dictionary namespace owned by this bundle. */
     const NS = 'pendingSessions'
@@ -69,6 +75,7 @@ window.__ModuleLoader__.load({
       notificationUnsupported: '当前环境不支持系统通知',
       notifyDigestTitle: '{count} 个会话待处理',
       notifyDigestMore: '还有 {count} 个',
+      dragHint: '长按拖动换位',
     }
 
     const en = {
@@ -96,6 +103,7 @@ window.__ModuleLoader__.load({
       notificationUnsupported: 'System notifications unavailable in this environment',
       notifyDigestTitle: '{count} sessions need attention',
       notifyDigestMore: '+{count} more',
+      dragHint: 'Long-press to drag',
     }
 
     // Injected exactly like the official css modules: one style tag per bundle,
@@ -104,20 +112,25 @@ window.__ModuleLoader__.load({
     // events on children (dsh-client-ui-layout/lib/client.js:73), so the bar
     // anchors to the frame's bottom-right corner.
     const CSS = [
-      '.psess-root{position:absolute;right:18px;bottom:18px;z-index:5;font-size:13px;line-height:1.5}',
-      '.psess-pill{display:inline-flex;align-items:center;gap:7px;padding:6px 13px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);box-shadow:0 6px 18px rgba(0,0,0,.18);cursor:pointer;font-family:inherit;font-size:13px}',
+      // The overlay host is `absolute; inset:0`; the base rule deliberately has no
+      // right/bottom anchor so inline {left,top} can win. Before the first measure
+      // the renderer supplies the old right:18/bottom:18 anchor inline instead.
+      '.psess-root{position:absolute;z-index:5;font-size:13px;line-height:1.5}',
+      '.psess-pill{display:inline-flex;align-items:center;gap:7px;padding:6px 13px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);box-shadow:0 6px 18px rgba(0,0,0,.18);cursor:pointer;font-family:inherit;font-size:13px;touch-action:none;transition:box-shadow .15s ease,transform .15s ease}',
       '.psess-pill:hover{background:var(--dsw-alias-interactive-bg-hover)}',
       '.psess-pillAlert{border-color:var(--dsw-alias-state-warn-primary)}',
       '.psess-pillLow{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-border-l4);color:var(--dsw-alias-label-tertiary);box-shadow:0 4px 12px rgba(0,0,0,.12);font-size:12px;padding:4px 11px}',
       '.psess-pillLow:hover{color:var(--dsw-alias-label-secondary)}',
       '.psess-pillIdle{cursor:default}',
       '.psess-pillIdle:hover{background:var(--dsw-alias-bg-layer-2)}',
+      // Long-press / drag feedback: the pill lifts off the surface (spec §12.1).
+      '.psess-pillDragging{box-shadow:0 16px 36px rgba(0,0,0,.32);transform:translateY(-2px);cursor:grabbing;user-select:none}',
       '.psess-dot{width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-brand-primary);flex:none}',
       '.psess-pillAlert .psess-dot{background:var(--dsw-alias-state-warn-primary)}',
       '.psess-pillLow .psess-dot{background:var(--dsw-alias-label-tertiary);opacity:.55}',
       '.psess-pillRunning .psess-dot{animation:psess-pulse 1.6s ease-in-out infinite}',
       '@keyframes psess-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.78)}}',
-      '@media (prefers-reduced-motion: reduce){.psess-pillRunning .psess-dot{animation:none}}',
+      '@media (prefers-reduced-motion: reduce){.psess-pillRunning .psess-dot{animation:none}.psess-pill{transition:none}.psess-pillDragging{transform:none}}',
       '.psess-count{font-variant-numeric:tabular-nums}',
       '.psess-sep{color:var(--dsw-alias-label-tertiary)}',
       '.psess-mutedText{color:var(--dsw-alias-label-tertiary);font-size:12px}',
@@ -460,6 +473,171 @@ window.__ModuleLoader__.load({
       return { collapsed: kept, restored: false, changed: kept.size !== before.size }
     }
 
+    // --- position & drag (spec §12) ----------------------------------------
+
+    /** localStorage key for the pill position preference (UI preference, not session state). */
+    const POSITION_KEY = 'pending-sessions/pill-position'
+    /** Gap kept between the pill/panel and every viewport edge. */
+    const EDGE_MARGIN = 8
+    /** Default anchor mirrors the old CSS right:18px / bottom:18px. */
+    const DEFAULT_MARGIN = 18
+    /** Long-press threshold; crossing it also raises the visual feedback. */
+    const HOLD_DRAG_MS = 400
+    /** Pressed movement beyond this starts the drag immediately. */
+    const MOVE_DRAG_PX = 10
+    /** Panel width (mirrors CSS) and the pill-to-panel gap. */
+    const PANEL_WIDTH = 324
+    const PANEL_GAP = 8
+    /** The panel never grows past this share of the viewport height (mirrors CSS 60vh). */
+    const PANEL_MAX_RATIO = 0.6
+
+    /** True only for real, finite numbers (keeps NaN/Infinity/strings out). */
+    function isFiniteNumber(value) {
+      return typeof value === 'number' && Number.isFinite(value)
+    }
+
+    /**
+     * Clamp the pill's top-left into the viewport, keeping EDGE_MARGIN free on
+     * every side. Free placement otherwise: no snapping to edges (spec §12.1).
+     * Non-finite coordinates fall back to the bottom-right default anchor.
+     * @param pos - { left, top } in overlay coordinates (anything tolerated).
+     * @param viewport - { width, height } of the overlay host.
+     * @param size - { width, height } of the pill.
+     * @returns a fresh clamped { left, top }.
+     */
+    function clampPosition(pos, viewport, size) {
+      const source = pos !== null && typeof pos === 'object' ? pos : {}
+      const view = viewport !== null && typeof viewport === 'object' ? viewport : {}
+      const box = size !== null && typeof size === 'object' ? size : {}
+      const viewWidth = Math.max(0, isFiniteNumber(view.width) ? view.width : 0)
+      const viewHeight = Math.max(0, isFiniteNumber(view.height) ? view.height : 0)
+      const boxWidth = Math.max(0, isFiniteNumber(box.width) ? box.width : 0)
+      const boxHeight = Math.max(0, isFiniteNumber(box.height) ? box.height : 0)
+      // When the box is wider than the viewport, the left edge still stays on the
+      // 8px margin instead of pushing the pill off-screen to the right.
+      const maxLeft = Math.max(EDGE_MARGIN, viewWidth - boxWidth - EDGE_MARGIN)
+      const maxTop = Math.max(EDGE_MARGIN, viewHeight - boxHeight - EDGE_MARGIN)
+      const rawLeft = isFiniteNumber(source.left) ? source.left : maxLeft
+      const rawTop = isFiniteNumber(source.top) ? source.top : maxTop
+      return {
+        left: Math.min(maxLeft, Math.max(EDGE_MARGIN, rawLeft)),
+        top: Math.min(maxTop, Math.max(EDGE_MARGIN, rawTop)),
+      }
+    }
+
+    /**
+     * First-run position: the right:18 / bottom:18 anchor translated to
+     * left/top from the viewport and the measured pill box (then clamped).
+     * @returns { left, top }.
+     */
+    function defaultPosition(viewport, size) {
+      const view = viewport !== null && typeof viewport === 'object' ? viewport : {}
+      const box = size !== null && typeof size === 'object' ? size : {}
+      const viewWidth = Math.max(0, isFiniteNumber(view.width) ? view.width : 0)
+      const viewHeight = Math.max(0, isFiniteNumber(view.height) ? view.height : 0)
+      const boxWidth = Math.max(0, isFiniteNumber(box.width) ? box.width : 0)
+      const boxHeight = Math.max(0, isFiniteNumber(box.height) ? box.height : 0)
+      return clampPosition({ left: viewWidth - boxWidth - DEFAULT_MARGIN, top: viewHeight - boxHeight - DEFAULT_MARGIN }, viewport, size)
+    }
+
+    /**
+     * Read the persisted pill position. Missing, malformed, or hostile storage
+     * all collapse to undefined, so the caller falls back to the default anchor.
+     * @param storageLike - a Storage-like { getItem } or anything.
+     * @returns { left, top } or undefined.
+     */
+    function readPosition(storageLike) {
+      if (storageLike === null || typeof storageLike !== 'object' || typeof storageLike.getItem !== 'function') return undefined
+      let raw
+      try {
+        raw = storageLike.getItem(POSITION_KEY)
+      } catch {
+        return undefined
+      }
+      if (typeof raw !== 'string' || raw.length === 0) return undefined
+      let parsed
+      try {
+        parsed = JSON.parse(raw)
+      } catch {
+        return undefined
+      }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+      if (!isFiniteNumber(parsed.left) || !isFiniteNumber(parsed.top)) return undefined
+      return { left: parsed.left, top: parsed.top }
+    }
+
+    /**
+     * Persist the pill position as a UI preference. Storage failures (private
+     * mode, quota, no localStorage) are silent: the in-memory position still
+     * works for this session (spec §12.2).
+     * @param storageLike - a Storage-like { setItem } or anything.
+     * @param position - { left, top }.
+     * @returns true when the write went through.
+     */
+    function writePosition(storageLike, position) {
+      if (storageLike === null || typeof storageLike !== 'object' || typeof storageLike.setItem !== 'function') return false
+      if (position === null || typeof position !== 'object' || !isFiniteNumber(position.left) || !isFiniteNumber(position.top)) return false
+      try {
+        storageLike.setItem(POSITION_KEY, JSON.stringify({ left: position.left, top: position.top }))
+        return true
+      } catch {
+        return false
+      }
+    }
+
+    /**
+     * Classify a pressed pointer from its hold time and total movement (spec
+     * §12.1): either threshold starts a drag; a release before either of them
+     * keeps the original click behaviour.
+     * @param input - { heldMs?, movedPx?, released? }.
+     * @returns 'drag' | 'pending' | 'click'.
+     */
+    function dragGestureOf(input) {
+      const source = input !== null && typeof input === 'object' ? input : {}
+      const heldMs = isFiniteNumber(source.heldMs) && source.heldMs > 0 ? source.heldMs : 0
+      const movedPx = isFiniteNumber(source.movedPx) && source.movedPx > 0 ? source.movedPx : 0
+      if (movedPx > MOVE_DRAG_PX) return 'drag'
+      if (heldMs >= HOLD_DRAG_MS) return 'drag'
+      return source.released === true ? 'click' : 'pending'
+    }
+
+    /**
+     * Where the expanded panel goes relative to the pill (spec §12.3).
+     * The pill's vertical half decides the direction; the panel's right edge
+     * hugs the pill's right edge and the whole panel stays inside the viewport.
+     * @param pos - pill top-left plus its measured { width, height }.
+     * @param viewport - { width, height } of the overlay host.
+     * @param panelSize - { width, height } of the panel (height is advisory).
+     * @returns { direction, left, offsetLeft, maxWidth, maxHeight } where
+     *   direction is 'up' | 'down', left is the panel's overlay-space left,
+     *   offsetLeft is the value to render on the panel inside the root, and
+     *   maxWidth/maxHeight bound an oversized panel on a small window.
+     */
+    function panelPlacement(pos, viewport, panelSize) {
+      const source = pos !== null && typeof pos === 'object' ? pos : {}
+      const view = viewport !== null && typeof viewport === 'object' ? viewport : {}
+      const panel = panelSize !== null && typeof panelSize === 'object' ? panelSize : {}
+      const viewWidth = Math.max(0, isFiniteNumber(view.width) ? view.width : 0)
+      const viewHeight = Math.max(0, isFiniteNumber(view.height) ? view.height : 0)
+      const pillLeft = isFiniteNumber(source.left) ? source.left : 0
+      const pillTop = isFiniteNumber(source.top) ? source.top : 0
+      const pillWidth = Math.max(0, isFiniteNumber(source.width) ? source.width : 0)
+      const pillHeight = Math.max(0, isFiniteNumber(source.height) ? source.height : 0)
+      const panelWidth = Math.max(0, isFiniteNumber(panel.width) ? panel.width : PANEL_WIDTH)
+      const maxWidth = Math.max(0, viewWidth - EDGE_MARGIN * 2)
+      const maxLeft = Math.max(EDGE_MARGIN, viewWidth - panelWidth - EDGE_MARGIN)
+      // Right edges touch, then the pair is pulled back inside the viewport.
+      const aligned = pillLeft + pillWidth - panelWidth
+      const left = Math.min(maxLeft, Math.max(EDGE_MARGIN, aligned))
+      // Lower half opens upwards, upper half (and the exact middle) downwards.
+      const direction = pillTop + pillHeight / 2 > viewHeight / 2 ? 'up' : 'down'
+      const room = direction === 'up'
+        ? pillTop - PANEL_GAP - EDGE_MARGIN
+        : viewHeight - (pillTop + pillHeight) - PANEL_GAP - EDGE_MARGIN
+      const maxHeight = Math.max(0, Math.min(room, viewHeight * PANEL_MAX_RATIO))
+      return { direction, left, offsetLeft: left - pillLeft, maxWidth, maxHeight }
+    }
+
     // --- controller --------------------------------------------------------
 
     /** Minimal snapshot store with the { getSnapshot, subscribe } shape slots hooks expect. */
@@ -488,12 +666,17 @@ window.__ModuleLoader__.load({
     class PendingSessionsController {
       constructor(ctx) {
         this.ctx = ctx
-        this.store = createStore({ items: [], pending: 0, blocking: 0, running: 0, collapsed: false, collapsedCount: 0, notification: 'unknown' })
+        this.store = createStore({ items: [], pending: 0, blocking: 0, running: 0, collapsed: false, collapsedCount: 0, notification: 'unknown', position: undefined })
         this.unsubscribers = []
         this.pendingIds = new Set()
         // Temporary collapse lives in memory only (spec §11.2): a page refresh
         // starts from an empty set, exactly like the notification episodes.
         this.collapsedIds = new Set()
+        // Pill position is a UI preference, not session state (spec §12.2):
+        // persisted in localStorage and kept across connection/reset. Undefined
+        // means "not measured yet": the renderer falls back to the bottom-right
+        // anchor and moves it here after the first measurement.
+        this.position = undefined
         this.primed = false
         this.disposed = false
         this.notification = 'unknown'
@@ -546,6 +729,7 @@ window.__ModuleLoader__.load({
           collapsed: collapsedCount > 0,
           collapsedCount,
           notification: this.notification,
+          position: this.position,
         })
       }
 
@@ -643,8 +827,37 @@ window.__ModuleLoader__.load({
         this.publish()
       }
 
+      /** localStorage, or undefined when unavailable (private mode, disabled). */
+      storage() {
+        try {
+          return typeof window !== 'undefined' && window.localStorage !== undefined && window.localStorage !== null ? window.localStorage : undefined
+        } catch {
+          return undefined
+        }
+      }
+
+      /**
+       * Reposition the pill in overlay coordinates (live drag and mount clamp).
+       * Equality-guarded so a render pass that re-clamps to the same spot never
+       * loops back into another publish.
+       */
+      moveTo(left, top) {
+        if (this.disposed) return
+        if (!isFiniteNumber(left) || !isFiniteNumber(top)) return
+        if (this.position !== undefined && this.position.left === left && this.position.top === top) return
+        this.position = { left, top }
+        this.publish()
+      }
+
+      /** Persist the current position (only on release, spec §12.2); false when storage is unavailable. */
+      persistPosition() {
+        if (this.position === undefined) return false
+        return writePosition(this.storage(), this.position)
+      }
+
       start() {
         if (this.disposed) return
+        if (this.position === undefined) this.position = readPosition(this.storage())
         const track = (store, listener) => {
           if (store === undefined || store === null || typeof store.subscribe !== 'function') return
           const stop = store.subscribe(listener)
@@ -705,9 +918,208 @@ window.__ModuleLoader__.load({
       return t(KIND_LABEL_KEYS[kind] ?? 'kindPending')
     }
 
+    /** Size of the overlay host the pill lives in; falls back to the window. */
+    function hostViewportOf(node) {
+      try {
+        const root = node !== null && node !== undefined ? node.parentElement : null
+        const host = root !== null ? root.parentElement : null
+        if (host !== null) {
+          const rect = host.getBoundingClientRect()
+          if (rect.width > 0 && rect.height > 0) return { width: rect.width, height: rect.height }
+        }
+      } catch {
+        // measurement is best-effort
+      }
+      const width = typeof window !== 'undefined' && isFiniteNumber(window.innerWidth) ? window.innerWidth : 0
+      const height = typeof window !== 'undefined' && isFiniteNumber(window.innerHeight) ? window.innerHeight : 0
+      return { width, height }
+    }
+
+    /** Measured pill box; zeroes when the node is gone. */
+    function pillSizeOf(node) {
+      try {
+        if (node !== null && node !== undefined && typeof node.getBoundingClientRect === 'function') {
+          const rect = node.getBoundingClientRect()
+          return { width: rect.width, height: rect.height }
+        }
+      } catch {
+        // measurement is best-effort
+      }
+      return { width: 0, height: 0 }
+    }
+
+    /** Root style: stored position, else the old bottom-right anchor until the first measure. */
+    function rootStyle(position) {
+      if (position === undefined || position === null) return { right: DEFAULT_MARGIN + 'px', bottom: DEFAULT_MARGIN + 'px' }
+      return { left: position.left + 'px', top: position.top + 'px' }
+    }
+
     function PendingSessionsOverlay(props) {
       const snapshot = props.usePendingSessions((state) => state)
       const [expanded, setExpanded] = useState(false)
+      const [dragging, setDragging] = useState(false)
+      const pillRef = React.useRef(null)
+      const gestureRef = React.useRef(null)
+      const suppressClickRef = React.useRef(false)
+      const metricsRef = React.useRef(null)
+      const viewportRef = React.useRef(null)
+      const stored = snapshot.position
+      const position = stored !== null && typeof stored === 'object' && isFiniteNumber(stored.left) && isFiniteNumber(stored.top)
+        ? { left: stored.left, top: stored.top }
+        : undefined
+      // Read by the resize listener: it must see the latest committed position.
+      const positionRef = React.useRef(position)
+      useEffect(() => {
+        positionRef.current = position
+      })
+
+      // Keep the pill inside the viewport: the first run computes the
+      // bottom-right default from the measured box, later runs re-clamp the
+      // stored position after a window change. Runs every render, but
+      // controller.moveTo is equality-guarded, so it cannot loop; an active
+      // drag owns the position.
+      useEffect(() => {
+        if (expanded) return
+        const node = pillRef.current
+        if (node === null || node === undefined) return
+        metricsRef.current = pillSizeOf(node)
+        viewportRef.current = hostViewportOf(node)
+        const gesture = gestureRef.current
+        if (gesture !== null && gesture.dragging === true) return
+        const next = position === undefined
+          ? defaultPosition(viewportRef.current, metricsRef.current)
+          : clampPosition(position, viewportRef.current, metricsRef.current)
+        if (position === undefined || next.left !== position.left || next.top !== position.top) props.moveTo(next.left, next.top)
+      })
+
+      // A shrunken window must not strand the pill outside the viewport
+      // (spec §12.2); the expanded panel locks the position, so skip it there.
+      useEffect(() => {
+        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined
+        const onResize = () => {
+          const node = pillRef.current
+          if (node === null || node === undefined) return
+          const viewport = hostViewportOf(node)
+          const size = pillSizeOf(node)
+          metricsRef.current = size
+          viewportRef.current = viewport
+          const current = positionRef.current
+          const next = current === undefined ? defaultPosition(viewport, size) : clampPosition(current, viewport, size)
+          props.moveTo(next.left, next.top)
+        }
+        window.addEventListener('resize', onResize)
+        return () => window.removeEventListener('resize', onResize)
+      }, [])
+
+      // A long-press timer must never outlive the overlay.
+      useEffect(() => () => {
+        const gesture = gestureRef.current
+        if (gesture !== null) clearTimeout(gesture.timer)
+        gestureRef.current = null
+      }, [])
+
+      const enterDrag = (gesture) => {
+        if (gesture.dragging === true) return
+        gesture.dragging = true
+        setDragging(true)
+      }
+
+      const onPointerDown = (event) => {
+        if (event === null || typeof event !== 'object') return
+        if (isFiniteNumber(event.button) && event.button !== 0) return
+        const node = event.currentTarget
+        const size = pillSizeOf(node)
+        const viewport = hostViewportOf(node)
+        metricsRef.current = size
+        viewportRef.current = viewport
+        suppressClickRef.current = false
+        const start = position === undefined ? defaultPosition(viewport, size) : clampPosition(position, viewport, size)
+        const gesture = {
+          pointerId: event.pointerId,
+          startX: isFiniteNumber(event.clientX) ? event.clientX : 0,
+          startY: isFiniteNumber(event.clientY) ? event.clientY : 0,
+          startLeft: start.left,
+          startTop: start.top,
+          lastLeft: start.left,
+          lastTop: start.top,
+          size,
+          viewport,
+          downAt: Date.now(),
+          dragging: false,
+          timer: undefined,
+        }
+        gesture.timer = setTimeout(() => {
+          if (gestureRef.current === gesture) enterDrag(gesture)
+        }, HOLD_DRAG_MS)
+        gestureRef.current = gesture
+        if (isFiniteNumber(event.pointerId) && typeof node.setPointerCapture === 'function') {
+          try {
+            node.setPointerCapture(event.pointerId)
+          } catch {
+            // pointer capture is best-effort
+          }
+        }
+      }
+
+      const onPointerMove = (event) => {
+        const gesture = gestureRef.current
+        if (gesture === null || event === null || typeof event !== 'object') return
+        if (event.pointerId !== undefined && event.pointerId !== gesture.pointerId) return
+        const dx = (isFiniteNumber(event.clientX) ? event.clientX : gesture.startX) - gesture.startX
+        const dy = (isFiniteNumber(event.clientY) ? event.clientY : gesture.startY) - gesture.startY
+        const movedPx = Math.sqrt(dx * dx + dy * dy)
+        const heldMs = Date.now() - gesture.downAt
+        if (gesture.dragging !== true && dragGestureOf({ heldMs, movedPx }) === 'drag') enterDrag(gesture)
+        if (gesture.dragging !== true) return
+        if (typeof event.preventDefault === 'function') event.preventDefault()
+        const next = clampPosition({ left: gesture.startLeft + dx, top: gesture.startTop + dy }, gesture.viewport, gesture.size)
+        gesture.lastLeft = next.left
+        gesture.lastTop = next.top
+        props.moveTo(next.left, next.top)
+      }
+
+      const finishGesture = (event) => {
+        const gesture = gestureRef.current
+        if (gesture === null) return
+        if (event !== null && typeof event === 'object' && event.pointerId !== undefined && event.pointerId !== gesture.pointerId) return
+        clearTimeout(gesture.timer)
+        gestureRef.current = null
+        if (event !== null && typeof event === 'object') {
+          const node = event.currentTarget
+          if (node !== null && node !== undefined && typeof node.releasePointerCapture === 'function') {
+            try {
+              if (typeof node.hasPointerCapture !== 'function' || node.hasPointerCapture(gesture.pointerId)) node.releasePointerCapture(gesture.pointerId)
+            } catch {
+              // capture release is best-effort
+            }
+          }
+        }
+        if (gesture.dragging !== true) return
+        // A finished drag must not also expand the panel: swallow the synthetic click.
+        suppressClickRef.current = true
+        setDragging(false)
+        const next = clampPosition({ left: gesture.lastLeft, top: gesture.lastTop }, gesture.viewport, gesture.size)
+        props.moveTo(next.left, next.top)
+        props.persistPosition()
+      }
+
+      const onClick = (event) => {
+        if (suppressClickRef.current === true) {
+          suppressClickRef.current = false
+          return
+        }
+        if (event !== null && typeof event === 'object' && event.currentTarget !== null && event.currentTarget !== undefined) {
+          metricsRef.current = pillSizeOf(event.currentTarget)
+          viewportRef.current = hostViewportOf(event.currentTarget)
+        }
+        // A muted pill restores first, then opens; otherwise it just opens.
+        // Key on the snapshot flag, not pill.mode: running outranks collapsed
+        // in pillStateOf, so a running+collapsed pill must restore too
+        // (spec §11.2: click the muted pill = restore + open).
+        if (collapsed) props.restore()
+        setExpanded(true)
+      }
+
       const items = Array.isArray(snapshot.items) ? snapshot.items : []
       const pending = Number.isFinite(snapshot.pending) ? snapshot.pending : items.length
       const running = Number.isFinite(snapshot.running) ? snapshot.running : 0
@@ -753,21 +1165,27 @@ window.__ModuleLoader__.load({
 
       if (!expanded || items.length === 0) {
         const interactive = pill.mode !== 'idle'
-        const pillProps = { className: pillClasses.join(' '), title: hint, 'aria-label': ariaLabel }
+        if (dragging) pillClasses.push('psess-pillDragging')
+        const pillTitle = hint === undefined ? props.t('dragHint') : hint + ' · ' + props.t('dragHint')
+        // Drag handlers are mounted only on the collapsed pill, never on the
+        // expanded panel (spec §12.1); the idle pill can be moved as well.
+        const pillProps = {
+          className: pillClasses.join(' '),
+          title: pillTitle,
+          'aria-label': ariaLabel,
+          ref: pillRef,
+          onPointerDown,
+          onPointerMove,
+          onPointerUp: finishGesture,
+          onPointerCancel: finishGesture,
+        }
         if (interactive) {
           pillProps.type = 'button'
-          pillProps.onClick = () => {
-            // A muted pill restores first, then opens; otherwise it just opens.
-            // Key on the snapshot flag, not pill.mode: running outranks
-            // collapsed in pillStateOf, so a running+collapsed pill must
-            // restore too (spec §11.2: click the muted pill = restore + open).
-            if (collapsed) props.restore()
-            setExpanded(true)
-          }
+          pillProps.onClick = onClick
         } else {
           pillProps.role = 'status'
         }
-        return h('div', { className: 'psess-root' },
+        return h('div', { className: 'psess-root', style: rootStyle(position) },
           h(interactive ? 'button' : 'div', pillProps,
             h('span', { className: 'psess-dot' }),
             ...pillText))
@@ -777,8 +1195,25 @@ window.__ModuleLoader__.load({
         .map((part) => props.t(part.key, { count: part.count }))
         .join(' · ')
 
-      return h('div', { className: 'psess-root' },
-        h('div', { className: blocking ? 'psess-panel psess-panelAlert' : 'psess-panel' },
+      // Panel follows the pill (spec §12.3): anchored to the pill's position
+      // captured at click/pointerdown, opening away from the closer edge.
+      const viewport = viewportRef.current !== null ? viewportRef.current : { width: 0, height: 0 }
+      const pillSize = metricsRef.current !== null ? metricsRef.current : { width: 0, height: 0 }
+      const anchor = position !== undefined ? position : defaultPosition(viewport, pillSize)
+      const placement = panelPlacement({ left: anchor.left, top: anchor.top, width: pillSize.width, height: pillSize.height }, viewport, { width: PANEL_WIDTH, height: 0 })
+      const panelStyle = {
+        position: 'absolute',
+        left: placement.offsetLeft + 'px',
+        maxWidth: placement.maxWidth + 'px',
+        maxHeight: placement.maxHeight + 'px',
+      }
+      // The root box collapses to zero height while expanded, so `bottom: 100%`
+      // resolves to the pill's top edge; downwards uses the measured pill height.
+      if (placement.direction === 'up') panelStyle.bottom = 'calc(100% + ' + PANEL_GAP + 'px)'
+      else panelStyle.top = pillSize.height + PANEL_GAP + 'px'
+
+      return h('div', { className: 'psess-root', style: rootStyle(anchor) },
+        h('div', { className: blocking ? 'psess-panel psess-panelAlert' : 'psess-panel', style: panelStyle },
           h('div', { className: 'psess-head' },
             h('div', { className: 'psess-headRow' },
               h('span', { className: 'psess-title' }, props.t('title')),
@@ -859,6 +1294,8 @@ window.__ModuleLoader__.load({
           openSession: (sessionId) => controller.open(sessionId),
           collapse: () => controller.collapse(),
           restore: () => controller.restore(),
+          moveTo: (left, top) => controller.moveTo(left, top),
+          persistPosition: () => controller.persistPosition(),
         }),
       }, PendingSessionsOverlay)), 'pending-sessions: overlay')
     }
@@ -881,6 +1318,12 @@ window.__ModuleLoader__.load({
       pillStateOf,
       summaryOf,
       nextCollapsed,
+      clampPosition,
+      defaultPosition,
+      readPosition,
+      writePosition,
+      dragGestureOf,
+      panelPlacement,
     }
     return module.exports
   },

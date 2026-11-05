@@ -27,6 +27,7 @@
     "notificationDenied": "System notifications not authorized",
     "notificationUnsupported": "System notifications unavailable in this environment",
     "notifyDigestTitle": "{count} sessions need attention",
-    "notifyDigestMore": "+{count} more"
+    "notifyDigestMore": "+{count} more",
+    "dragHint": "Long-press to drag"
   }
 }

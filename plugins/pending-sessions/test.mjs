@@ -59,6 +59,12 @@ const {
   pillStateOf,
   summaryOf,
   nextCollapsed,
+  clampPosition,
+  defaultPosition,
+  readPosition,
+  writePosition,
+  dragGestureOf,
+  panelPlacement,
 } = plugin.pure
 
 // --- fixtures ---------------------------------------------------------------
@@ -429,6 +435,140 @@ test('the collapse set starts empty on every mount (refresh resets it)', () => {
   const folded = nextCollapsed(previous, { pending: new Set(['a']) })
   assert.notEqual(folded.collapsed, previous)
   assert.deepEqual([...folded.collapsed], ['a'])
+})
+
+// --- pill position / drag / panel placement (spec §12) ----------------------
+
+const POSITION_KEY = 'pending-sessions/pill-position'
+
+// Minimal Storage stand-in: getItem returns null for a missing key, setItem
+// stringifies like the real thing.
+const makeStorage = (initial = {}) => {
+  const data = new Map(Object.entries(initial))
+  return {
+    data,
+    getItem: (key) => (data.has(key) ? data.get(key) : null),
+    setItem: (key, value) => {
+      data.set(key, String(value))
+    },
+  }
+}
+
+test('the default position mirrors the old right:18 / bottom:18 anchor', () => {
+  assert.deepEqual(defaultPosition({ width: 1000, height: 700 }, { width: 120, height: 32 }), { left: 862, top: 650 })
+  // Degenerate viewport: still inside the 8px margin instead of negative.
+  assert.deepEqual(defaultPosition({ width: 0, height: 0 }, { width: 120, height: 32 }), { left: 8, top: 8 })
+  assert.deepEqual(defaultPosition(undefined, undefined), { left: 8, top: 8 })
+})
+
+test('clampPosition keeps the whole pill inside the viewport with an 8px margin', () => {
+  const viewport = { width: 1000, height: 700 }
+  const size = { width: 120, height: 32 }
+  // Free placement inside the margins: no snapping (spec §12.1).
+  assert.deepEqual(clampPosition({ left: 200, top: 300 }, viewport, size), { left: 200, top: 300 })
+  assert.deepEqual(clampPosition({ left: -50, top: -5 }, viewport, size), { left: 8, top: 8 })
+  assert.deepEqual(clampPosition({ left: 5000, top: 5000 }, viewport, size), { left: 872, top: 660 })
+  // The fold never aliases or mutates its input.
+  const input = { left: -50, top: 5000 }
+  const clamped = clampPosition(input, viewport, size)
+  assert.equal(clamped === input, false)
+  assert.deepEqual(input, { left: -50, top: 5000 })
+})
+
+test('clampPosition treats malformed input as "use the default corner"', () => {
+  assert.deepEqual(clampPosition({ left: 'left', top: NaN }, { width: 640, height: 480 }, { width: 100, height: 30 }), { left: 532, top: 442 })
+  assert.deepEqual(clampPosition(undefined, undefined, undefined), { left: 8, top: 8 })
+  // A pill wider than the viewport keeps its left edge on the margin.
+  assert.deepEqual(clampPosition({ left: 100, top: 10 }, { width: 50, height: 100 }, { width: 200, height: 30 }), { left: 8, top: 10 })
+})
+
+test('readPosition accepts only a well-formed stored preference', () => {
+  assert.deepEqual(readPosition(makeStorage({ [POSITION_KEY]: JSON.stringify({ left: 120, top: 240 }) })), { left: 120, top: 240 })
+  // Extra fields are ignored and 0 is a valid coordinate.
+  assert.deepEqual(readPosition(makeStorage({ [POSITION_KEY]: '{"left":0,"top":0,"zoom":2}' })), { left: 0, top: 0 })
+  assert.equal(readPosition(makeStorage()), undefined)
+  assert.equal(readPosition(undefined), undefined)
+  assert.equal(readPosition({}), undefined)
+})
+
+test('readPosition degrades to undefined for malformed or hostile storage', () => {
+  const raw = (value) => makeStorage({ [POSITION_KEY]: value })
+  assert.equal(readPosition(raw('not json')), undefined)
+  assert.equal(readPosition(raw('null')), undefined)
+  assert.equal(readPosition(raw('[]')), undefined)
+  assert.equal(readPosition(raw('"text"')), undefined)
+  assert.equal(readPosition(raw(JSON.stringify({ left: '1', top: 2 }))), undefined)
+  assert.equal(readPosition(raw(JSON.stringify({ left: 1 }))), undefined)
+  assert.equal(readPosition(raw('')), undefined)
+  assert.equal(readPosition({ getItem() { throw new Error('denied') } }), undefined)
+})
+
+test('writePosition persists the pair and storage failures stay silent', () => {
+  const storage = makeStorage()
+  assert.equal(writePosition(storage, { left: 40, top: 60 }), true)
+  assert.equal(storage.data.get(POSITION_KEY), JSON.stringify({ left: 40, top: 60 }))
+  assert.deepEqual(readPosition(storage), { left: 40, top: 60 })
+  assert.equal(writePosition({ setItem() { throw new Error('quota') } }, { left: 1, top: 2 }), false)
+  assert.equal(writePosition({}, { left: 1, top: 2 }), false)
+  assert.equal(writePosition(undefined, { left: 1, top: 2 }), false)
+  assert.equal(writePosition(storage, { left: NaN, top: 2 }), false)
+})
+
+test('dragGestureOf enters a drag at 400ms of hold or beyond 10px of movement', () => {
+  assert.equal(dragGestureOf({ heldMs: 0, movedPx: 0 }), 'pending')
+  assert.equal(dragGestureOf({ heldMs: 399, movedPx: 10 }), 'pending')
+  assert.equal(dragGestureOf({ heldMs: 400, movedPx: 0 }), 'drag')
+  assert.equal(dragGestureOf({ heldMs: 0, movedPx: 11 }), 'drag')
+  assert.equal(dragGestureOf({ heldMs: 1200, movedPx: 11 }), 'drag')
+})
+
+test('a release before either threshold keeps the original click behaviour', () => {
+  assert.equal(dragGestureOf({ heldMs: 120, movedPx: 3, released: true }), 'click')
+  assert.equal(dragGestureOf({ heldMs: 120, movedPx: 3 }), 'pending')
+  // Releasing after a threshold is still a drag, not a click.
+  assert.equal(dragGestureOf({ heldMs: 800, movedPx: 0, released: true }), 'drag')
+  assert.equal(dragGestureOf({ heldMs: 0, movedPx: 11, released: true }), 'drag')
+  // Malformed input never starts a drag on its own.
+  assert.equal(dragGestureOf(undefined), 'pending')
+  assert.equal(dragGestureOf({ heldMs: '400', movedPx: NaN }), 'pending')
+  assert.equal(dragGestureOf({ heldMs: -5, movedPx: -5, released: true }), 'click')
+})
+
+test('panelPlacement opens upwards in the lower half and downwards in the upper half', () => {
+  const viewport = { width: 1000, height: 700 }
+  const panel = { width: 324, height: 300 }
+  assert.equal(panelPlacement({ left: 600, top: 500, width: 90, height: 30 }, viewport, panel).direction, 'up')
+  assert.equal(panelPlacement({ left: 600, top: 100, width: 90, height: 30 }, viewport, panel).direction, 'down')
+  // The exact middle counts as the upper half (opens downwards).
+  assert.equal(panelPlacement({ left: 600, top: 335, width: 90, height: 30 }, viewport, panel).direction, 'down')
+})
+
+test('panelPlacement hugs the pill right edge and clamps inside the viewport', () => {
+  const viewport = { width: 1000, height: 700 }
+  const panel = { width: 324, height: 300 }
+  const aligned = panelPlacement({ left: 600, top: 300, width: 100, height: 30 }, viewport, panel)
+  assert.equal(aligned.left, 376) // 600 + 100 - 324
+  assert.equal(aligned.offsetLeft, -224) // 376 - 600
+  const leftEdge = panelPlacement({ left: 100, top: 300, width: 100, height: 30 }, viewport, panel)
+  assert.equal(leftEdge.left, 8) // pulled back to the 8px margin
+  assert.equal(leftEdge.offsetLeft, -92)
+  const rightEdge = panelPlacement({ left: 900, top: 300, width: 100, height: 30 }, viewport, panel)
+  assert.equal(rightEdge.left, 668) // 1000 - 324 - 8
+  const narrow = panelPlacement({ left: 10, top: 300, width: 100, height: 30 }, { width: 300, height: 700 }, panel)
+  assert.equal(narrow.left, 8)
+  assert.equal(narrow.maxWidth, 284)
+})
+
+test('panelPlacement bounds the panel height by the room on the chosen side', () => {
+  const viewport = { width: 1000, height: 700 }
+  const panel = { width: 324, height: 300 }
+  // Room above = 500 - 8 - 8 = 484, capped at 60% of the viewport height.
+  assert.equal(panelPlacement({ left: 600, top: 500, width: 90, height: 30 }, viewport, panel).maxHeight, 420)
+  // Room below = 700 - 130 - 16 = 554, capped at 420.
+  assert.equal(panelPlacement({ left: 600, top: 100, width: 90, height: 30 }, viewport, panel).maxHeight, 420)
+  // Room above = 150 - 16 = 134, capped at 60% of 200 = 120.
+  assert.equal(panelPlacement({ left: 10, top: 150, width: 80, height: 20 }, { width: 200, height: 200 }, panel).maxHeight, 120)
+  assert.equal(panelPlacement({ left: 0, top: 0, width: 0, height: 0 }, { width: 0, height: 0 }, panel).maxHeight, 0)
 })
 
 // --- notifications ----------------------------------------------------------
