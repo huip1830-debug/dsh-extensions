@@ -164,3 +164,16 @@ plugins/pending-sessions/
 - i18n 加拖动提示键（client.js 内置字典与 locale/*.json 三处同步）；
 - 版本 0.2.0 → 0.3.0；集成命令不变（`node plugins/pending-sessions/test.mjs`）；
 - **判级**：非 gated 全批（client.js ~+120 行含手势处理 + 测试 + README + 字典），免独立评审，主控复跑 + diff 自查。
+
+## 13. 修订（2026-11-05 第五轮）：位置改比例坐标（修复窗口缩放/最大化偏差）
+
+用户实测：窗口缩小与最大化时药丸位置偏差大。根因（主控定位）：§12 存的是**绝对像素 `{left, top}`**，视口变化后无重新锚定语义——最大化时球停在旧小窗坐标（视觉上半屏中央）；缩小时靠 clamp 拉回，且 clamp 依赖 `hostViewportOf` 两级父容器猜测（R3 已知风险），测不准则更偏。修复方案经用户选定：**A. 比例坐标存储**。
+
+- **存储格式迁移**：`localStorage["pending-sessions/pill-position"]` 改为 `{fx, fy}`——可动区间（视口 − 药丸尺寸 − 两侧 8px 边距）内的 0~1 比例；`fx=1, fy=1` = 右下角。旧格式 `{left, top}` 首次读取时按当时视口一次性换算为比例并写回（迁移失败/畸形 → 回落右下角默认，不丢窗口外）。
+- **渲染**：store 存比例；每次渲染用当前视口 + 实测药丸尺寸换算回像素（`fractionToPosition`）——窗口缩放后同一比例自动落在同一相对位置，resize 监听只负责触发重算刷新，不再承担 clamp 语义。
+- **拖动**：过程仍是像素（跟手），拖动中钳制沿用 `clampPosition`；**松手**换算成比例（`positionToFraction`）写盘。
+- **面板跟随**：`panelPlacement` 接口不变，消费换算后的像素锚点。
+- **不变**：手势阈值（400ms/10px）、自由放置不吸附、8px 边距、存储失败静默降级、集成命令。
+- 新纯函数 `positionToFraction` / `fractionToPosition`（含区间宽度 ≤0 的防御）纳入 test.mjs；`readPosition` 增加旧格式迁移分支的用例；resize 不变量用例：同一比例在两个小视口下换算出的相对位置一致。
+- 版本 0.3.0 → 0.3.1（bugfix patch）；README 行为表改一行（位置记忆语义），已知限制补「`hostViewportOf` 两级父容器猜测仍在，比例语义使缩放鲁棒」。
+- **判级**：非 gated 全批（修复批，改动集中在 client.js 定位链路 + 测试），免独立评审，主控复跑 + diff 自查。

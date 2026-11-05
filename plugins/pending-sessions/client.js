@@ -30,10 +30,14 @@
 // gesture / panel placement) is a pure exported function under `pure`, so
 // test.mjs covers it in node with zero dependencies.
 //
-// Pill position (spec §12): free placement inside the viewport (no snapping),
-// persisted as a UI preference in localStorage["pending-sessions/pill-position"],
-// the one explicit exception to "no self-made persistent state". The expanded
-// panel follows the pill's half of the viewport.
+// Pill position (spec §12 gesture, §13 storage): free placement inside the
+// viewport (no snapping), persisted as a UI preference in
+// localStorage["pending-sessions/pill-position"] as fractions of the movable
+// range ({ fx, fy }, 1/1 = bottom-right), the one explicit exception to "no
+// self-made persistent state". Every render converts the fraction back to
+// pixels with the current viewport + measured pill box, so a resize or a
+// maximize re-anchors the pill to the same relative spot. The expanded panel
+// follows the pill's converted pixel position.
 
 window.__ModuleLoader__.load({
   id: 'pending-sessions',
@@ -473,10 +477,12 @@ window.__ModuleLoader__.load({
       return { collapsed: kept, restored: false, changed: kept.size !== before.size }
     }
 
-    // --- position & drag (spec §12) ----------------------------------------
+    // --- position & drag (spec §12 gesture, §13 fraction storage) ----------
 
     /** localStorage key for the pill position preference (UI preference, not session state). */
     const POSITION_KEY = 'pending-sessions/pill-position'
+    /** Storage schema marker: 2 = { fx, fy } fractions; absent = legacy { left, top } pixels. */
+    const POSITION_VERSION = 2
     /** Gap kept between the pill/panel and every viewport edge. */
     const EDGE_MARGIN = 8
     /** Default anchor mirrors the old CSS right:18px / bottom:18px. */
@@ -541,12 +547,87 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Read the persisted pill position. Missing, malformed, or hostile storage
-     * all collapse to undefined, so the caller falls back to the default anchor.
-     * @param storageLike - a Storage-like { getItem } or anything.
-     * @returns { left, top } or undefined.
+     * Movable range behind the fraction coordinates (spec §13): viewport minus
+     * the pill box minus both EDGE_MARGINs. Zero when the pill does not fit; the
+     * pill then stays on the 8px margin and every fraction resolves to it.
+     * @param viewport - { width, height } of the overlay host.
+     * @param size - { width, height } of the pill.
+     * @returns { width, height } of the movable range (never negative).
      */
-    function readPosition(storageLike) {
+    function fractionRange(viewport, size) {
+      const view = viewport !== null && typeof viewport === 'object' ? viewport : {}
+      const box = size !== null && typeof size === 'object' ? size : {}
+      const viewWidth = Math.max(0, isFiniteNumber(view.width) ? view.width : 0)
+      const viewHeight = Math.max(0, isFiniteNumber(view.height) ? view.height : 0)
+      const boxWidth = Math.max(0, isFiniteNumber(box.width) ? box.width : 0)
+      const boxHeight = Math.max(0, isFiniteNumber(box.height) ? box.height : 0)
+      return {
+        width: Math.max(0, viewWidth - boxWidth - EDGE_MARGIN * 2),
+        height: Math.max(0, viewHeight - boxHeight - EDGE_MARGIN * 2),
+      }
+    }
+
+    /**
+     * Pixel top-left -> fraction of the movable range (spec §13). fx = fy = 1 is
+     * the bottom-right corner. Non-finite coordinates and a range <= 0 both
+     * collapse to the pinned corner (EDGE_MARGIN on the cramped axis), so the
+     * pill can never be placed outside the viewport.
+     * @param pos - { left, top } in overlay coordinates (anything tolerated).
+     * @param viewport - { width, height } of the overlay host.
+     * @param size - { width, height } of the pill.
+     * @returns { fx, fy } with both values inside 0..1.
+     */
+    function positionToFraction(pos, viewport, size) {
+      const source = pos !== null && typeof pos === 'object' ? pos : {}
+      const range = fractionRange(viewport, size)
+      const left = isFiniteNumber(source.left) ? source.left : EDGE_MARGIN + range.width
+      const top = isFiniteNumber(source.top) ? source.top : EDGE_MARGIN + range.height
+      return {
+        fx: range.width > 0 ? Math.min(1, Math.max(0, (left - EDGE_MARGIN) / range.width)) : 1,
+        fy: range.height > 0 ? Math.min(1, Math.max(0, (top - EDGE_MARGIN) / range.height)) : 1,
+      }
+    }
+
+    /**
+     * Fraction of the movable range -> pixel top-left for the current viewport
+     * (spec §13). Every render funnels the stored fraction through this, so a
+     * resize/maximize re-anchors the pill without any clamp pass. Malformed
+     * fractions fall back to the bottom-right corner; a range <= 0 pins the
+     * margin instead of producing a negative coordinate.
+     * @param fraction - { fx, fy } (anything tolerated).
+     * @param viewport - { width, height } of the overlay host.
+     * @param size - { width, height } of the pill.
+     * @returns { left, top } inside the 8px margins.
+     */
+    function fractionToPosition(fraction, viewport, size) {
+      const source = fraction !== null && typeof fraction === 'object' ? fraction : {}
+      const range = fractionRange(viewport, size)
+      const fx = isFiniteNumber(source.fx) ? Math.min(1, Math.max(0, source.fx)) : 1
+      const fy = isFiniteNumber(source.fy) ? Math.min(1, Math.max(0, source.fy)) : 1
+      return { left: EDGE_MARGIN + range.width * fx, top: EDGE_MARGIN + range.height * fy }
+    }
+
+    /** True when both the viewport and the pill box are measured enough to migrate. */
+    function measurable(viewport, size) {
+      return viewport !== null && typeof viewport === 'object' && size !== null && typeof size === 'object'
+        && isFiniteNumber(viewport.width) && isFiniteNumber(viewport.height) && viewport.width > 0 && viewport.height > 0
+        && isFiniteNumber(size.width) && isFiniteNumber(size.height) && size.width > 0 && size.height > 0
+    }
+
+    /**
+     * Read the persisted pill position, always normalized to fractions (spec §13).
+     * - new format { v: 2, fx, fy }: returned as-is;
+     * - legacy { left, top } pixels: converted once with the current viewport +
+     *   pill box and written back; without a measurement it returns undefined so
+     *   the caller retries after the first render;
+     * - missing / malformed / unknown version: undefined, so the caller falls
+     *   back to the bottom-right default and the pill never lands off-window.
+     * @param storageLike - a Storage-like { getItem, setItem } or anything.
+     * @param viewport - current overlay host { width, height } (for migration).
+     * @param size - current pill { width, height } (for migration).
+     * @returns { fx, fy } or undefined.
+     */
+    function readPosition(storageLike, viewport, size) {
       if (storageLike === null || typeof storageLike !== 'object' || typeof storageLike.getItem !== 'function') return undefined
       let raw
       try {
@@ -562,23 +643,30 @@ window.__ModuleLoader__.load({
         return undefined
       }
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+      if (parsed.v !== undefined && parsed.v !== POSITION_VERSION) return undefined
+      if (isFiniteNumber(parsed.fx) && isFiniteNumber(parsed.fy)) return { fx: parsed.fx, fy: parsed.fy }
       if (!isFiniteNumber(parsed.left) || !isFiniteNumber(parsed.top)) return undefined
-      return { left: parsed.left, top: parsed.top }
+      // Legacy pixels need a real viewport + pill box; the first render has no
+      // measurement yet, so the caller asks again once the pill is measured.
+      if (!measurable(viewport, size)) return undefined
+      const migrated = positionToFraction({ left: parsed.left, top: parsed.top }, viewport, size)
+      writePosition(storageLike, migrated)
+      return migrated
     }
 
     /**
-     * Persist the pill position as a UI preference. Storage failures (private
-     * mode, quota, no localStorage) are silent: the in-memory position still
-     * works for this session (spec §12.2).
+     * Persist the pill position as fractions of the movable range (spec §13).
+     * Storage failures (private mode, quota, no localStorage) are silent: the
+     * in-memory position still works for this session (spec §12.2).
      * @param storageLike - a Storage-like { setItem } or anything.
-     * @param position - { left, top }.
+     * @param fraction - { fx, fy }.
      * @returns true when the write went through.
      */
-    function writePosition(storageLike, position) {
+    function writePosition(storageLike, fraction) {
       if (storageLike === null || typeof storageLike !== 'object' || typeof storageLike.setItem !== 'function') return false
-      if (position === null || typeof position !== 'object' || !isFiniteNumber(position.left) || !isFiniteNumber(position.top)) return false
+      if (fraction === null || typeof fraction !== 'object' || !isFiniteNumber(fraction.fx) || !isFiniteNumber(fraction.fy)) return false
       try {
-        storageLike.setItem(POSITION_KEY, JSON.stringify({ left: position.left, top: position.top }))
+        storageLike.setItem(POSITION_KEY, JSON.stringify({ v: POSITION_VERSION, fx: fraction.fx, fy: fraction.fy }))
         return true
       } catch {
         return false
@@ -673,10 +761,15 @@ window.__ModuleLoader__.load({
         // starts from an empty set, exactly like the notification episodes.
         this.collapsedIds = new Set()
         // Pill position is a UI preference, not session state (spec §12.2):
-        // persisted in localStorage and kept across connection/reset. Undefined
-        // means "not measured yet": the renderer falls back to the bottom-right
-        // anchor and moves it here after the first measurement.
+        // persisted in localStorage as fractions of the movable range (§13) and
+        // kept across connection/reset. Undefined means "bottom-right default":
+        // the renderer keeps the CSS anchor until a stored fraction is adopted.
         this.position = undefined
+        // Pixel preview owned by an active drag (spec §13: the drag follows the
+        // pointer in pixels; release converts it to a fraction and persists).
+        this.livePosition = undefined
+        // One-shot guard for the legacy-pixel migration (needs a measurement).
+        this.positionChecked = false
         this.primed = false
         this.disposed = false
         this.notification = 'unknown'
@@ -730,6 +823,7 @@ window.__ModuleLoader__.load({
           collapsedCount,
           notification: this.notification,
           position: this.position,
+          livePosition: this.livePosition,
         })
       }
 
@@ -837,20 +931,43 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Reposition the pill in overlay coordinates (live drag and mount clamp).
-       * Equality-guarded so a render pass that re-clamps to the same spot never
-       * loops back into another publish.
+       * Adopt the stored position once the real viewport + pill box are known
+       * (spec §13). The legacy { left, top } pixel format can only be converted
+       * against a measurement, so the renderer calls this after its first
+       * measure; the fraction format was already read by start().
        */
-      moveTo(left, top) {
-        if (this.disposed) return
-        if (!isFiniteNumber(left) || !isFiniteNumber(top)) return
-        if (this.position !== undefined && this.position.left === left && this.position.top === top) return
-        this.position = { left, top }
+      ensurePosition(viewport, size) {
+        if (this.disposed || this.positionChecked) return
+        this.positionChecked = true
+        if (this.position !== undefined) return
+        const stored = readPosition(this.storage(), viewport, size)
+        if (stored === undefined) return
+        this.position = stored
         this.publish()
       }
 
-      /** Persist the current position (only on release, spec §12.2); false when storage is unavailable. */
-      persistPosition() {
+      /** Live drag preview in pixels (spec §13); equality-guarded against render loops. */
+      moveTo(left, top) {
+        if (this.disposed) return
+        if (!isFiniteNumber(left) || !isFiniteNumber(top)) return
+        const live = this.livePosition
+        if (live !== undefined && live.left === left && live.top === top) return
+        this.livePosition = { left, top }
+        this.publish()
+      }
+
+      /**
+       * Release a drag: convert the last pixel position to a fraction of the
+       * movable range and persist it (spec §13). Storage failures are silent.
+       * @returns true when the write went through.
+       */
+      persistPosition(viewport, size) {
+        if (this.disposed) return false
+        if (this.livePosition !== undefined) {
+          this.position = positionToFraction(this.livePosition, viewport, size)
+          this.livePosition = undefined
+          this.publish()
+        }
         if (this.position === undefined) return false
         return writePosition(this.storage(), this.position)
       }
@@ -858,6 +975,7 @@ window.__ModuleLoader__.load({
       start() {
         if (this.disposed) return
         if (this.position === undefined) this.position = readPosition(this.storage())
+        this.positionChecked = false
         const track = (store, listener) => {
           if (store === undefined || store === null || typeof store.subscribe !== 'function') return
           const stop = store.subscribe(listener)
@@ -948,7 +1066,7 @@ window.__ModuleLoader__.load({
       return { width: 0, height: 0 }
     }
 
-    /** Root style: stored position, else the old bottom-right anchor until the first measure. */
+    /** Root style: pixel position converted from the fraction, else the CSS bottom-right anchor. */
     function rootStyle(position) {
       if (position === undefined || position === null) return { right: DEFAULT_MARGIN + 'px', bottom: DEFAULT_MARGIN + 'px' }
       return { left: position.left + 'px', top: position.top + 'px' }
@@ -958,42 +1076,57 @@ window.__ModuleLoader__.load({
       const snapshot = props.usePendingSessions((state) => state)
       const [expanded, setExpanded] = useState(false)
       const [dragging, setDragging] = useState(false)
+      // Measured pill box + host viewport (spec §13). Each render converts the
+      // stored fraction through this layout, so a resize/maximize re-anchors the
+      // pill to the same relative spot; no clamping pass is involved anymore.
+      const [layout, setLayout] = useState(null)
       const pillRef = React.useRef(null)
       const gestureRef = React.useRef(null)
       const suppressClickRef = React.useRef(false)
       const metricsRef = React.useRef(null)
-      const viewportRef = React.useRef(null)
+      const layoutRef = React.useRef(null)
       const stored = snapshot.position
-      const position = stored !== null && typeof stored === 'object' && isFiniteNumber(stored.left) && isFiniteNumber(stored.top)
-        ? { left: stored.left, top: stored.top }
+      const fraction = stored !== null && typeof stored === 'object' && isFiniteNumber(stored.fx) && isFiniteNumber(stored.fy)
+        ? { fx: stored.fx, fy: stored.fy }
         : undefined
-      // Read by the resize listener: it must see the latest committed position.
-      const positionRef = React.useRef(position)
-      useEffect(() => {
-        positionRef.current = position
-      })
+      const liveStored = snapshot.livePosition
+      const live = liveStored !== null && typeof liveStored === 'object' && isFiniteNumber(liveStored.left) && isFiniteNumber(liveStored.top)
+        ? { left: liveStored.left, top: liveStored.top }
+        : undefined
+      // The live drag preview wins; otherwise the fraction is re-anchored to the
+      // viewport measured for this render. Undefined = CSS bottom-right anchor
+      // until the first measurement (never a zero-size conversion).
+      const position = live !== undefined
+        ? live
+        : fraction !== undefined && layout !== null
+          ? fractionToPosition(fraction, layout.viewport, layout.size)
+          : undefined
 
-      // Keep the pill inside the viewport: the first run computes the
-      // bottom-right default from the measured box, later runs re-clamp the
-      // stored position after a window change. Runs every render, but
-      // controller.moveTo is equality-guarded, so it cannot loop; an active
-      // drag owns the position.
+      // Measure the pill box and its host while collapsed. A changed box or
+      // viewport re-renders so the fraction lands on the new geometry; an
+      // expanded panel locks the position, so measurement skips it.
       useEffect(() => {
         if (expanded) return
         const node = pillRef.current
         if (node === null || node === undefined) return
-        metricsRef.current = pillSizeOf(node)
-        viewportRef.current = hostViewportOf(node)
-        const gesture = gestureRef.current
-        if (gesture !== null && gesture.dragging === true) return
-        const next = position === undefined
-          ? defaultPosition(viewportRef.current, metricsRef.current)
-          : clampPosition(position, viewportRef.current, metricsRef.current)
-        if (position === undefined || next.left !== position.left || next.top !== position.top) props.moveTo(next.left, next.top)
+        const size = pillSizeOf(node)
+        const viewport = hostViewportOf(node)
+        metricsRef.current = size
+        const previous = layoutRef.current
+        if (previous === null
+          || previous.viewport.width !== viewport.width || previous.viewport.height !== viewport.height
+          || previous.size.width !== size.width || previous.size.height !== size.height) {
+          const next = { viewport, size }
+          layoutRef.current = next
+          setLayout(next)
+        }
+        // A legacy pixel preference needs this first measurement to become a
+        // fraction; the controller makes it a one-shot (spec §13).
+        props.ensurePosition(viewport, size)
       })
 
-      // A shrunken window must not strand the pill outside the viewport
-      // (spec §12.2); the expanded panel locks the position, so skip it there.
+      // Window changes only trigger a re-measure + re-render: the fraction is
+      // the anchor, so there is no clamp semantics left here (spec §13).
       useEffect(() => {
         if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined
         const onResize = () => {
@@ -1002,10 +1135,13 @@ window.__ModuleLoader__.load({
           const viewport = hostViewportOf(node)
           const size = pillSizeOf(node)
           metricsRef.current = size
-          viewportRef.current = viewport
-          const current = positionRef.current
-          const next = current === undefined ? defaultPosition(viewport, size) : clampPosition(current, viewport, size)
-          props.moveTo(next.left, next.top)
+          const previous = layoutRef.current
+          if (previous !== null
+            && previous.viewport.width === viewport.width && previous.viewport.height === viewport.height
+            && previous.size.width === size.width && previous.size.height === size.height) return
+          const next = { viewport, size }
+          layoutRef.current = next
+          setLayout(next)
         }
         window.addEventListener('resize', onResize)
         return () => window.removeEventListener('resize', onResize)
@@ -1031,7 +1167,6 @@ window.__ModuleLoader__.load({
         const size = pillSizeOf(node)
         const viewport = hostViewportOf(node)
         metricsRef.current = size
-        viewportRef.current = viewport
         suppressClickRef.current = false
         const start = position === undefined ? defaultPosition(viewport, size) : clampPosition(position, viewport, size)
         const gesture = {
@@ -1100,7 +1235,8 @@ window.__ModuleLoader__.load({
         setDragging(false)
         const next = clampPosition({ left: gesture.lastLeft, top: gesture.lastTop }, gesture.viewport, gesture.size)
         props.moveTo(next.left, next.top)
-        props.persistPosition()
+        // Release converts the pixel drop point into the stored fraction (spec §13).
+        props.persistPosition(gesture.viewport, gesture.size)
       }
 
       const onClick = (event) => {
@@ -1110,7 +1246,6 @@ window.__ModuleLoader__.load({
         }
         if (event !== null && typeof event === 'object' && event.currentTarget !== null && event.currentTarget !== undefined) {
           metricsRef.current = pillSizeOf(event.currentTarget)
-          viewportRef.current = hostViewportOf(event.currentTarget)
         }
         // A muted pill restores first, then opens; otherwise it just opens.
         // Key on the snapshot flag, not pill.mode: running outranks collapsed
@@ -1195,10 +1330,14 @@ window.__ModuleLoader__.load({
         .map((part) => props.t(part.key, { count: part.count }))
         .join(' · ')
 
-      // Panel follows the pill (spec §12.3): anchored to the pill's position
-      // captured at click/pointerdown, opening away from the closer edge.
-      const viewport = viewportRef.current !== null ? viewportRef.current : { width: 0, height: 0 }
-      const pillSize = metricsRef.current !== null ? metricsRef.current : { width: 0, height: 0 }
+      // Panel follows the pill (spec §12.3, §13): anchored to the pill's pixel
+      // position derived from the stored fraction for the current viewport.
+      const viewport = layout !== null ? layout.viewport : { width: 0, height: 0 }
+      const pillSize = layout !== null
+        ? layout.size
+        : metricsRef.current !== null
+          ? metricsRef.current
+          : { width: 0, height: 0 }
       const anchor = position !== undefined ? position : defaultPosition(viewport, pillSize)
       const placement = panelPlacement({ left: anchor.left, top: anchor.top, width: pillSize.width, height: pillSize.height }, viewport, { width: PANEL_WIDTH, height: 0 })
       const panelStyle = {
@@ -1295,7 +1434,8 @@ window.__ModuleLoader__.load({
           collapse: () => controller.collapse(),
           restore: () => controller.restore(),
           moveTo: (left, top) => controller.moveTo(left, top),
-          persistPosition: () => controller.persistPosition(),
+          persistPosition: (viewport, size) => controller.persistPosition(viewport, size),
+          ensurePosition: (viewport, size) => controller.ensurePosition(viewport, size),
         }),
       }, PendingSessionsOverlay)), 'pending-sessions: overlay')
     }
@@ -1320,6 +1460,8 @@ window.__ModuleLoader__.load({
       nextCollapsed,
       clampPosition,
       defaultPosition,
+      positionToFraction,
+      fractionToPosition,
       readPosition,
       writePosition,
       dragGestureOf,

@@ -61,6 +61,8 @@ const {
   nextCollapsed,
   clampPosition,
   defaultPosition,
+  positionToFraction,
+  fractionToPosition,
   readPosition,
   writePosition,
   dragGestureOf,
@@ -437,7 +439,7 @@ test('the collapse set starts empty on every mount (refresh resets it)', () => {
   assert.deepEqual([...folded.collapsed], ['a'])
 })
 
-// --- pill position / drag / panel placement (spec §12) ----------------------
+// --- pill position / drag / panel placement (spec §12, fraction storage §13) -
 
 const POSITION_KEY = 'pending-sessions/pill-position'
 
@@ -482,10 +484,10 @@ test('clampPosition treats malformed input as "use the default corner"', () => {
   assert.deepEqual(clampPosition({ left: 100, top: 10 }, { width: 50, height: 100 }, { width: 200, height: 30 }), { left: 8, top: 10 })
 })
 
-test('readPosition accepts only a well-formed stored preference', () => {
-  assert.deepEqual(readPosition(makeStorage({ [POSITION_KEY]: JSON.stringify({ left: 120, top: 240 }) })), { left: 120, top: 240 })
-  // Extra fields are ignored and 0 is a valid coordinate.
-  assert.deepEqual(readPosition(makeStorage({ [POSITION_KEY]: '{"left":0,"top":0,"zoom":2}' })), { left: 0, top: 0 })
+test('readPosition accepts a well-formed fraction preference', () => {
+  assert.deepEqual(readPosition(makeStorage({ [POSITION_KEY]: JSON.stringify({ v: 2, fx: 0.25, fy: 0.75 }) })), { fx: 0.25, fy: 0.75 })
+  // Extra fields are ignored and 0/1 are valid fractions.
+  assert.deepEqual(readPosition(makeStorage({ [POSITION_KEY]: '{"fx":0,"fy":1,"zoom":2}' })), { fx: 0, fy: 1 })
   assert.equal(readPosition(makeStorage()), undefined)
   assert.equal(readPosition(undefined), undefined)
   assert.equal(readPosition({}), undefined)
@@ -497,21 +499,92 @@ test('readPosition degrades to undefined for malformed or hostile storage', () =
   assert.equal(readPosition(raw('null')), undefined)
   assert.equal(readPosition(raw('[]')), undefined)
   assert.equal(readPosition(raw('"text"')), undefined)
+  assert.equal(readPosition(raw(JSON.stringify({ fx: '1', fy: 2 }))), undefined)
+  assert.equal(readPosition(raw(JSON.stringify({ fx: 1 }))), undefined)
+  assert.equal(readPosition(raw(JSON.stringify({ v: 3, fx: 0.5, fy: 0.5 }))), undefined)
   assert.equal(readPosition(raw(JSON.stringify({ left: '1', top: 2 }))), undefined)
   assert.equal(readPosition(raw(JSON.stringify({ left: 1 }))), undefined)
   assert.equal(readPosition(raw('')), undefined)
   assert.equal(readPosition({ getItem() { throw new Error('denied') } }), undefined)
 })
 
-test('writePosition persists the pair and storage failures stay silent', () => {
+test('readPosition migrates the legacy { left, top } preference once the viewport is known', () => {
+  const viewport = { width: 1000, height: 700 }
+  const size = { width: 120, height: 32 }
+  const legacy = { left: 862, top: 650 }
+  const storage = makeStorage({ [POSITION_KEY]: JSON.stringify(legacy) })
+  // Without a measurement the legacy value is deferred, never guessed against a zero box.
+  assert.equal(readPosition(storage), undefined)
+  const migrated = readPosition(storage, viewport, size)
+  assert.equal(migrated.fx, 854 / 864)
+  assert.equal(migrated.fy, 642 / 652)
+  // Migration writes the new format back once, so later reads are direct.
+  assert.equal(storage.data.get(POSITION_KEY), JSON.stringify({ v: 2, fx: migrated.fx, fy: migrated.fy }))
+  assert.deepEqual(readPosition(storage), migrated)
+  // An off-window legacy value collapses into the corner instead of escaping.
+  const off = makeStorage({ [POSITION_KEY]: JSON.stringify({ left: 5000, top: 5000 }) })
+  assert.deepEqual(readPosition(off, viewport, size), { fx: 1, fy: 1 })
+})
+
+test('positionToFraction and fractionToPosition round-trip inside the 8px margins', () => {
+  const viewport = { width: 1000, height: 700 }
+  const size = { width: 120, height: 32 }
+  const pixel = { left: 200, top: 300 }
+  const fraction = positionToFraction(pixel, viewport, size)
+  assert.equal(fraction.fx, (200 - 8) / 864)
+  assert.equal(fraction.fy, (300 - 8) / 652)
+  const back = fractionToPosition(fraction, viewport, size)
+  assert.ok(Math.abs(back.left - pixel.left) < 1e-9)
+  assert.ok(Math.abs(back.top - pixel.top) < 1e-9)
+  // The corners map to the margins and to the far edge of the movable range.
+  assert.deepEqual(fractionToPosition({ fx: 0, fy: 0 }, viewport, size), { left: 8, top: 8 })
+  assert.deepEqual(fractionToPosition({ fx: 1, fy: 1 }, viewport, size), { left: 872, top: 660 })
+  assert.deepEqual(positionToFraction({ left: 8, top: 660 }, viewport, size), { fx: 0, fy: 1 })
+})
+
+test('the same fraction keeps the same relative position after a resize or maximize', () => {
+  const size = { width: 120, height: 32 }
+  const fraction = { fx: 0.5, fy: 0.25 }
+  const small = { width: 600, height: 400 }
+  const large = { width: 1000, height: 700 }
+  const inSmall = fractionToPosition(fraction, small, size)
+  const inLarge = fractionToPosition(fraction, large, size)
+  assert.equal(inSmall.left, 240) // 8 + (600 - 120 - 16) * 0.5
+  assert.equal(inLarge.left, 440) // 8 + (1000 - 120 - 16) * 0.5
+  assert.equal(inSmall.top, 96) // 8 + (400 - 32 - 16) * 0.25
+  assert.equal(inLarge.top, 171) // 8 + (700 - 32 - 16) * 0.25
+  // fx = fy = 1 always hugs the right/bottom margin, at any viewport size.
+  assert.deepEqual(fractionToPosition({ fx: 1, fy: 1 }, small, size), { left: 472, top: 360 })
+  assert.deepEqual(fractionToPosition({ fx: 1, fy: 1 }, large, size), { left: 872, top: 660 })
+  // A stored fraction round-trips through the two viewports unchanged.
+  const stored = positionToFraction(inLarge, large, size)
+  assert.ok(Math.abs(stored.fx - fraction.fx) < 1e-9)
+  assert.ok(Math.abs(stored.fy - fraction.fy) < 1e-9)
+})
+
+test('fraction helpers defend against a movable range <= 0 and malformed values', () => {
+  // Pill wider than the viewport: the horizontal range collapses to zero.
+  const cramped = { width: 50, height: 100 }
+  const wide = { width: 200, height: 30 }
+  assert.deepEqual(positionToFraction({ left: 100, top: 35 }, cramped, wide), { fx: 1, fy: 0.5 })
+  assert.deepEqual(fractionToPosition({ fx: 0.3, fy: 0.75 }, cramped, wide), { left: 8, top: 48.5 })
+  // Not measurable at all: bottom-right margin, never a negative coordinate.
+  assert.deepEqual(fractionToPosition(undefined, undefined, undefined), { left: 8, top: 8 })
+  assert.deepEqual(positionToFraction(undefined, undefined, undefined), { fx: 1, fy: 1 })
+  // Out-of-range values are clamped; NaN falls back to the default corner.
+  assert.deepEqual(fractionToPosition({ fx: 2, fy: -1 }, { width: 1000, height: 700 }, { width: 120, height: 32 }), { left: 872, top: 8 })
+  assert.deepEqual(positionToFraction({ left: 'x', top: NaN }, { width: 1000, height: 700 }, { width: 120, height: 32 }), { fx: 1, fy: 1 })
+})
+
+test('writePosition persists the fraction pair and storage failures stay silent', () => {
   const storage = makeStorage()
-  assert.equal(writePosition(storage, { left: 40, top: 60 }), true)
-  assert.equal(storage.data.get(POSITION_KEY), JSON.stringify({ left: 40, top: 60 }))
-  assert.deepEqual(readPosition(storage), { left: 40, top: 60 })
-  assert.equal(writePosition({ setItem() { throw new Error('quota') } }, { left: 1, top: 2 }), false)
-  assert.equal(writePosition({}, { left: 1, top: 2 }), false)
-  assert.equal(writePosition(undefined, { left: 1, top: 2 }), false)
-  assert.equal(writePosition(storage, { left: NaN, top: 2 }), false)
+  assert.equal(writePosition(storage, { fx: 0.25, fy: 1 }), true)
+  assert.equal(storage.data.get(POSITION_KEY), JSON.stringify({ v: 2, fx: 0.25, fy: 1 }))
+  assert.deepEqual(readPosition(storage), { fx: 0.25, fy: 1 })
+  assert.equal(writePosition({ setItem() { throw new Error('quota') } }, { fx: 1, fy: 1 }), false)
+  assert.equal(writePosition({}, { fx: 1, fy: 1 }), false)
+  assert.equal(writePosition(undefined, { fx: 1, fy: 1 }), false)
+  assert.equal(writePosition(storage, { fx: NaN, fy: 1 }), false)
 })
 
 test('dragGestureOf enters a drag at 400ms of hold or beyond 10px of movement', () => {
