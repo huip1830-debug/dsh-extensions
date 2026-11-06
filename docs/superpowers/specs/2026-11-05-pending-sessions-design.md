@@ -177,3 +177,67 @@ plugins/pending-sessions/
 - 新纯函数 `positionToFraction` / `fractionToPosition`（含区间宽度 ≤0 的防御）纳入 test.mjs；`readPosition` 增加旧格式迁移分支的用例；resize 不变量用例：同一比例在两个小视口下换算出的相对位置一致。
 - 版本 0.3.0 → 0.3.1（bugfix patch）；README 行为表改一行（位置记忆语义），已知限制补「`hostViewportOf` 两级父容器猜测仍在，比例语义使缩放鲁棒」。
 - **判级**：非 gated 全批（修复批，改动集中在 client.js 定位链路 + 测试），免独立评审，主控复跑 + diff 自查。
+
+## 14. 修订（2026-11-06 第六轮）：等待子智能体的父会话不进入待处理
+
+**问题**（用户实测）：主控派生子智能体后按 DSH 约定结束当前回合、挂起等完成事件。DSH 在任意会话 `running: true → false` 且不是主视图时置 `completionUnread`（`dsh-client-ui-session/lib/client.js:948-955`），这与「回合写完等你读」是同一条信号。插件把 `completionUnread` 一律算待处理（§4），而 §10 的子智能体过滤只排除 `origin === 'subagent'` 的子会话本身，没有识别「父会话为了等子会话而结束回合」。多子智能体时，每个子智能体完成都会唤醒主控跑一轮再结束，形成新的 unread episode 并重复通知；点击父会话也没有可执行动作。
+
+**决策**（用户已确认，问答冻结）：等待子智能体期间，父会话**既不进入列表、也不弹系统通知、不计入待处理数量**；整批结束、父会话真正跑完最后一轮且没有活跃子智能体时，这一次 `completionUnread` 才按普通未读提醒一次。等待期间的活动指示由药丸的「N 运行中」承担（§11.1 运行计数刻意含子智能体，不变）。
+
+### 14.1 判定信号与纯函数
+
+新增纯函数 `waitingParentIdsOf({ statuses, sessions })`，返回等待中的顶层父会话 id 集合：
+
+- **父会话候选**：`statuses` 中 `pendingKindOf(status) === 'unread'`，且 `sessions.byId[parent]` 存在、`summary.origin !== 'subagent'`。父会话自身有 `pendingInteraction` 时 `pendingKindOf` 返回交互类型，不进入候选（等批准/等回答必须照常提醒）。
+- **子智能体后代**：从 `sessions.byId` 收集 `origin === 'subagent'` 且 `parentSessionId` 为字符串的行，建立 `parentId → childIds`。支持嵌套（父 → 子智能体 → 孙智能体）。`parentSessionId` 随 `sessions.list` 行下发（`dsh-api-session-controller/lib/types/list.js:319-325`；同包 `manager.js:100-107` 用同一字段解析子智能体地址）。
+- **活跃节点**：`statuses.get(id).running === true` 或 `sessions.byId[id].running === true` 或 `statuses.get(id).pendingInteraction != null`。后代的活跃性递归向上传播：某子智能体自身不 running、但其后代有活跃节点，仍算活跃。
+- 父会话的后代中存在活跃节点 → 加入等待集；递归需 memo + 环保护（被访问节点先假定不活跃）。
+- 缺 `origin` / `parentSessionId` 的孤儿行无法证明关系 → 不抑制（保持现状：宁可多报，不误杀）。
+
+新增纯 reducer `nextPendingState({ previousPending, previousWaiting, topPending, unreadTop, waitingNow })`：
+
+- `waiting = (previousWaiting ∩ unreadTop) ∪ waitingNow`（只保留仍为 unread 的等待项；父会话转成 `pendingInteraction` 时立即移出等待集）。
+- `pending = topPending − waiting`；`fresh = pending − previousPending`。
+- 返回新的 `{ waiting, pending, fresh }` 三个 Set。
+
+### 14.2 控制器状态机
+
+- 控制器新增内存字段 `waitingIds: Set<string>`（构造函数初始化，`reset()` / `dispose()` 清空；不写盘、不跨刷新）。
+- 每次 `onStatus()`：
+  1. `collect()` 后由 `detectFresh` 得到 `current`（顶层待处理，含等待中）；过滤 `pendingKindOf === 'unread'` 得到 `unreadTop`。
+  2. `waitingNow = waitingParentIdsOf({ statuses, sessions })`。
+  3. 调 `nextPendingState`，写回 `this.waitingIds` / `this.pendingIds`。
+  4. `publish(collected)`；折叠/恢复用新的 `pending` 与 `fresh`；仅当 `fresh.length > 0` 时 `notify`（`fresh` 已不含等待项）。
+- `publish()` 的 `visible` 在 `excludeMain` 之后再过滤 `this.waitingIds`（同时影响 `pending` / `blocking` / `collapsed` / `collapsedCount`）；`running` 仍用全量 `runningCountOf`。
+- 非 `sessionStatus` 触发的 `publish()`（sessions.list / workspaces / selection）沿用当前 `waitingIds` 过滤，**不重算、不扩展**等待集：等待判定只在状态变化时更新，避免「最后一个子会话刚结束、父会话还没被唤醒」的间隙被重新当成待处理。父会话离开 pending 的事件（running→true、成为主视图清除 unread、交互被处理）会经 `onStatus` 把它移出等待集。
+- 收起集（§11.2）只包含可操作项：`collapse()` 用 `this.pendingIds`（已排除等待项），`nextCollapsed` 的自动恢复只看 `fresh`。等待项不进入收起集；整批结束的最终未读作为 fresh 正常触发恢复与通知。
+
+### 14.3 边界与已知限制
+
+- 首帧基线（`primed === false`）不通知；等待中的父会话直接不进列表。
+- 子智能体自己的会话仍按 §10 完全过滤；子智能体卡在等批准/等回答时不会单独列出——这是既有独立缺口，本次不修，但等待抑制会让它更安静（明确记录，避免误以为已覆盖）。
+- 父会话若因异常一直不被唤醒且保持 unread，会一直隐藏；正常子智能体完成事件会唤醒父会话，本次不做超时兜底（YAGNI）。
+- 快照时序风险：若父会话 `running → false` 的状态先于子会话 `running` 状态到达，首帧可能判不成等待而误弹一次。事件顺序离线不可造，先按快照实现；人工验收（§14.5）若复现，再补一个短暂 settle 延迟（例如 250ms 内重新确认等待集）。
+- `completionUnread` 纯客户端内存、刷新即丢等既有已知限制不变。
+
+### 14.4 测试
+
+- `waitingParentIdsOf`：直接子会话 running；嵌套孙会话 running；子会话只有 unread 不算活跃；子会话 `pendingInteraction` 算活跃；父会话自身 `pendingInteraction` 不进入等待；父会话 running；缺 `parentSessionId` / 孤儿行；多父会话；环保护。
+- `nextPendingState`：进入等待 → 子会话停止但父仍 unread 时保持 waiting；父离开 `topPending` 后移出；父转成 `pendingInteraction` 后立即移出并成为 actionable；最终 unread 产生 fresh。
+- 控制器行为（通过纯函数 + 既有集成命令覆盖）：等待项不进 `buildItems` 结果（publish 过滤）、不产生 fresh、不进入收起集。
+- 既有 `detectFresh` / `buildItems` / 子智能体过滤用例不回归。
+- **冻结集成命令（唯一一条）**：`node plugins/pending-sessions/test.mjs`（仓库根执行，覆盖本批全部改动）。
+
+### 14.5 人工验收
+
+1. 主控派 2 个子智能体后切到别的窗口（DSH 失焦）。
+2. 两个子智能体逐个完成时：**不**应收到主控会话的「未读回复」通知；悬浮条只显示「N 运行中」。
+3. 主控最终跑完整个任务：收到**一条**「未读回复」通知；悬浮条出现父会话条目，点击可跳转。
+4. 对照：普通会话（无子智能体）回合结束仍按原行为通知。
+5. 嵌套场景：主控 → 子智能体 → 孙智能体，孙智能体运行期间主控不应通知。
+
+### 14.6 实现与判级
+
+- 改动文件：`plugins/pending-sessions/client.js`（新增两个纯函数 + 控制器 `waitingIds` / publish 过滤 / onStatus 接线）、`test.mjs`（新用例）、`README.md`（行为表 + 已知限制 + 人工验收一条）、本 spec。`package.json` 版本 0.3.1 → 0.3.2（bugfix patch）。
+- i18n：无新键；locale/*.json 不改。
+- **判级**：非 gated（无契约面、无外部环境）；单文件 `client.js` 约 +60 行、test.mjs 约 +100 行，非机械改写 → 全批；同文件/同测试文件，单批串行，无并行写。免独立评审，主控复跑冻结集成命令 + diff 自查。
