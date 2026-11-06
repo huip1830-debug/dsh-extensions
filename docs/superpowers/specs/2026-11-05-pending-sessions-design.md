@@ -198,7 +198,7 @@ plugins/pending-sessions/
 
 - `waiting = (previousWaiting ∩ unreadTop) ∪ waitingNow`（只保留仍为 unread 的等待项；父会话转成 `pendingInteraction` 时立即移出等待集）。
 - `pending = topPending − waiting`；`fresh = pending − previousPending`。
-- 返回新的 `{ waiting, pending, fresh }` 三个 Set。
+- 返回新的 `{ waiting, pending, fresh }`；实现约定 `waiting` / `pending` 为 Set，`fresh` 为数组（与既有 `detectFresh` 的返回风格一致，控制器按数组消费）。
 
 ### 14.2 控制器状态机
 

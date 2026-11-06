@@ -54,6 +54,8 @@ const {
   excludeMain,
   pickMainSessionId,
   detectFresh,
+  waitingParentIdsOf,
+  nextPendingState,
   shouldNotify,
   formatNotification,
   pillStateOf,
@@ -83,8 +85,9 @@ const running = (extra = {}) => idle({ running: true, ...extra })
 const row = (id, title, updatedAt) => ({ id, title, updatedAt, retainedBy: {} })
 
 // Frozen signal: sessions.list.byId[id].origin === 'subagent' (official
-// sidebar sessionVisible() hides on the same field).
-const subagentRow = (id, title, updatedAt) => ({ ...row(id, title, updatedAt), origin: 'subagent' })
+// sidebar sessionVisible() hides on the same field). Subagent rows also carry
+// parentSessionId, the frozen parent link used by the waiting check (§14.1).
+const subagentRow = (id, title, updatedAt, extra = {}) => ({ ...row(id, title, updatedAt), origin: 'subagent', ...extra })
 
 const list = (rows, extra = {}) => ({
   phase: 'ready',
@@ -760,6 +763,202 @@ test('a large batch keeps the digest to three lines plus a remainder hint', () =
 test('an empty batch produces no payload', () => {
   assert.equal(formatNotification([], fakeT), undefined)
   assert.equal(formatNotification(undefined, fakeT), undefined)
+})
+
+// --- waiting for subagents (spec §14) ---------------------------------------
+
+const unread = () => idle({ completionUnread: true })
+
+test('a parent waits while its direct subagent runs', () => {
+  const statuses = new Map([
+    ['parent', unread()],
+    ['child', running()],
+  ])
+  const sessions = list([row('parent', 'Parent', 1), subagentRow('child', 'Child', 2, { parentSessionId: 'parent' })])
+  assert.deepEqual([...waitingParentIdsOf({ statuses, sessions })], ['parent'])
+})
+
+test('a running grandchild keeps the top-level parent waiting', () => {
+  const statuses = new Map([
+    ['parent', unread()],
+    ['child', idle()],
+    ['grandchild', running()],
+  ])
+  const sessions = list([
+    row('parent', 'Parent', 1),
+    subagentRow('child', 'Child', 2, { parentSessionId: 'parent' }),
+    subagentRow('grandchild', 'Grandchild', 3, { parentSessionId: 'child' }),
+  ])
+  assert.deepEqual([...waitingParentIdsOf({ statuses, sessions })], ['parent'])
+})
+
+test('an unread subagent is not activity, so its parent surfaces normally', () => {
+  const statuses = new Map([
+    ['parent', unread()],
+    ['child', idle({ completionUnread: true })],
+  ])
+  const sessions = list([row('parent', 'Parent', 1), subagentRow('child', 'Child', 2, { parentSessionId: 'parent' })])
+  assert.deepEqual([...waitingParentIdsOf({ statuses, sessions })], [])
+})
+
+test('a subagent blocked on an interaction keeps its parent waiting', () => {
+  const statuses = new Map([
+    ['parent', unread()],
+    ['child', idle({ pendingInteraction: { kind: 'approval' } })],
+  ])
+  const sessions = list([row('parent', 'Parent', 1), subagentRow('child', 'Child', 2, { parentSessionId: 'parent' })])
+  assert.deepEqual([...waitingParentIdsOf({ statuses, sessions })], ['parent'])
+})
+
+test('a parent blocked on its own interaction is never suppressed', () => {
+  // pendingKindOf is 'question', not 'unread': the parent must be actionable
+  // even while a subagent runs (spec §14.1).
+  const statuses = new Map([
+    ['parent', idle({ pendingInteraction: { kind: 'question' }, completionUnread: true })],
+    ['child', running()],
+  ])
+  const sessions = list([row('parent', 'Parent', 1), subagentRow('child', 'Child', 2, { parentSessionId: 'parent' })])
+  assert.deepEqual([...waitingParentIdsOf({ statuses, sessions })], [])
+})
+
+test('a running parent is not a waiting candidate', () => {
+  const statuses = new Map([
+    ['parent', running()],
+    ['child', running()],
+  ])
+  const sessions = list([row('parent', 'Parent', 1), subagentRow('child', 'Child', 2, { parentSessionId: 'parent' })])
+  assert.deepEqual([...waitingParentIdsOf({ statuses, sessions })], [])
+})
+
+test('orphan rows and rows without parentSessionId never suppress', () => {
+  const statuses = new Map([
+    ['parent', unread()],
+    ['child', running()],
+  ])
+  // No parentSessionId: the link cannot be proven.
+  assert.deepEqual(
+    [...waitingParentIdsOf({ statuses, sessions: list([row('parent', 'P', 1), subagentRow('child', 'C', 2)]) })],
+    [],
+  )
+  // parentSessionId points at a session absent from the list.
+  assert.deepEqual(
+    [...waitingParentIdsOf({ statuses, sessions: list([row('parent', 'P', 1), subagentRow('child', 'C', 2, { parentSessionId: 'ghost' })]) })],
+    [],
+  )
+  // A running id that only exists in statuses has no row to prove anything.
+  const statusOnly = new Map([
+    ['parent', unread()],
+    ['ghost-child', running()],
+  ])
+  assert.deepEqual([...waitingParentIdsOf({ statuses: statusOnly, sessions: list([row('parent', 'P', 1)]) })], [])
+})
+
+test('each parent is judged on its own descendants', () => {
+  const statuses = new Map([
+    ['parent-a', unread()],
+    ['parent-b', unread()],
+    ['child-a', running()],
+    ['child-b', idle()],
+  ])
+  const sessions = list([
+    row('parent-a', 'A', 1),
+    row('parent-b', 'B', 2),
+    subagentRow('child-a', 'CA', 3, { parentSessionId: 'parent-a' }),
+    subagentRow('child-b', 'CB', 4, { parentSessionId: 'parent-b' }),
+  ])
+  assert.deepEqual([...waitingParentIdsOf({ statuses, sessions })], ['parent-a'])
+})
+
+test('a malformed subagent cycle terminates and suppresses nothing', () => {
+  const statuses = new Map([
+    ['parent', unread()],
+    ['a', idle()],
+    ['b', idle()],
+  ])
+  const sessions = list([
+    row('parent', 'P', 1),
+    subagentRow('a', 'A', 2, { parentSessionId: 'b' }),
+    subagentRow('b', 'B', 3, { parentSessionId: 'a' }),
+  ])
+  // The cycle is unreachable from a top-level candidate; the memo/visiting
+  // guard still has to terminate instead of recursing forever.
+  assert.deepEqual([...waitingParentIdsOf({ statuses, sessions })], [])
+})
+
+test('a waiting parent stays waiting while it is still unread, without a fresh edge', () => {
+  const next = nextPendingState({
+    previousPending: new Set(),
+    previousWaiting: new Set(['parent']),
+    topPending: new Set(['parent']),
+    unreadTop: new Set(['parent']),
+    waitingNow: new Set(),
+  })
+  assert.deepEqual([...next.waiting], ['parent'])
+  assert.deepEqual([...next.pending], [])
+  assert.deepEqual(next.fresh, [])
+})
+
+test('a parent that leaves the pending set leaves the waiting set', () => {
+  const next = nextPendingState({
+    previousPending: new Set(),
+    previousWaiting: new Set(['parent']),
+    topPending: new Set(),
+    unreadTop: new Set(),
+    waitingNow: new Set(),
+  })
+  assert.deepEqual([...next.waiting], [])
+  assert.deepEqual([...next.pending], [])
+  assert.deepEqual(next.fresh, [])
+})
+
+test('a waiting parent that turns into an interaction is actionable at once', () => {
+  const next = nextPendingState({
+    previousPending: new Set(),
+    previousWaiting: new Set(['parent']),
+    topPending: new Set(['parent']),
+    unreadTop: new Set(), // pendingKindOf is now 'approval'
+    waitingNow: new Set(),
+  })
+  assert.deepEqual([...next.waiting], [])
+  assert.deepEqual([...next.pending], ['parent'])
+  assert.deepEqual(next.fresh, ['parent'])
+})
+
+test('a new wait suppresses its own fresh edge', () => {
+  const next = nextPendingState({
+    previousPending: new Set(),
+    previousWaiting: new Set(),
+    topPending: new Set(['parent', 'other']),
+    unreadTop: new Set(['parent']),
+    waitingNow: new Set(['parent']),
+  })
+  assert.deepEqual([...next.waiting], ['parent'])
+  assert.deepEqual([...next.pending], ['other'])
+  assert.deepEqual(next.fresh, ['other'])
+})
+
+test('the final unread after the batch produces one fresh edge', () => {
+  // While the parent ran it was not pending at all, so it left the waiting set.
+  const runningRound = nextPendingState({
+    previousPending: new Set(),
+    previousWaiting: new Set(['parent']),
+    topPending: new Set(),
+    unreadTop: new Set(),
+    waitingNow: new Set(),
+  })
+  assert.deepEqual([...runningRound.waiting], [])
+  assert.deepEqual([...runningRound.pending], [])
+  // The final turn ends with no active subagent: one fresh unread edge.
+  const finished = nextPendingState({
+    previousPending: runningRound.pending,
+    previousWaiting: runningRound.waiting,
+    topPending: new Set(['parent']),
+    unreadTop: new Set(['parent']),
+    waitingNow: new Set(),
+  })
+  assert.deepEqual([...finished.waiting], [])
+  assert.deepEqual([...finished.pending], ['parent'])
+  assert.deepEqual(finished.fresh, ['parent'])
 })
 
 // --- wiring guards ----------------------------------------------------------

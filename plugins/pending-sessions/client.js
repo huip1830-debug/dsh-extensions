@@ -361,6 +361,102 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Top-level sessions that are waiting for their subagents (spec §14).
+     * A parent is waiting when it is unread (a finished turn, no interaction of
+     * its own) and any descendant subagent is still active. Activity is
+     * `running === true` in either snapshot or a pending interaction; it
+     * propagates up through nested subagents. Orphan rows (no parentSessionId,
+     * or a parent that is not in the list) never suppress anything: the plugin
+     * prefers an extra row over a lost top-level session.
+     * @param input - { statuses, sessions } snapshots.
+     * @returns Set of waiting top-level parent session ids.
+     */
+    function waitingParentIdsOf(input) {
+      const source = input !== null && typeof input === 'object' ? input : {}
+      const statuses = source.statuses instanceof Map ? source.statuses : new Map(Object.entries(source.statuses ?? {}))
+      const sessions = source.sessions !== null && typeof source.sessions === 'object' ? source.sessions : {}
+      const byId = sessions.byId !== null && typeof sessions.byId === 'object' ? sessions.byId : {}
+      const summaryOf = (sessionId) => {
+        const summary = byId[sessionId]
+        return summary !== null && typeof summary === 'object' ? summary : undefined
+      }
+      // parentId -> child ids, from the frozen origin/parentSessionId fields.
+      const childrenOf = new Map()
+      for (const sessionId of Object.keys(byId)) {
+        const summary = summaryOf(sessionId)
+        if (summary === undefined || summary.origin !== 'subagent') continue
+        const parentId = summary.parentSessionId
+        if (typeof parentId !== 'string' || parentId.length === 0) continue
+        if (!childrenOf.has(parentId)) childrenOf.set(parentId, [])
+        childrenOf.get(parentId).push(sessionId)
+      }
+      const activeOf = (sessionId) => {
+        const status = statuses.get(sessionId)
+        if (status !== null && typeof status === 'object') {
+          if (status.running === true) return true
+          if (status.pendingInteraction !== undefined && status.pendingInteraction !== null) return true
+        }
+        const summary = summaryOf(sessionId)
+        return summary !== undefined && summary.running === true
+      }
+      // Memoized descendant activity; a node already on the stack is assumed
+      // inactive, so a malformed parent cycle terminates instead of recursing.
+      const memo = new Map()
+      const visiting = new Set()
+      const hasActiveDescendant = (sessionId) => {
+        if (memo.has(sessionId)) return memo.get(sessionId)
+        if (visiting.has(sessionId)) return false
+        visiting.add(sessionId)
+        let active = false
+        for (const childId of childrenOf.get(sessionId) ?? []) {
+          if (activeOf(childId) || hasActiveDescendant(childId)) {
+            active = true
+            break
+          }
+        }
+        visiting.delete(sessionId)
+        memo.set(sessionId, active)
+        return active
+      }
+      const waiting = new Set()
+      for (const [sessionId, status] of statuses) {
+        if (pendingKindOf(status) !== 'unread') continue
+        const summary = summaryOf(sessionId)
+        if (summary === undefined || summary.origin === 'subagent') continue
+        if (hasActiveDescendant(sessionId)) waiting.add(sessionId)
+      }
+      return waiting
+    }
+
+    /**
+     * Fold the waiting suppression into the pending set (spec §14.1).
+     * A previous waiting id survives only while it is still unread, so a parent
+     * that becomes a blocking interaction is actionable again immediately.
+     * `fresh` excludes waiting ids, so a parent does not notify while it waits
+     * for its subagents.
+     * @param input - { previousPending, previousWaiting, topPending, unreadTop,
+     *   waitingNow } (sets or arrays).
+     * @returns { waiting, pending, fresh } — three fresh Sets/array.
+     */
+    function nextPendingState(input) {
+      const source = input !== null && typeof input === 'object' ? input : {}
+      const toSet = (value) => (value instanceof Set ? value : new Set(value ?? []))
+      const previousPending = toSet(source.previousPending)
+      const previousWaiting = toSet(source.previousWaiting)
+      const topPending = toSet(source.topPending)
+      const unreadTop = toSet(source.unreadTop)
+      const waitingNow = toSet(source.waitingNow)
+      const waiting = new Set()
+      for (const sessionId of previousWaiting) if (unreadTop.has(sessionId)) waiting.add(sessionId)
+      for (const sessionId of waitingNow) waiting.add(sessionId)
+      const pending = new Set()
+      for (const sessionId of topPending) if (!waiting.has(sessionId)) pending.add(sessionId)
+      const fresh = []
+      for (const sessionId of pending) if (!previousPending.has(sessionId)) fresh.push(sessionId)
+      return { waiting, pending, fresh }
+    }
+
+    /**
      * Whether an edge should surface as a system notification.
      * @param input - { fresh, focused, permission }.
      * @returns true only for a fresh edge, an unfocused window, and a
@@ -757,6 +853,10 @@ window.__ModuleLoader__.load({
         this.store = createStore({ items: [], pending: 0, blocking: 0, running: 0, collapsed: false, collapsedCount: 0, notification: 'unknown', position: undefined })
         this.unsubscribers = []
         this.pendingIds = new Set()
+        // Parents currently waiting for their subagents (spec §14.2): memory
+        // only, never written to disk. Filtered out of every published
+        // projection; recalculated only on sessionStatus changes.
+        this.waitingIds = new Set()
         // Temporary collapse lives in memory only (spec §11.2): a page refresh
         // starts from an empty set, exactly like the notification episodes.
         this.collapsedIds = new Set()
@@ -796,7 +896,8 @@ window.__ModuleLoader__.load({
         const mainSessionId = pickMainSessionId(selection, sessions)
         // Same consistent read: one subagent set feeds both the list filter
         // (buildItems derives its own copy from `sessions`) and the edge filter.
-        return { statuses, subagentIds: subagentIdsOf(sessions), all: buildItems({ statuses, sessions, workspaces }), mainSessionId }
+        // `sessions` rides along for the waiting-parent check (spec §14.2).
+        return { statuses, sessions, subagentIds: subagentIdsOf(sessions), all: buildItems({ statuses, sessions, workspaces }), mainSessionId }
       }
 
       /** Publish the visible projection. Never exposes raw interaction objects. */
@@ -811,7 +912,9 @@ window.__ModuleLoader__.load({
             return
           }
         }
-        const visible = excludeMain(data.all, data.mainSessionId)
+        // Waiting parents are suppressed from every derived count (spec §14.2);
+        // the running count below deliberately keeps every session.
+        const visible = excludeMain(data.all, data.mainSessionId).filter((item) => !this.waitingIds.has(item.sessionId))
         const collapsedCount = visible.filter((item) => this.collapsedIds.has(item.sessionId)).length
         this.store.set({
           items: visible,
@@ -837,12 +940,27 @@ window.__ModuleLoader__.load({
           console.warn('pending-sessions: cannot read session status', error)
           return
         }
-        const { current, fresh } = detectFresh(this.pendingIds, collected.statuses, collected.subagentIds)
-        this.pendingIds = current
+        const { current } = detectFresh(this.pendingIds, collected.statuses, collected.subagentIds)
+        const statuses = collected.statuses instanceof Map ? collected.statuses : new Map(Object.entries(collected.statuses ?? {}))
+        // Only a plain finished turn can wait for subagents; an interaction of
+        // the parent's own must surface immediately (spec §14.1).
+        const unreadTop = new Set()
+        for (const sessionId of current) if (pendingKindOf(statuses.get(sessionId)) === 'unread') unreadTop.add(sessionId)
+        const waitingNow = waitingParentIdsOf({ statuses, sessions: collected.sessions })
+        const next = nextPendingState({
+          previousPending: this.pendingIds,
+          previousWaiting: this.waitingIds,
+          topPending: current,
+          unreadTop,
+          waitingNow,
+        })
+        this.waitingIds = next.waiting
+        this.pendingIds = next.pending
         // Temporary collapse is a client-only fold: prune ids that left pending,
         // then auto-restore when a session outside the set newly entered. The
         // baseline snapshot is not an edge, so it never collapses or restores.
-        const fold = nextCollapsed(this.collapsedIds, { pending: current, fresh: this.primed ? fresh : [] })
+        // Waiting parents are already gone from `pending` and `fresh`.
+        const fold = nextCollapsed(this.collapsedIds, { pending: next.pending, fresh: this.primed ? next.fresh : [] })
         this.collapsedIds = fold.collapsed
         this.publish(collected)
         if (!this.primed) {
@@ -851,9 +969,9 @@ window.__ModuleLoader__.load({
           this.primed = true
           return
         }
-        if (fresh.length === 0) return
+        if (next.fresh.length === 0) return
         const byId = new Map(collected.all.map((item) => [item.sessionId, item]))
-        const freshItems = fresh.map((sessionId) => byId.get(sessionId)).filter((item) => item !== undefined)
+        const freshItems = next.fresh.map((sessionId) => byId.get(sessionId)).filter((item) => item !== undefined)
         this.notify(freshItems)
       }
 
@@ -1001,6 +1119,7 @@ window.__ModuleLoader__.load({
         }
         this.unsubscribers = []
         this.pendingIds = new Set()
+        this.waitingIds = new Set()
         this.collapsedIds = new Set()
         this.primed = false
         this.notification = 'unknown'
@@ -1010,6 +1129,7 @@ window.__ModuleLoader__.load({
       dispose() {
         if (this.disposed) return
         this.disposed = true
+        this.waitingIds = new Set()
         for (const stop of this.unsubscribers) {
           try {
             stop()
@@ -1453,6 +1573,8 @@ window.__ModuleLoader__.load({
       excludeMain,
       pickMainSessionId,
       detectFresh,
+      waitingParentIdsOf,
+      nextPendingState,
       shouldNotify,
       formatNotification,
       pillStateOf,

@@ -1,6 +1,6 @@
 {
   "name": "pending-sessions",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "type": "module",
   "description": "DSH profile plugin: a global floating bar listing sessions that wait for the user (blocking interactions and unread completed turns), with best-effort OS notifications while the window is unfocused.",
