@@ -4,7 +4,7 @@
 //
 // Why the tool-call scan: the DSH event layer carries no record of *why* a child
 // route was chosen. `resolveChildAgentOptions()` merges the parent route into the
-// child options unconditionally, so at `agent/request` time a child explicitly
+// child options unconditionally, so at creation time a child explicitly
 // delegated to the parent's own route is indistinguishable from one that merely
 // inherited it. Comparing the resolved route with the parent route therefore
 // cannot work for the most common upgrade case (upgrading to the model the main

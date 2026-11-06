@@ -72,11 +72,16 @@ function selection(provider, model, reasoningEffort) {
 function createAgentModel({ options, recorded, append }) {
   let pending = recorded === undefined ? null : selection(recorded.provider, recorded.model, recorded.reasoningEffort)
   let lastUsed = null
+  let selectCalls = 0
   const sameSelection = (left, right) => left !== null
     && left.provider === right.provider
     && left.model === right.model
     && left.reasoningEffort === right.reasoningEffort
   return {
+    /** Number of times `select()` was invoked, deduplicated calls included. */
+    get selectCalls() {
+      return selectCalls
+    },
     current() {
       const recordedSelection = pending ?? lastUsed
       if (recordedSelection !== null) return { ...recordedSelection }
@@ -86,6 +91,7 @@ function createAgentModel({ options, recorded, append }) {
         : undefined
     },
     select(next) {
+      selectCalls += 1
       const chosen = selection(next.provider, next.model, next.reasoningEffort)
       if (sameSelection(pending ?? lastUsed, chosen)) return
       pending = chosen
@@ -192,6 +198,8 @@ function createHarnessWith(config, { providers = [], llm = true } = {}) {
         selections: appended.filter((event) => event.type === 'model/selection').map((event) => event.data),
         /** Current route after the created handlers ran. */
         current: () => agent.model.current(),
+        /** How many times the created handlers called `agent.model.select()`. */
+        selectCalls: () => agent.model.selectCalls,
         /** Always empty; kept so the workflow case can state it explicitly. */
         requestListeners: () => listeners.get('agent/request') ?? [],
       }
@@ -360,6 +368,10 @@ test('R4: a role route already in place produces no selection event', async () =
   })
 
   assert.deepEqual(child.selections, [])
+  // The route is already in place because the creation-time options already
+  // match the role; dedupe would also swallow a redundant select, so count the
+  // calls themselves: the created handler must not even try.
+  assert.equal(child.selectCalls(), 0)
 })
 
 test('R5: keeps a differing current route when no delegation call matches (workflow / cold resume)', async () => {
