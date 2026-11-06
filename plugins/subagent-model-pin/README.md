@@ -40,8 +40,8 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 | `provider` | 是 | ✅ | pin 到的 provider id |
 | `model` | 是 | ✅ | pin 到的模型 id |
 | `reasoningEffort` | 否 | ✅ | pin 时一并写入的 effort；换路由时会丢掉继承来的 effort，避免落在新模型不支持的档位 |
-| `debug` | 否 | ✅ | `true` 时写 `%TEMP%\subagent-model-pin.log`（apply / agent/created / 每次改写前后，含 `label=` 与 `explicit=`）；路径可用环境变量 `SUBAGENT_MODEL_PIN_LOG` 覆盖 |
-| `injectDelegationDefaults` | 否 | — | 默认 `true`。在 `tools/execute` 阶段把默认路由写进委派参数，使 descriptor / 首请求 / 冷恢复三者一致；设 `false` 退回纯 request 层 pin |
+| `debug` | 否 | ✅ | `true` 时写 `%TEMP%\subagent-model-pin.log`（apply / agent/created / select 决策前后，含 `label=`、`explicit=`、`cur=`、`parent=`）；路径可用环境变量 `SUBAGENT_MODEL_PIN_LOG` 覆盖 |
+| `injectDelegationDefaults` | 否 | — | 默认 `true`。在 `tools/execute` 阶段把默认路由写进委派参数，使 descriptor / 首请求 / 冷恢复三者一致；设 `false` 只保留 `agent/created` 时 select 兜底 |
 | `force` | 否 | — | `true` = 一律覆盖，连显式选择也 pin（回到 v5 之前的"强制"行为） |
 | `depth` | 否 | — | 只处理委派深度等于该值的子 agent |
 | `roles` | 否 | — | 按委派 `description` 前缀分档路由的数组；每项含 `match`（前缀，大小写不敏感）、`provider`、`model`，可选 `reasoningEffort`、`sandbox`。首个命中生效；未命中回落到 `provider`/`model`；委派调用里显式传的路由仍然优先。**注意前缀按字面匹配**：中文 description（如「评审后端改动」）不会命中 `Survey`/`Review` 这类英文前缀——三样本评审（`docs/reviews/2026-10-23-dispatch-pipeline-review.md` G8）里全部评审/勘察子代理因此以 `danger-full-access` 运行。用中文 label 的派发方应在角色表里配对应中文前缀（如 `评审`/`勘察`/`只读`），或约定英文 label |
@@ -95,15 +95,27 @@ roles:
 
 ## 行为矩阵
 
+判定全部发生在 `agent/created`，首个命中生效，命中「pin」时调一次 `agent.model.select()`（`(provider, model)` 相同的跳过分支不产生事件）。`cur` = `agent.model.current()`，`target` = 按 label 解析出的目标路由。
+
+| # | 场景 | 行为 |
+|---|------|------|
+| R1 | 非子会话，或 depth 不匹配 | 不动 |
+| R2 | `force: true` | 一律 `select(target)` |
+| R3 | 委托调用显式传了路由 | **放行**（含"与父路由相同"的升级；按 label 回查父会话 `tool/call`） |
+| R4 | 角色命中 | `cur` ≠ 角色路由 → `select`；相同 → 跳过 |
+| R5 | 找不到委派调用且 `cur` ≠ 父路由 | **放行**（保留旧启发：已有主选择） |
+| R6 | 其余（默认） | `cur` ≠ `target` → `select`；相同 → 跳过（含 resume 已恢复场景） |
+
+补充：
+
 | 场景 | 行为 |
 |------|------|
-| 委托时没传 `provider`/`model` | pin 到低成本模型（含 effort） |
-| 委托时显式传了不同路由 | **放行** |
-| 委托时显式传了**与父路由相同**的路由 | **放行**（按 label 回查，见下文） |
-| workflow 子级 / 冷恢复 / 父事件未提交 | 回退：路由有差异才放行，相同则 pin |
+| workflow 子级 / 父事件未提交 | `explicit` 未知：`cur` 有差异才放行，等于父路由则 pin |
 | 父会话已不存在 / 路由不可读 | 回退为 pin（宁可用便宜模型，也不放任继承） |
+| 配置的 provider 没有 adapter 注册 | 跳过 select 并写 debug log（见「路由合法性」） |
 | 两条委派 `description` 重复且并发 | 可能串路由（概率极低，写清唯一 description） |
 | 想恢复"一律强制" | 配置加 `force: true` |
+| 子代理会话中途手动改模型 | 0.3.0 起**生效**（旧中间件每请求重 pin 会覆盖） |
 
 ## 为什么"在设置里选子 agent 模型"不管用
 
@@ -136,20 +148,23 @@ DSH 设置里那个开关（`subagent-model-selection-settings`，UI 文案「�
 
 ## 实现要点
 
-`plugin.mjs` 用三个扩展点：
+`plugin.mjs` 用两个扩展点（0.3.0 起只有两个）：
 
 0. `tools/execute`（waterfall，`(exec, next)`）—— 委派工具执行前，`exec.arguments` 已由工具注册表 **deep-freeze**，只能整体替换引用、不能原地改字段。在这里补默认 `provider`/`model`/`reasoning_effort`，让 `subagent/descriptor.agentModel` 从创建时就是最终路由（见下节「descriptor 一致性」）。
-1. `agent/created`（参数 `{ agent, source, signal? }`）—— 根级插件也能收到；父会话是 `origin=undefined`，子会话是 `origin=subagent`，据此区分。
-2. `agent/request`（waterfall）—— 返回值就是该请求的最终配置 `{ provider, model, reasoningEffort, maxTokens }`。注册时传 `prepend: true`（第三个参数传 `true` 等价于 `{ prepend: true }`），让本监听器位于链条最外层，保证返回值不被内置的「会话模型选择」覆盖。
+1. `agent/created`（参数 `{ agent, source, signal? }`）—— 根级插件也能收到；父会话是 `origin=undefined`，子会话是 `origin=subagent`，据此区分。**回退 pin 在这里做**：按行为矩阵判定后调 `agent.model.select({ provider, model, reasoningEffort? })`。
+
+**0.3.0 起回退 pin 在 `agent/created` 时 select；`agent/request` 在 0.2.2 改路由会抛错**（`dsh-agent-loop` 在 `preStep` 开头就用 `agent.model.current()` 固定本步模型，此后 `agent/request` 中间件若返回不同的 provider/model/effort 会直接 `throw`，不是静默忽略）。因此插件**不再注册 `agent/request`**：`select()` 追加持久 `model/selection` 事件，`agent/created` 是 serial 且被 await，早于子代理首个 `preStep` 的模型固定点，一次 select 即对整段会话（含冷恢复）生效。
 
 ### descriptor 一致性（v4，2026-10-21）
 
-`subagent/descriptor.agentModel` 记录的是**创建时** `resolveChildAgentOptions()` 的结果，而 pin 发生在 `agent/request`，两者会不一致。受影响的不是 UI（所有 `dsh-client-ui-*` 包都不读 `agentModel`，会话模型选择器读的是 `model/selection` projection），而是：
+`subagent/descriptor.agentModel` 记录的是**创建时** `resolveChildAgentOptions()` 的结果，而早期 pin 发生在 `agent/request`（晚于 descriptor 写入），两者会不一致。受影响的不是 UI（所有 `dsh-client-ui-*` 包都不读 `agentModel`，会话模型选择器读的是 `model/selection` projection），而是：
 
 1. 会话日志里 descriptor 记录了一条从未用于请求的路由；
 2. **冷恢复**：`continuation.resume()` 用 `descriptor.agentModel` 重建 `agentOptions`，而恢复时没有新的委派 `tool/call`，插件只能走「路由不同才放行」的回退分支——父会话之后切过模型时，子会话会跑回继承来的强模型。
 
-修复方式是在 `tools/execute` 阶段把默认路由注入委派参数（`injectDelegationDefaults`）。这样 descriptor、首请求、冷恢复三者一致；workflow 子级与 continuation 没有委派参数，仍由 request 层兜底。
+修复方式是在 `tools/execute` 阶段把默认路由注入委派参数（`injectDelegationDefaults`）。这样 descriptor、首请求、冷恢复三者一致；workflow 子级与 continuation 没有委派参数，仍由 `agent/created` 时 select 兜底。
+
+0.3.0 的 select 语义让一致性更强：resume 时 descriptor 路由在 setup 阶段已先 `select` 入账，所以 `agent/created` 里 `current()` 已经是恢复路由——与目标一致就不追加事件，不一致才补一次 select。
 
 代价（新增耦合，改配置前先看）：
 
@@ -158,13 +173,23 @@ DSH 设置里那个开关（`subagent-model-selection-settings`，UI 文案「�
 | 注入等于显式选择 | 会经过 `assertAllowedModelSelection` 白名单校验；pin 路由必须在白名单里，否则所有默认委派都会报 `not allowed` |
 | 需要启用模型选择 | 工具实例 `modelSelectionEnabled` 为 false 时，注入的参数会让委派抛 `child model selection is disabled` |
 | 多一次预检 | `requiresRoutePreflight` 变 true，`llm.resolveCallConfig()` 会先解析一次路由 |
-| 可关闭 | patch 里给插件 config 加 `injectDelegationDefaults: false` 即回到纯 request 层 pin |
+| 可关闭 | patch 里给插件 config 加 `injectDelegationDefaults: false` 即只保留 `agent/created` 时 select 兜底 |
+
+### 路由合法性（0.3.0，spec §5 落地）
+
+`agent.model.select()` **不校验白名单、不走 LLM preflight**——合法的路由由插件自证。核对 `dsh-llm` 服务的导出后，落地结论是**只做 provider 半程的同步校验**：
+
+- `llm.listProviders()` 是唯一的**同步**查询，返回当前有 adapter 注册的 provider 表；插件在 select 前调它，返回非空且不含目标 provider 时**跳过 select 并写 debug log**（子会话保留继承路由，而不是 pin 到一条注定在 dispatch 阶段失败的路由）。
+- **model 半程无法同步校验**：`listModels()`、`resolveModelInfo()`、`resolveCallConfig()` 全部 `async`（要等 adapter 答复），在 `agent/created` 里同步 await 会拖住 created 链。所以「**这个 model 在目标 provider 上存在**」仍需配置自证——写错时表现为子代理首个请求由 adapter 报错（`NO_ADAPTER` / 未知模型），日志里能看到插件的 select 记录。
+- 查询不可用（没有 llm 服务、旧版 surface）时**不阻塞**：视为「无法回答」，照常 select。
+
+这条自证不改变白名单语义：主路径（注入）仍受 `allowedModels` 约束，回退路径（select）绕过它——和 0.2.x 的 `agent/request` 绕行等价。
 
 ### 兜底式默认（默认策略：`force: false`）
 
 子 agent 绝大多数时候应跑低成本模型，只有少数情况需要升级，所以插件采用「**没人选才 pin**」。
 
-**判定「有没有人选」不能靠路由比对。** DSH 的 `resolveChildAgentOptions()` 会把父路由**无条件**合并进子 agent 的 options，`agent/created` / `agent/request` 都不携带「这是显式选的还是继承的」信息。因此「显式传了与父路由相同的路由」（最常见场景：升级到主 agent 同款强模型）和「纯继承」在事件层完全同形，早期按 `resolved ≠ 父路由` 判断会把前者误 pin。
+**判定「有没有人选」不能靠路由比对。** DSH 的 `resolveChildAgentOptions()` 会把父路由**无条件**合并进子 agent 的 options，`agent/created` 时的 `agent.model.current()` 也不携带「这是显式选的还是继承的」信息。因此「显式传了与父路由相同的路由」（最常见场景：升级到主 agent 同款强模型）和「纯继承」在事件层完全同形，早期按 `resolved ≠ 父路由` 判断会把前者误 pin。
 
 可靠信号只在**父会话的 `tool/call` 事件**里：委派工具的 `arguments` 原样保留了模型写的 `provider` / `model` / `reasoning_effort`，且 `description` 等于子会话 `subagent/descriptor` 的 `label`，可用作唯一匹配键（并发委派也不会串）。
 
@@ -273,10 +298,12 @@ const text = Buffer.concat(offsets.map(o => zstdDecompressSync(buf.subarray(o)))
 
 ```powershell
 npm ci          # 或 pnpm install（0.2.0 起有 schemastery 依赖，首次需要）
-node test.mjs   # 26 个用例（在插件目录内执行）
+node test.mjs   # 34 个用例（在插件目录内执行）
 ```
 
-覆盖：显式升级到父路由、纯继承、显式"没选"、workflow/冷恢复回退、非委派工具、`force`、`injectDelegationDefaults:false`、非子 agent、角色沙箱，以及 volatile 字段（界面配置卡）的覆盖即时生效 / 回落 / 空串 effort / debug 热切换。
+覆盖：R1–R6 行为矩阵各条（`force`、显式升级含等于父路由、角色命中/已就位、无委派调用的回退、默认 pin、resume 已恢复）、workflow 场景零 `agent/request` 注册、select 的 effort 透传与缺省、provider 合法性校验（注册/未注册/无法询问）、显式"没选"、非委派工具、`injectDelegationDefaults:false`、非子 agent、角色沙箱，以及 volatile 字段（界面配置卡）的覆盖即时生效 / 回落 / 空串 effort / debug 热切换。
+
+离线 harness 用一个 `AgentModel` stub（`current()` / `select()` + `model/selection` 事件记录，可按 `recorded` 模拟 resume 已入账）与一个 `llm.listProviders()` stub；`tools/execute` 注入用例全部保留。
 
 ## 已知副作用
 
@@ -285,7 +312,9 @@ node test.mjs   # 26 个用例（在插件目录内执行）
 | 显式路由需先进白名单 | 白名单只列了配置里的路由，想升级到别处必须先放开 |
 | 白名单改动对旧会话/分支无效 | 会话创建时冻结；改完需**新开会话** |
 | workflow 子级显式升级到"与父相同"的路由仍可能被 pin | workflow 不经过 `subagent` 工具，无 `description` 可匹配；回退分支只认「路由不同」 |
-| 冷恢复的子会话走回退分支 | 恢复时不产生新的委派 `tool/call`，按路由比对处理 |
+| 冷恢复的子会话按 `cur` 比对处理 | 恢复时 descriptor 路由已在 setup 阶段入账，等于目标就零 select，否则按 R5/R6 判定 |
+| 中途手动改模型不再被覆盖 | 0.3.0 起只在 `agent/created`（含 resume 再激活）pin 一次；有意为之 |
+| 未注册的 provider 不会 pin | 插件跳过 select 并写 debug log，子会话保留继承路由；写错 model 仍需配置自证 |
 | 主 agent 不受影响 | `agent/created` 被 `origin` 判断过滤掉 |
 | 插件代码改动需重启 DSH | profile 层插件不支持热加载；但 4 个 volatile 字段的**配置值**改动即时生效（Host 原地换值），改 `client.js` 后也需重启 |
 
@@ -318,6 +347,7 @@ dump 里能看到相对插件路径被解析成 `file:///...` 绝对 URL，可�
 | 8 | descriptor/冷恢复记录的是继承路由 | 已修（`tools/execute` 注入） | pin 在 request 层发生，晚于 descriptor 写入 |
 | 9 | 分支会话沿用旧白名单 | 设计如此，无法用插件绕过 | policy 事件只写一次，投影只认第一条 |
 | 10 | 插件页配置卡片（0.2.0） | 已验证 | schemastery `.volatile()` 四字段 + 手写 `client.js` 注册 `plugins.bundle.config`；settings 写盘只含 volatile 子树，roles 等不可能被界面覆盖 |
+| 11 | 回退 pin 从 `agent/request` 中间件迁到 `agent/created` 时 `agent.model.select()`（0.3.0） | 离线 34 用例全绿 | 0.2.2 起 `preStep` 先固定本步模型，`agent/request` 返回不同路由会直接抛错；`select()` 追加持久 `model/selection`，created 早于首个 `preStep` |
 
 ### 实测记录（2026-10-21）
 

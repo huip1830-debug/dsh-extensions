@@ -14,18 +14,33 @@
 // equals that call's `description`, so concurrent sibling delegations cannot
 // swap routes.
 //
-// Why request-level: in the web/desktop profile the top-level `tool-subagent`
-// entry is disabled and the live tool is mounted inside `preset-standard`, whose
-// `plugins` list is plain config data — profile patches cannot target it, and a
-// patch `config` is replaced wholesale (no deep merge), so `agentOptions` cannot
-// be added there.
+// Why the injection instead of preset config: in the web/desktop profile the
+// top-level `tool-subagent` entry is disabled and the live tool is mounted inside
+// `preset-standard`, whose `plugins` list is plain config data — profile patches
+// cannot target it, and a patch `config` is replaced wholesale (no deep merge),
+// so `agentOptions` cannot be added there.
 //
-// Verified extension points (dsh app.asar):
+// Why created-time `agent.model.select()`: since 0.2.2 the loop fixes a step's
+// model at `preStep` start (`agent.model.current()`, before tools and prompt
+// assembly) and *throws* when an `agent/request` middleware proposes a different
+// provider/model/effort afterwards. The old request-level rewrite therefore
+// failed every child whose route was not already final at creation (workflow
+// children, cold resume, an uncommitted parent `tool/call`). `agent.model` is the
+// supported write path: `select()` appends a durable `model/selection` event, and
+// `agent/created` is admitted serially and awaited before the child's first
+// `preStep`, so one select here fixes the route for the whole session.
+//
+// Verified extension points (dsh app.asar, 0.2.2-rc.1):
 //   - `agent/created` fires serial with { agent, source, signal? }; root-level
-//     listeners receive it.
+//     listeners receive it, and it runs before the child's first `preStep`.
 //   - Per-agent behavior is registered on `agent.ctx` and disposed with it.
-//   - `agent/request` is a waterfall; its resolved value becomes the request
-//     config `{ provider, model, reasoningEffort, maxTokens }`.
+//   - `agent.model` is an AgentModel: `current()` (pending ?? lastUsed ?? the
+//     creation-time options) and `select({ provider, model, reasoningEffort? })`,
+//     which appends a durable `model/selection` event. `select()` validates no
+//     allow-list, so route validity stays the plugin's responsibility.
+//   - `agent/request` is a waterfall whose resolved value becomes the request
+//     config, but 0.2.2 throws when it changes provider/model/effort after step
+//     preparation — this plugin no longer registers on it.
 //   - Subagents carry `session.header.origin === 'subagent'`; the delegating
 //     session id is `session.header.parentSession`.
 //   - `ctx.on(name, listener, options)`; a boolean third argument means
@@ -174,6 +189,64 @@ function applyRoleSandbox(agent, mode, log) {
   }
 }
 
+/**
+ * Read the route the child's AgentModel resolves to right now.
+ *
+ * `current()` projects `pending ?? lastUsed` and falls back to the route the
+ * agent was constructed with. On resume the descriptor route was already
+ * selected during setup (before `agent/created` is announced), so this is the
+ * restored route; otherwise it is the creation-time route (explicit delegation
+ * choice, else the parent route merged in by `resolveChildAgentOptions()`).
+ * @param agent - the newly created child agent.
+ * @returns `{ provider, model }`, or undefined when no route is recorded yet.
+ */
+function readCurrentRoute(agent) {
+  try {
+    const current = agent?.model?.current?.()
+    if (typeof current?.provider === 'string' && typeof current.model === 'string') {
+      return { provider: current.provider, model: current.model }
+    }
+  } catch {
+    // An unreadable model counts as "no route", so the pin still applies.
+  }
+  return undefined
+}
+
+/** Compare two routes by `(provider, model)` only, as the behavior matrix says. */
+function sameRoute(left, right) {
+  return left !== undefined && right !== undefined
+    && left.provider === right.provider && left.model === right.model
+}
+
+/** Render an optional route for the diagnostic log. */
+function routeText(route) {
+  return route === undefined ? '-' : `${route.provider}/${route.model}`
+}
+
+/**
+ * Whether the pin provider is registered with the LLM service.
+ *
+ * The runtime exposes no synchronous provider/model *resolution*: `listModels`,
+ * `resolveModelInfo` and `resolveCallConfig` all await an adapter. `listProviders()`
+ * is the only synchronous query, and it covers the provider half — it names every
+ * route an adapter is currently registered for. A model id cannot be checked
+ * without awaiting an adapter, so "this model exists" stays the operator's
+ * assertion (see README, "路由合法性"). Never blocks: an unanswerable query
+ * (no llm service, an older surface) returns undefined and the pin proceeds.
+ * @param ctx - the host context.
+ * @param provider - the provider id the pin wants to select.
+ * @returns true/false when the runtime can answer, undefined when it cannot.
+ */
+function providerRegistered(ctx, provider) {
+  try {
+    const providers = ctx?.get?.('llm')?.listProviders?.()
+    if (!Array.isArray(providers) || providers.length === 0) return undefined
+    return providers.some((entry) => entry?.id === provider)
+  } catch {
+    return undefined
+  }
+}
+
 export const name = 'subagent-model-pin'
 export const inject = ['sessions']
 
@@ -203,11 +276,11 @@ export function apply(ctx, config) {
   // Fill the default route into the delegation arguments *before* the child is
   // created. `subagent/descriptor.agentModel` snapshots the creation-time
   // options and `continuation.resume()` rebuilds `agentOptions` from that
-  // descriptor, so a route pinned only at `agent/request` time leaves both
-  // points describing a route that was never requested. Injecting here makes
-  // the descriptor, the first request and a cold resume agree. Workflow
-  // children and continuations carry no delegation arguments and still fall
-  // back to the request-level pin below.
+  // descriptor, so a route chosen only later would leave both points describing
+  // a route that was never requested. Injecting here makes the descriptor, the
+  // first request and a cold resume agree. Workflow children and continuations
+  // carry no delegation arguments and still fall back to the `agent/created`
+  // select below.
   //
   // `exec.arguments` is deep-frozen by the tool registry, so the whole object
   // is replaced instead of mutated. An explicit `provider`/`model` on the call
@@ -252,68 +325,77 @@ export function apply(ctx, config) {
   ctx.on('agent/created', ({ agent }) => {
     const header = agent?.session?.header
     log(`agent/created id=${agent?.id} origin=${header?.origin} depth=${header?.delegationDepth}`)
+    // R1: only subagents, and only at the configured delegation depth.
     if (header?.origin !== 'subagent') return
     if (depth !== undefined && (header.delegationDepth ?? 0) !== depth) return
 
     const parentId = header.parentSession
     const label = readChildLabel(agent)
-    const route = resolveRoute(label, config)
+    const target = resolveRoute(label, config)
     const explicit = readDelegationChoice(ctx.get('sessions')?.get?.(parentId), label)
-    log(`delegation label=${JSON.stringify(label)} explicit=${explicit} role=${route.matched}`)
+    const cur = readCurrentRoute(agent)
+    const parentRoute = readParentRoute(parentId)
+    log(`delegation label=${JSON.stringify(label)} explicit=${explicit} role=${target.matched} cur=${routeText(cur)} parent=${routeText(parentRoute)}`)
 
     // Sandbox narrowing happens here, before the child's first tool call: the
     // role table is the only place a mode can come from, because the delegation
     // tool carries no sandbox field.
-    if (route.sandbox !== undefined) applyRoleSandbox(agent, route.sandbox, log)
+    if (target.sandbox !== undefined) applyRoleSandbox(agent, target.sandbox, log)
 
-    // prepend: true → outermost listener, so our return value is the final one.
-    agent.ctx.effect(() => agent.ctx.on('agent/request', async (_payload, next) => {
-      const resolved = await next()
-      try {
-        if (!force && resolved !== undefined) {
-          // An explicit choice on the delegating call always wins — even when it
-          // happens to equal the parent route (the upgrade-to-parent-model case).
-          if (explicit === true) {
-            log(`keep explicit ${resolved.provider}/${resolved.model}`)
-            return resolved
-          }
-          // A role route outranks the inherited-route heuristic: the label says
-          // what this child is for, so it decides the model family.
-          if (route.matched) {
-            const { reasoningEffort: _roleInherited, ...roleRest } = resolved
-            log(`pin role ${route.provider}/${route.model} over ${resolved.provider}/${resolved.model}`)
-            return {
-              ...roleRest,
-              provider: route.provider,
-              model: route.model,
-              ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }),
-            }
-          }
-          const parentRoute = readParentRoute(parentId)
-          // Fallback only: when the delegation call cannot be found (workflow
-          // children, cold resume, or an uncommitted parent event), keep the old
-          // "route differs from the parent" heuristic.
-          const chosen = explicit === undefined
-            && parentRoute !== undefined
-            && (resolved.provider !== parentRoute.provider || resolved.model !== parentRoute.model)
-          if (chosen) {
-            log(`keep ${resolved.provider}/${resolved.model} (parent=${parentRoute.provider}/${parentRoute.model}, no matching tool call)`)
-            return resolved
-          }
-        }
-        // Default path: also drop any effort inherited from the parent route.
-        const { reasoningEffort: _inherited, ...rest } = resolved ?? {}
-        log(`pin ${route.provider}/${route.model} over ${resolved?.provider}/${resolved?.model} (explicit=${explicit})`)
-        return {
-          ...rest,
-          provider: route.provider,
-          model: route.model,
-          ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }),
-        }
-      } catch (error) {
-        log(`agent/request ${agent.id} ERROR ${error?.message ?? error}`)
-        throw error
-      }
-    }, true))
+    // Behavior matrix, first hit wins. `explicit` is the only evidence of a
+    // model-facing choice: the arguments of the delegating tool call, matched to
+    // this child by descriptor label. Every branch that keeps `cur` must not
+    // append a `model/selection` event, so an already-correct route stays silent.
+    let reason
+    if (force) {
+      // R2: `force: true` restores the old always-override behavior.
+      reason = 'force'
+    } else if (explicit === true) {
+      // R3: an explicit choice on the delegation call always wins, even when it
+      // happens to equal the parent route (the upgrade-to-parent-model case).
+      reason = undefined
+    } else if (target.matched) {
+      // R4: a role route outranks the inherited-route heuristic — the label says
+      // what this child is for, so it decides the model family.
+      reason = sameRoute(cur, target) ? undefined : 'role'
+    } else if (explicit === undefined && parentRoute !== undefined && !sameRoute(cur, parentRoute)) {
+      // R5: no matching delegation call but the child already carries a route
+      // that differs from the parent's — keep that existing choice.
+      reason = undefined
+    } else {
+      // R6: default path.
+      reason = sameRoute(cur, target) ? undefined : 'default'
+    }
+
+    if (reason === undefined) {
+      log(`keep ${routeText(cur)} (explicit=${explicit} role=${target.matched} already=${sameRoute(cur, target)})`)
+      return
+    }
+    if (typeof agent?.model?.select !== 'function') {
+      log(`skip select -> ${routeText(target)} (${reason}): agent.model.select is unavailable`)
+      return
+    }
+    // Route validity is ours: select() validates no allow-list. The provider
+    // half is checkable synchronously; a provider that no adapter serves would
+    // only fail later at dispatch, so skip the pin and keep the inherited route.
+    if (providerRegistered(ctx, target.provider) === false) {
+      log(`skip select -> ${routeText(target)} (${reason}): provider "${target.provider}" is not registered with llm`)
+      return
+    }
+
+    const selection = {
+      provider: target.provider,
+      model: target.model,
+      // No effort field → the projection carries no effort → the request sends
+      // none, which matches the old middleware's "drop inherited effort" rule.
+      ...(target.reasoningEffort === undefined ? {} : { reasoningEffort: target.reasoningEffort }),
+    }
+    try {
+      agent.model.select(selection)
+      log(`select ${routeText(target)}${selection.reasoningEffort === undefined ? '' : ` effort=${selection.reasoningEffort}`} over ${routeText(cur)} (${reason}, explicit=${explicit})`)
+    } catch (error) {
+      // Routing is best-effort: never break a delegation on it.
+      log(`agent/created select ERROR ${error?.message ?? error}`)
+    }
   })
 }
