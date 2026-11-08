@@ -61,6 +61,7 @@ const {
   pillStateOf,
   summaryOf,
   nextCollapsed,
+  autoOpenOf,
   clampPosition,
   defaultPosition,
   positionToFraction,
@@ -440,6 +441,73 @@ test('the collapse set starts empty on every mount (refresh resets it)', () => {
   const folded = nextCollapsed(previous, { pending: new Set(['a']) })
   assert.notEqual(folded.collapsed, previous)
   assert.deepEqual([...folded.collapsed], ['a'])
+})
+
+// --- auto expand (spec §15) -------------------------------------------------
+
+test('autoOpenOf expands on a fresh edge that is visible (Set visibleIds)', () => {
+  assert.equal(autoOpenOf({ primed: true, collapsedBefore: false, fresh: ['a'], visibleIds: new Set(['a', 'b']) }), true)
+  // Any visible fresh id is enough, not just the first one.
+  assert.equal(autoOpenOf({ primed: true, collapsedBefore: false, fresh: ['hidden', 'b'], visibleIds: new Set(['b']) }), true)
+})
+
+test('autoOpenOf accepts a plain array of visible ids', () => {
+  assert.equal(autoOpenOf({ primed: true, collapsedBefore: false, fresh: ['a'], visibleIds: ['a'] }), true)
+  assert.equal(autoOpenOf({ primed: true, collapsedBefore: false, fresh: ['a'], visibleIds: ['b', 'a'] }), true)
+})
+
+test('the baseline snapshot never auto-opens (primed must be exactly true)', () => {
+  // Page load / connection reset: primed is false, so even a non-empty fresh
+  // list is a baseline, not an edge (spec §15.1).
+  assert.equal(autoOpenOf({ primed: false, collapsedBefore: false, fresh: ['a'], visibleIds: new Set(['a']) }), false)
+  assert.equal(autoOpenOf({ collapsedBefore: false, fresh: ['a'], visibleIds: new Set(['a']) }), false)
+  // Only the literal boolean true primes the check.
+  assert.equal(autoOpenOf({ primed: 'true', collapsedBefore: false, fresh: ['a'], visibleIds: new Set(['a']) }), false)
+})
+
+test('a user temporary collapse suppresses auto-open', () => {
+  // The controller samples collapsedBefore *before* nextCollapsed: the
+  // auto-restore on this same edge clears the set, so judging after the fold
+  // would never see the user's collapse (spec §15.1 timing).
+  assert.equal(autoOpenOf({ primed: true, collapsedBefore: true, fresh: ['a'], visibleIds: new Set(['a']) }), false)
+  // A different, perfectly visible fresh id changes nothing while collapsed.
+  assert.equal(autoOpenOf({ primed: true, collapsedBefore: true, fresh: ['b', 'c'], visibleIds: new Set(['b', 'c']) }), false)
+})
+
+test('malformed or empty fresh never auto-opens', () => {
+  const base = { primed: true, collapsedBefore: false, visibleIds: new Set(['a']) }
+  assert.equal(autoOpenOf({ ...base, fresh: [] }), false)
+  assert.equal(autoOpenOf({ ...base, fresh: undefined }), false)
+  assert.equal(autoOpenOf({ ...base, fresh: 'a' }), false)
+  // A Set is not the array contract: only arrays are consumed.
+  assert.equal(autoOpenOf({ ...base, fresh: new Set(['a']) }), false)
+  assert.equal(autoOpenOf(base), false)
+})
+
+test('fresh ids hidden from the visible projection do not open an empty panel', () => {
+  // Main-view id or waiting-parent id: the fresh edge exists but nothing would
+  // be shown, so the panel stays closed (spec §15.1).
+  assert.equal(autoOpenOf({ primed: true, collapsedBefore: false, fresh: ['main'], visibleIds: new Set(['other']) }), false)
+  assert.equal(autoOpenOf({ primed: true, collapsedBefore: false, fresh: ['main'], visibleIds: new Set() }), false)
+  assert.equal(autoOpenOf({ primed: true, collapsedBefore: false, fresh: ['main'], visibleIds: [] }), false)
+  // One visible id among hidden ones is still a real edge.
+  assert.equal(autoOpenOf({ primed: true, collapsedBefore: false, fresh: ['main', 'b'], visibleIds: new Set(['b']) }), true)
+})
+
+test('malformed visibleIds answer false instead of throwing', () => {
+  const base = { primed: true, collapsedBefore: false, fresh: ['a'] }
+  assert.equal(autoOpenOf({ ...base, visibleIds: undefined }), false)
+  assert.equal(autoOpenOf({ ...base, visibleIds: null }), false)
+  assert.equal(autoOpenOf({ ...base, visibleIds: 'a' }), false)
+  assert.equal(autoOpenOf({ ...base, visibleIds: { a: true } }), false)
+  assert.equal(autoOpenOf({ ...base, visibleIds: 42 }), false)
+})
+
+test('autoOpenOf answers false for null / undefined / non-object input', () => {
+  assert.equal(autoOpenOf(null), false)
+  assert.equal(autoOpenOf(undefined), false)
+  assert.equal(autoOpenOf('edge'), false)
+  assert.equal(autoOpenOf(0), false)
 })
 
 // --- pill position / drag / panel placement (spec §12, fraction storage §13) -

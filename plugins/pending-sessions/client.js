@@ -573,6 +573,33 @@ window.__ModuleLoader__.load({
       return { collapsed: kept, restored: false, changed: kept.size !== before.size }
     }
 
+    /**
+     * Whether a fresh pending edge should auto-expand the panel (spec §15.1).
+     * - `primed !== true` → false: the first snapshot is a baseline, not an edge
+     *   observed while the user was looking at the page.
+     * - `collapsedBefore === true` → false: the user temporarily collapsed the
+     *   list; the edge only restores the pill count / warning colour (§11.2).
+     * - otherwise at least one fresh id must be visible: `excludeMain` and the
+     *   waiting-parent filter can both drop a fresh id, and an empty panel is
+     *   not worth popping.
+     * Malformed input never throws; it just answers false.
+     * @param input - { primed, collapsedBefore, fresh, visibleIds }.
+     *   `fresh` is an array of session ids; `visibleIds` is a Set or an array.
+     * @returns {boolean} true when the edge should expand the panel.
+     */
+    function autoOpenOf(input) {
+      const source = input !== null && typeof input === 'object' ? input : {}
+      if (source.primed !== true) return false
+      if (source.collapsedBefore === true) return false
+      const fresh = Array.isArray(source.fresh) ? source.fresh : []
+      if (fresh.length === 0) return false
+      const visible = source.visibleIds instanceof Set
+        ? source.visibleIds
+        : Array.isArray(source.visibleIds) ? new Set(source.visibleIds) : new Set()
+      for (const id of fresh) if (visible.has(id)) return true
+      return false
+    }
+
     // --- position & drag (spec §12 gesture, §13 fraction storage) ----------
 
     /** localStorage key for the pill position preference (UI preference, not session state). */
@@ -850,7 +877,7 @@ window.__ModuleLoader__.load({
     class PendingSessionsController {
       constructor(ctx) {
         this.ctx = ctx
-        this.store = createStore({ items: [], pending: 0, blocking: 0, running: 0, collapsed: false, collapsedCount: 0, notification: 'unknown', position: undefined })
+        this.store = createStore({ items: [], pending: 0, blocking: 0, running: 0, collapsed: false, collapsedCount: 0, notification: 'unknown', position: undefined, autoOpenSeq: 0 })
         this.unsubscribers = []
         this.pendingIds = new Set()
         // Parents currently waiting for their subagents (spec §14.2): memory
@@ -870,6 +897,10 @@ window.__ModuleLoader__.load({
         this.livePosition = undefined
         // One-shot guard for the legacy-pixel migration (needs a measurement).
         this.positionChecked = false
+        // Monotonic auto-open signal consumed by the renderer (spec §15.2): a
+        // visible fresh edge bumps it, and `reset()` deliberately keeps it so a
+        // remount can never replay an already-consumed sequence.
+        this.autoOpenSeq = 0
         this.primed = false
         this.disposed = false
         this.notification = 'unknown'
@@ -900,6 +931,19 @@ window.__ModuleLoader__.load({
         return { statuses, sessions, subagentIds: subagentIdsOf(sessions), all: buildItems({ statuses, sessions, workspaces }), mainSessionId }
       }
 
+      /**
+       * Visible projection shared by publish() and the auto-open check
+       * (spec §15.2): drop the main-view session, then the waiting parents.
+       * @param data - the collect() result.
+       * @returns the visible item array.
+       */
+      project(data) {
+        // Main-view sessions are already in front of the user; waiting parents
+        // are suppressed from every derived count (spec §14.2). The `running`
+        // count in publish() deliberately keeps every session.
+        return excludeMain(data.all, data.mainSessionId).filter((item) => !this.waitingIds.has(item.sessionId))
+      }
+
       /** Publish the visible projection. Never exposes raw interaction objects. */
       publish(collected) {
         if (this.disposed) return
@@ -914,7 +958,7 @@ window.__ModuleLoader__.load({
         }
         // Waiting parents are suppressed from every derived count (spec §14.2);
         // the running count below deliberately keeps every session.
-        const visible = excludeMain(data.all, data.mainSessionId).filter((item) => !this.waitingIds.has(item.sessionId))
+        const visible = this.project(data)
         const collapsedCount = visible.filter((item) => this.collapsedIds.has(item.sessionId)).length
         this.store.set({
           items: visible,
@@ -927,6 +971,7 @@ window.__ModuleLoader__.load({
           notification: this.notification,
           position: this.position,
           livePosition: this.livePosition,
+          autoOpenSeq: this.autoOpenSeq,
         })
       }
 
@@ -960,8 +1005,16 @@ window.__ModuleLoader__.load({
         // then auto-restore when a session outside the set newly entered. The
         // baseline snapshot is not an edge, so it never collapses or restores.
         // Waiting parents are already gone from `pending` and `fresh`.
+        // Sample the collapse set *before* the fold: auto-restore clears it on
+        // the very edge we are about to judge (spec §15.1).
+        const collapsedBefore = this.collapsedIds.size > 0
         const fold = nextCollapsed(this.collapsedIds, { pending: next.pending, fresh: this.primed ? next.fresh : [] })
         this.collapsedIds = fold.collapsed
+        // A fresh edge that will actually be shown auto-expands the panel
+        // (spec §15.2); hidden fresh ids (main view / waiting parent) must not
+        // pop an empty panel. The visible set matches publish() exactly.
+        const visibleIds = new Set(this.project(collected).map((item) => item.sessionId))
+        if (autoOpenOf({ primed: this.primed, collapsedBefore, fresh: next.fresh, visibleIds })) this.autoOpenSeq += 1
         this.publish(collected)
         if (!this.primed) {
           // First snapshot is the baseline: sessions already pending when the
@@ -1205,6 +1258,8 @@ window.__ModuleLoader__.load({
       const suppressClickRef = React.useRef(false)
       const metricsRef = React.useRef(null)
       const layoutRef = React.useRef(null)
+      // Last consumed auto-open sequence (spec §15.2): -1 = not recorded yet.
+      const openSeqRef = React.useRef(-1)
       const stored = snapshot.position
       const fraction = stored !== null && typeof stored === 'object' && isFiniteNumber(stored.fx) && isFiniteNumber(stored.fy)
         ? { fx: stored.fx, fy: stored.fy }
@@ -1273,6 +1328,23 @@ window.__ModuleLoader__.load({
         if (gesture !== null) clearTimeout(gesture.timer)
         gestureRef.current = null
       }, [])
+
+      // A fresh pending edge bumped the controller's monotonic counter: expand
+      // the panel (spec §15.2). Deliberately no dependency array, matching the
+      // measuring effects above. The -1 sentinel makes the first render
+      // record-only, so a page load / connection reset baseline never pops the
+      // panel; a smaller or equal sequence (a stale snapshot) is a no-op.
+      useEffect(() => {
+        const seq = Number.isFinite(snapshot.autoOpenSeq) ? snapshot.autoOpenSeq : 0
+        if (openSeqRef.current === -1) {
+          openSeqRef.current = seq
+          return
+        }
+        if (seq > openSeqRef.current) {
+          openSeqRef.current = seq
+          setExpanded(true)
+        }
+      })
 
       const enterDrag = (gesture) => {
         if (gesture.dragging === true) return
@@ -1580,6 +1652,7 @@ window.__ModuleLoader__.load({
       pillStateOf,
       summaryOf,
       nextCollapsed,
+      autoOpenOf,
       clampPosition,
       defaultPosition,
       positionToFraction,
