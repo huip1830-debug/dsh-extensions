@@ -241,3 +241,76 @@ plugins/pending-sessions/
 - 改动文件：`plugins/pending-sessions/client.js`（新增两个纯函数 + 控制器 `waitingIds` / publish 过滤 / onStatus 接线）、`test.mjs`（新用例）、`README.md`（行为表 + 已知限制 + 人工验收一条）、本 spec。`package.json` 版本 0.3.1 → 0.3.2（bugfix patch）。
 - i18n：无新键；locale/*.json 不改。
 - **判级**：非 gated（无契约面、无外部环境）；单文件 `client.js` 约 +60 行、test.mjs 约 +100 行，非机械改写 → 全批；同文件/同测试文件，单批串行，无并行写。免独立评审，主控复跑冻结集成命令 + diff 自查。
+
+## 15. 修订（2026-11-08 第七轮）：新待处理自动展开面板
+
+**问题**（用户实测报告）：待处理到来时提醒只体现在药丸上（数字 / 警示色），面板不会自动展开；用户怀疑「启动时默认被设置成收起状态」。
+
+**取证结论**（只读核对，不是收起状态 bug）：
+
+| 疑点 | 事实 | 依据 |
+|---|---|---|
+| 启动默认收起 | 收起集是内存字段，构造即空集；`reset()` 也清空；首帧快照（`primed === false`）把 `fresh` 强制置空，不产生折叠边沿 | `client.js:862`、`client.js:1123`、`client.js:963` |
+| 收起状态写盘 | 全插件唯一持久化 key 是药丸位置 `pending-sessions/pill-position` | `client.js:579` |
+| 自动展开被实现过 | 全历史 `git log -S "setExpanded(true)"` 只命中初始提交，且唯一调用在药丸 `onClick` 里 | `client.js:1375` |
+
+真实原因：**自动展开从未实现**。`expanded` 是渲染器局部 state、默认 `false`（`client.js:1197`），§5 原本只定义「点击药丸展开」。README 里「新待处理出现自动恢复」指的是**解除临时收起**（§11.2），不是弹出面板；系统通知只在窗口失焦时发（§5.1）。因此窗口聚焦且未点药丸时，提醒确实"只存在于药丸里"。
+
+**决策**（用户已确认，三轮问答冻结）：
+
+1. **任何**新待处理边沿（沿用 §5.1 的 `fresh` 判定口径）→ 自动展开面板，无需点击药丸；
+2. **不看窗口焦点**：失焦时也把面板置为展开，切回 DSH 即可见（系统通知规则不变：仍只在失焦时发）；
+3. 用户主动「暂时收起」后**不**自动展开：新待处理只恢复药丸计数 / 警示色（§11.2 语义不变），手动点药丸仍可展开；
+4. 页面首次加载 / `connection/reset` 的基线快照**不**展开，只显示药丸计数（与通知同口径，避免每次启动弹面板）。
+
+### 15.1 判定与纯函数
+
+新增纯函数 `autoOpenOf({ primed, collapsedBefore, fresh, visibleIds })` → boolean：
+
+- `primed !== true` → `false`（基线快照不是边沿）；
+- `collapsedBefore === true`（折叠**前**收起集非空，即用户主动收起）→ `false`；
+- `fresh` 必须是非空数组，且至少有一个 id 落在 `visibleIds`（Set 或数组，兼容畸形输入）里 → `true`；否则 `false`。这一条让被 `excludeMain` 剔除、被 `waitingIds` 抑制的 fresh 不会误开面板；
+- 任何输入为 `null` / `undefined` / 畸形类型 → `false`，不抛错。
+
+**时序要点**：控制器必须先取 `collapsedBefore = this.collapsedIds.size > 0`，再调用 `nextCollapsed`。§11.2 的「新进入自动恢复」会把收起集清空，判定放在折叠之后就永远看不到"用户收起着"这个事实。
+
+### 15.2 控制器与渲染器接线
+
+- 控制器新增内存字段 `autoOpenSeq: number`（构造为 `0`；`reset()` **不清零**，保持单调，避免重放已消费的序号）。初值也写进 `createStore` 的初始快照。
+- `onStatus()` 顺序：取 `collapsedBefore` → `nextCollapsed` → 计算本次可见 id 集（`excludeMain(...)` 再过滤 `waitingIds`，与 `publish()` 同一份语义）→ `autoOpenOf(...)` 为真时 `this.autoOpenSeq += 1` → `publish(collected)`。
+- `publish()` 快照增加 `autoOpenSeq` 字段。
+- 允许（并建议）把「`excludeMain` + 过滤 `waitingIds`」抽成一个 `project(data)` 小函数，由 `publish()` 与 `onStatus()` 共用，避免两处过滤逻辑漂移。
+- 渲染器新增 `openSeqRef` 与一个无依赖数组的 `useEffect`：读快照 `autoOpenSeq`（非有限数字按 `0`），首次渲染只记录不展开，之后序号变大则记录并 `setExpanded(true)`。
+- 面板已展开时重复展开是无害 no-op：不抢焦点、不发声、不重置列表滚动、不改 `expanded` 的既有语义（仍是渲染器局部 state）。
+- 不新增持久化、不写盘；i18n 无新键，`locale/*.json` 不动。
+
+### 15.3 边界与已知限制
+
+- **启动基线不展开**（决策 4）：页面打开时已存在的待处理只显示药丸计数，之后新发生的边沿才展开。
+- **收起态不展开**（决策 3）：药丸计数 / 警示色照 §11.2 恢复，但面板保持关闭；用户点药丸手动展开。收起集清空后（手动恢复，或收起 id 全部处理完）再来新待处理即恢复自动展开。
+- 失焦时展开的面板会一直开着，切回窗口即见——这是决策 2 的预期收益，不是残留状态。
+- 自动展开不改变 HMR 重挂丢 `expanded` 的既有已知限制。
+- fresh 条目全部被主视图排除或被等待抑制时不开面板（避免"弹了个空面板"）。
+- 刷新后基线不展开 + 收起集纯内存（§11.2）不变。
+
+### 15.4 测试
+
+- `autoOpenOf`：边沿 + 未收起 + 有条目 → `true`；`primed === false` → `false`；`collapsedBefore === true` → `false`；`fresh` 为空 / 非数组 → `false`；fresh 全部不在 `visibleIds` → `false`；fresh 有一个在 `visibleIds`（分别用 Set 与数组两种形态）→ `true`；`visibleIds` 畸形、入参为 `null` → `false`。
+- 既有 `nextCollapsed` / `shouldNotify` / §14 用例不回归。
+- **冻结集成命令（唯一一条）**：`node plugins/pending-sessions/test.mjs`（仓库根执行，覆盖本批全部改动）。
+- 纯函数覆盖不到的接线（`autoOpenSeq` 递增、渲染器 effect 消费）离线不可造，由 §15.5 人工验收覆盖。
+
+### 15.5 人工验收
+
+1. 开两个工作区：A 触发 agent 提问（等回答），B 跑完一个回合（未读）→ 面板**自动展开**（无需点药丸），条目正常显示。
+2. 点面板「×」关掉 → 再制造一次新待处理 → 面板再次自动展开。
+3. 点「暂时收起」→ 制造新待处理 → 药丸计数恢复但**不**弹面板 → 点药丸手动展开；收起集清空后再制造新待处理 → 自动展开恢复。
+4. 切到别的窗口（DSH 失焦）→ 制造新待处理 → 收到系统通知；切回 DSH → 面板已展开可见。
+5. 刷新 / 重启 DSH，若已有待处理 → 只显示药丸计数、不弹面板；之后新发生的待处理自动展开。
+6. 子智能体场景：子智能体逐个完成时父会话被抑制（§14）→ 面板不应因这些中间状态自动展开。
+
+### 15.6 实现与判级
+
+- 改动文件：`plugins/pending-sessions/client.js`（纯函数 `autoOpenOf` + `autoOpenSeq` + `onStatus`/`publish` 接线 + 渲染器消费 effect）、`plugins/pending-sessions/test.mjs`（新用例，并把 `autoOpenOf` 加进 `plugin.pure` 解构）、`plugins/pending-sessions/README.md`（行为表 + 人工验收 + 已知限制）、本 spec、`plugins/pending-sessions/package.json`（0.3.2 → 0.4.0）。
+- i18n：无新键；`locale/*.json` 不改。
+- **判级**：非 gated（无契约面、无外部环境）；`client.js` 约 +35 行、`test.mjs` 约 +60 行，非机械改写 → 全批；与既有批次同文件，单批串行，无并行写。免独立评审（非 gated），主控复跑冻结集成命令 + diff 自查。
