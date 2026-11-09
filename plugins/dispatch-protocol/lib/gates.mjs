@@ -57,7 +57,7 @@ export const DEFAULT_REVIEW_TEXT = '[dispatch-protocol] 本批在只读评审之
 export const DEFAULT_HANDOFF_EMPTY_TURNS = 1
 
 /** HandoffGate 默认文案；`{emptyTurns}` 为连续空回合数（可选占位）。 */
-export const DEFAULT_HANDOFF_TEXT = '[dispatch-protocol] 本回合没有任何产出（无工具调用、无文本）。若模型失稳，停止 /compact：先把进度写到 dispatch/state.md（模板见 README「交接」），开新会话接力。'
+export const DEFAULT_HANDOFF_TEXT = '[dispatch-protocol] 本回合没有任何产出（无工具调用、无文本）。若模型失稳，停止 /compact：先把进度写到 dispatch/state/<需求>.md（模板见 README「交接」），开新会话接力。'
 
 /** 判断一个值是否普通对象（数组与 null 都不算配置对象）。 */
 function isRecord(value) {

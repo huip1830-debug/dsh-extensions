@@ -19,16 +19,20 @@ export const DEFAULT_WRITE_TOOLS = ['write', 'edit']
 /**
  * 控制面路径片段（0.8.2 起）。
  *
- * 规则 1 明许主控写 `dispatch/state.md`、`dispatch/ledger/*` 与
+ * 规则 1 明许主控写 `dispatch/state/<需求>.md`、`dispatch/ledger/<需求>.md` 与
  * `docs/superpowers/specs/*`：这些写入是主控的合法控制面动作，不是脏改动或
  * 评审失效的信号。片段按大小写不敏感子串匹配；路径里的反斜杠先归一为正斜杠，
  * 所以 `dispatch\ledger\x.md` 与 `dispatch/ledger/x.md` 等价。
+ *
+ * 0.9.1：台账按需求分文件，新路径落在 `dispatch/state/` 目录下（片段带尾斜杠，
+ * 避免误豁免 `src` 里同名目录形态的 `dispatch/state.ts` 单文件）；遗留的
+ * `dispatch/state.md` 只读但仍是控制面，故两个片段都保留。
  *
  * 0.9.0：写入守卫的 `writePolicy.allowlist` 用同一份默认值（见
  * `lib/write-policy.mjs` 的 `DEFAULT_ALLOWLIST`），但匹配口径不同——守卫按
  * cwd 相对路径的前缀/词边界匹配，这里仍是子串匹配（观测与闸门只需要粗判）。
  */
-export const DEFAULT_CONTROL_PLANE_PATTERNS = ['dispatch/state.md', 'dispatch/ledger/', 'docs/superpowers/specs/']
+export const DEFAULT_CONTROL_PLANE_PATTERNS = ['dispatch/state.md', 'dispatch/state/', 'dispatch/ledger/', 'docs/superpowers/specs/']
 
 /**
  * 判断一个写入路径是否落在控制面。

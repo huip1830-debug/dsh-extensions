@@ -1299,7 +1299,8 @@ test('handoff gate fires on the first empty turn by default', () => {
 
     assert.equal(parent.messages.length, 1)
     assert.match(parent.messages[0].text, /没有任何产出/)
-    assert.match(parent.messages[0].text, /dispatch\/state\.md/)
+    assert.match(parent.messages[0].text, /dispatch\/state\/<需求>\.md/,
+      '0.9.1: the handoff text names the per-requirement ledger')
     const row = readRows(log).find(entry => entry.kind === 'gate')
     assert.equal(row.gate, 'handoff')
     assert.equal(row.emptyTurns, 1)
@@ -1528,16 +1529,21 @@ test('a control-plane edit after a successful verification leaves the verify gat
     call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
     resultWithText(1, 'verify-1', 'exit code: 0'),
     call(2, 'edit', { file_path: 'dispatch/ledger/x.md' }, 'edit-1'),
-    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
   ]
 
   assert.equal(evaluateVerifyGate(events, 2, gates), null,
     '0.8.2: a control-plane write is not a dirty working-tree change')
 
+  // 0.9.1: 新台账目录（dispatch/state/<需求>.md）同样不计脏改动。
+  events.push(call(2, 'edit', { file_path: 'dispatch/state/x.md' }, 'edit-state-dir'))
+  events.push(call(2, 'present', { file_path: 'report.md' }, 'present-1'))
+  assert.equal(evaluateVerifyGate(events, 2, gates), null,
+    '0.9.1: writing dispatch/state/<需求>.md after the verification does not gate')
+
   const dirtyEvents = [
-    ...events.slice(0, 3),
+    ...events.slice(0, 4),
     call(2, 'edit', { file_path: 'src/a.ts' }, 'edit-2'),
-    events[3],
+    events[4],
   ]
   const dirty = evaluateVerifyGate(dirtyEvents, 2, gates)
   assert.notEqual(dirty, null, 'a source edit after the verification still gates')
@@ -1550,12 +1556,14 @@ test('a control-plane write after a review does not invalidate it', () => {
   const state = { pending: true, warned: false, since: 0 }
   const events = [
     call(2, 'write', { file_path: 'dispatch/ledger/x.md' }, 'write-1'),
+    call(2, 'write', { file_path: 'dispatch/state/x.md' }, 'write-2'),
+    call(2, 'edit', { file_path: 'dispatch/state.md' }, 'write-3'),
   ]
 
   assert.equal(evaluateReviewGate(events, gates, state), null,
-    '0.8.2: replaying a ledger file is a legal control-plane action')
+    '0.8.2/0.9.1: replaying a ledger file is a legal control-plane action')
 
-  events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-2'))
+  events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-4'))
   const review = evaluateReviewGate(events, gates, state)
   assert.notEqual(review, null)
   assert.deepEqual(review.files, ['src/a.ts'], 'the ledger path is not listed as a review-dirty file')
@@ -1575,8 +1583,14 @@ test('controlPlanePatterns is configurable on the gate sections and validated', 
 
   assert.equal(isControlPlanePath('dispatch\\ledger\\x.md'), true, 'backslashes are normalized')
   assert.equal(isControlPlanePath('src\\a.ts'), false)
+  assert.equal(isControlPlanePath('dispatch/state/x.md'), true,
+    '0.9.1: the per-requirement ledger directory is the control plane')
+  assert.equal(isControlPlanePath('dispatch/state.md'), true,
+    '0.9.1: the legacy single-file ledger stays control plane (read-only)')
+  assert.equal(isControlPlanePath('src/app/dispatch/state.ts'), false,
+    '0.9.1: the trailing slash keeps a same-named source file out of the exemption')
   assert.deepEqual(DEFAULT_CONTROL_PLANE_PATTERNS,
-    ['dispatch/state.md', 'dispatch/ledger/', 'docs/superpowers/specs/'])
+    ['dispatch/state.md', 'dispatch/state/', 'dispatch/ledger/', 'docs/superpowers/specs/'])
 
   assert.throws(() => resolveGates({ controlPlanePatterns: [] }), /dispatch-protocol: gates\.controlPlanePatterns/)
   assert.throws(() => resolveGates({ controlPlanePatterns: ['ok', null] }), /dispatch-protocol: gates\.controlPlanePatterns/)
@@ -1589,6 +1603,10 @@ test('the injected rules name the light-batch review exception and the ledger ca
 
   assert.match(text, /判为轻批的批次除外/, '0.8.2: gated does not re-open a light batch to review')
   assert.match(text, /任务清单或台账首行/, '0.8.2: grading may live in the ledger head instead of the task list')
+  assert.match(text, /只写 dispatch\/state\/<需求>\.md、dispatch\/ledger\/<需求>\.md/,
+    '0.9.1: rule 1 names the per-requirement ledger paths')
+  assert.match(text, /同一工作区可能并行多个会话/,
+    '0.9.1: rule 1 carries the multi-session paragraph')
 })
 
 // ---------------------------------------------------------------------------
@@ -1648,6 +1666,7 @@ test('control-plane writes pass without a decision-log line', () => {
 
     const allowed = [
       'dispatch/state.md',
+      'dispatch/state/x.md',
       'dispatch/ledger/x.md',
       'docs/superpowers/specs/x.md',
       join(dir, 'dispatch/state.md'),
