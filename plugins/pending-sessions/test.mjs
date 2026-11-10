@@ -350,29 +350,75 @@ test('runningCountOf counts every running session, subagent children included', 
   assert.equal(runningCountOf({ a: running(), b: idle(), c: null }), 1)
 })
 
-test('the always-visible pill prioritises running over pending over idle', () => {
-  assert.deepEqual(pillStateOf({ running: 2, pending: 1, blocking: true }), { mode: 'running', pulse: true, alert: false, showPendingCount: true })
-  assert.deepEqual(pillStateOf({ running: 0, pending: 1, blocking: true }), { mode: 'pending', pulse: false, alert: true, showPendingCount: true })
-  assert.deepEqual(pillStateOf({ running: 0, pending: 2, blocking: false }), { mode: 'pending', pulse: false, alert: false, showPendingCount: true })
-  assert.deepEqual(pillStateOf({ running: 0, pending: 0 }), { mode: 'idle', pulse: false, alert: false, showPendingCount: false })
-  // Collapsed: no pending count, no warning colour; the running animation is
-  // unaffected (spec §11.2).
+test('the always-visible pill derives tone, pulse and classified counts', () => {
+  // Blocking while another session runs: yellow wins, the running pulse stays,
+  // and the classified counts are shown (spec §16.1 / §16.4).
   assert.deepEqual(
-    pillStateOf({ running: 0, pending: 2, blocking: true, collapsed: true }),
-    { mode: 'collapsed', pulse: false, alert: false, showPendingCount: false },
+    pillStateOf({ running: 1, blocking: 1, unread: 0 }),
+    { mode: 'running', tone: 'blocking', pulse: true, showPendingCount: true },
   )
+  // Running plus unread only: colour follows running, unread survives as a count.
   assert.deepEqual(
-    pillStateOf({ running: 1, pending: 2, collapsed: true }),
-    { mode: 'running', pulse: true, alert: false, showPendingCount: false },
+    pillStateOf({ running: 2, blocking: 0, unread: 1 }),
+    { mode: 'running', tone: 'running', pulse: true, showPendingCount: true },
   )
-  assert.deepEqual(pillStateOf(undefined), { mode: 'idle', pulse: false, alert: false, showPendingCount: false })
+  // Unread only: green.
+  assert.deepEqual(
+    pillStateOf({ running: 0, blocking: 0, unread: 2 }),
+    { mode: 'pending', tone: 'done', pulse: false, showPendingCount: false },
+  )
+  // Blocking only: yellow.
+  assert.deepEqual(
+    pillStateOf({ running: 0, blocking: 1, unread: 0 }),
+    { mode: 'pending', tone: 'blocking', pulse: false, showPendingCount: false },
+  )
+  // Blocking + unread with nothing running: yellow outranks green.
+  assert.deepEqual(
+    pillStateOf({ running: 0, blocking: 1, unread: 3 }),
+    { mode: 'pending', tone: 'blocking', pulse: false, showPendingCount: false },
+  )
+  // Idle.
+  assert.deepEqual(
+    pillStateOf({ running: 0, blocking: 0, unread: 0 }),
+    { mode: 'idle', tone: 'idle', pulse: false, showPendingCount: false },
+  )
+  // Collapsed without running: quiet grey, no pending colour, no counts.
+  assert.deepEqual(
+    pillStateOf({ running: 0, blocking: 1, unread: 1, collapsed: true }),
+    { mode: 'collapsed', tone: 'idle', pulse: false, showPendingCount: false },
+  )
+  // Collapsed with running: the running pulse survives, counts stay hidden.
+  assert.deepEqual(
+    pillStateOf({ running: 1, blocking: 1, unread: 1, collapsed: true }),
+    { mode: 'running', tone: 'running', pulse: true, showPendingCount: false },
+  )
+  // Malformed input falls back to idle instead of throwing.
+  assert.deepEqual(pillStateOf(undefined), { mode: 'idle', tone: 'idle', pulse: false, showPendingCount: false })
+  assert.deepEqual(
+    pillStateOf({ running: -1, blocking: 'x', unread: Number.NaN }),
+    { mode: 'idle', tone: 'idle', pulse: false, showPendingCount: false },
+  )
 })
 
-test('the header summary mirrors the three states', () => {
-  assert.deepEqual(summaryOf({ running: 2, pending: 1 }), [{ key: 'pillRunning', count: 2 }, { key: 'summaryPending', count: 1 }])
-  assert.deepEqual(summaryOf({ running: 0, pending: 0 }), [{ key: 'pillIdle', count: 0 }])
-  assert.deepEqual(summaryOf({ running: 0, pending: 1, collapsed: true }), [{ key: 'summaryPending', count: 1 }, { key: 'pillCollapsed', count: 0 }])
-  assert.deepEqual(summaryOf({ running: 1, pending: 0, collapsed: true }), [{ key: 'pillRunning', count: 1 }])
+test('the header summary lists classified counts', () => {
+  // Each class on its own.
+  assert.deepEqual(summaryOf({ running: 2, blocking: 0, unread: 0 }), [{ key: 'pillRunning', count: 2 }])
+  assert.deepEqual(summaryOf({ running: 0, blocking: 1, unread: 0 }), [{ key: 'summaryPending', count: 1 }])
+  assert.deepEqual(summaryOf({ running: 0, blocking: 0, unread: 3 }), [{ key: 'summaryUnread', count: 3 }])
+  // Mixed: running, blocking, unread — in that order (spec §16.3).
+  assert.deepEqual(summaryOf({ running: 1, blocking: 2, unread: 3 }), [
+    { key: 'pillRunning', count: 1 },
+    { key: 'summaryPending', count: 2 },
+    { key: 'summaryUnread', count: 3 },
+  ])
+  // Collapsed with pending appends the collapsed marker last.
+  assert.deepEqual(summaryOf({ running: 0, blocking: 1, unread: 1, collapsed: true }), [
+    { key: 'summaryPending', count: 1 },
+    { key: 'summaryUnread', count: 1 },
+    { key: 'pillCollapsed', count: 0 },
+  ])
+  // Nothing at all falls back to idle.
+  assert.deepEqual(summaryOf({ running: 0, blocking: 0, unread: 0 }), [{ key: 'pillIdle', count: 0 }])
   assert.deepEqual(summaryOf(undefined), [{ key: 'pillIdle', count: 0 }])
 })
 

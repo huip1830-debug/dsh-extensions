@@ -56,7 +56,6 @@ window.__ModuleLoader__.load({
     // bundle only sees what it carries). Keep both copies in sync.
     const zh = {
       title: '待处理会话',
-      pillAria: '{count} 个会话待处理',
       collapse: '收起',
       untitled: '未命名会话',
       defaultWorkspace: '默认工作区',
@@ -66,12 +65,12 @@ window.__ModuleLoader__.load({
       kindUnread: '未读回复',
       kindPending: '待处理',
       pillRunning: '{count} 运行中',
-      pillRunningAria: '{count} 个会话运行中',
       pillIdle: '全部空闲',
       pillIdleAria: '所有会话空闲',
       pillCollapsed: '已收起',
       pillCollapsedAria: '待处理已暂时收起',
       summaryPending: '{count} 待处理',
+      summaryUnread: '{count} 待读',
       collapsePending: '暂时收起',
       restorePending: '恢复',
       collapsedHint: '待处理已暂时收起，点「恢复」重新提醒',
@@ -84,7 +83,6 @@ window.__ModuleLoader__.load({
 
     const en = {
       title: 'Pending sessions',
-      pillAria: '{count} sessions need attention',
       collapse: 'Collapse',
       untitled: 'Untitled session',
       defaultWorkspace: 'Default workspace',
@@ -94,12 +92,12 @@ window.__ModuleLoader__.load({
       kindUnread: 'Unread reply',
       kindPending: 'Pending',
       pillRunning: '{count} running',
-      pillRunningAria: '{count} sessions running',
       pillIdle: 'All idle',
       pillIdleAria: 'All sessions are idle',
       pillCollapsed: 'Collapsed',
       pillCollapsedAria: 'Pending items are temporarily collapsed',
       summaryPending: '{count} pending',
+      summaryUnread: '{count} unread',
       collapsePending: 'Collapse for now',
       restorePending: 'Restore',
       collapsedHint: 'Pending items are temporarily collapsed; choose Restore to bring them back',
@@ -123,6 +121,7 @@ window.__ModuleLoader__.load({
       '.psess-pill{display:inline-flex;align-items:center;gap:7px;padding:6px 13px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);box-shadow:0 6px 18px rgba(0,0,0,.18);cursor:pointer;font-family:inherit;font-size:13px;touch-action:none;transition:box-shadow .15s ease,transform .15s ease}',
       '.psess-pill:hover{background:var(--dsw-alias-interactive-bg-hover)}',
       '.psess-pillAlert{border-color:var(--dsw-alias-state-warn-primary)}',
+      '.psess-pillDone{border-color:var(--dsw-alias-state-success-primary)}',
       '.psess-pillLow{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-border-l4);color:var(--dsw-alias-label-tertiary);box-shadow:0 4px 12px rgba(0,0,0,.12);font-size:12px;padding:4px 11px}',
       '.psess-pillLow:hover{color:var(--dsw-alias-label-secondary)}',
       '.psess-pillIdle{cursor:default}',
@@ -131,6 +130,7 @@ window.__ModuleLoader__.load({
       '.psess-pillDragging{box-shadow:0 16px 36px rgba(0,0,0,.32);transform:translateY(-2px);cursor:grabbing;user-select:none}',
       '.psess-dot{width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-brand-primary);flex:none}',
       '.psess-pillAlert .psess-dot{background:var(--dsw-alias-state-warn-primary)}',
+      '.psess-pillDone .psess-dot{background:var(--dsw-alias-state-success-primary)}',
       '.psess-pillLow .psess-dot{background:var(--dsw-alias-label-tertiary);opacity:.55}',
       '.psess-pillRunning .psess-dot{animation:psess-pulse 1.6s ease-in-out infinite}',
       '@keyframes psess-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.78)}}',
@@ -156,6 +156,7 @@ window.__ModuleLoader__.load({
       '.psess-item:hover{background:var(--dsw-alias-interactive-bg-hover)}',
       '.psess-state{width:7px;height:7px;border-radius:50%;margin-top:6px;flex:none;background:var(--dsw-alias-brand-primary)}',
       '.psess-itemAlert .psess-state{background:var(--dsw-alias-state-warn-primary)}',
+      '.psess-itemDone .psess-state{background:var(--dsw-alias-state-success-primary)}',
       '.psess-kind{flex:none;color:var(--dsw-alias-label-secondary);font-size:12px;margin-top:1px}',
       '.psess-text{display:flex;flex-direction:column;min-width:0;gap:1px}',
       '.psess-ws,.psess-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
@@ -499,38 +500,52 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Presentation state of the always-visible pill (spec §11.1).
-     * Priority: running > pending > idle. A temporarily collapsed list keeps the
-     * running animation but hides the pending count and the warning colour
-     * (spec §11.2).
-     * @param input - { running, pending, blocking?, collapsed? }.
-     * @returns { mode, pulse, alert, showPendingCount } where mode is
-     *   'running' | 'pending' | 'collapsed' | 'idle'.
+     * Presentation state of the always-visible pill (spec §16.4).
+     * Colour = the highest-priority user-action state (blocking > running >
+     * done > idle); pulse = whether any session still runs — two independent
+     * channels that can stack. A temporarily collapsed list keeps the running
+     * animation but hides the pending counts and the warning/success colour
+     * (spec §11.2, §16.1).
+     * @param input - { running, blocking, unread, collapsed? } counts.
+     * @returns { mode, tone, pulse, showPendingCount } where mode is
+     *   'running' | 'collapsed' | 'pending' | 'idle' and tone is
+     *   'blocking' | 'running' | 'done' | 'idle'.
      */
     function pillStateOf(input) {
       const source = input !== null && typeof input === 'object' ? input : {}
       const running = countOf(source.running)
-      const pending = countOf(source.pending)
-      const collapsed = source.collapsed === true && pending > 0
-      if (running > 0) return { mode: 'running', pulse: true, alert: false, showPendingCount: pending > 0 && !collapsed }
-      if (collapsed) return { mode: 'collapsed', pulse: false, alert: false, showPendingCount: false }
-      if (pending > 0) return { mode: 'pending', pulse: false, alert: source.blocking === true, showPendingCount: true }
-      return { mode: 'idle', pulse: false, alert: false, showPendingCount: false }
+      const blocking = countOf(source.blocking)
+      const unread = countOf(source.unread)
+      const pending = blocking + unread
+      const collapsed = source.collapsed === true
+      const pulse = running > 0
+      const tone = collapsed
+        ? pulse ? 'running' : 'idle'
+        : blocking > 0 ? 'blocking' : pulse ? 'running' : unread > 0 ? 'done' : 'idle'
+      if (pulse) return { mode: 'running', tone, pulse, showPendingCount: pending > 0 && !collapsed }
+      if (collapsed && pending > 0) return { mode: 'collapsed', tone, pulse, showPendingCount: false }
+      if (pending > 0) return { mode: 'pending', tone, pulse, showPendingCount: false }
+      return { mode: 'idle', tone, pulse, showPendingCount: false }
     }
 
     /**
      * Parts of the expanded panel's status summary line; the renderer localizes
-     * each part and joins them with ' · '.
-     * @param input - { running, pending, collapsed? }.
+     * each part and joins them with ' · '. Counts are classified: blocking
+     * interactions are `summaryPending`, completed-but-unread turns are
+     * `summaryUnread` (spec §16.3).
+     * @param input - { running, blocking, unread, collapsed? } counts.
      * @returns [{ key, count }] — a single pillIdle part for the idle state.
      */
     function summaryOf(input) {
       const source = input !== null && typeof input === 'object' ? input : {}
       const running = countOf(source.running)
-      const pending = countOf(source.pending)
+      const blocking = countOf(source.blocking)
+      const unread = countOf(source.unread)
+      const pending = blocking + unread
       const parts = []
       if (running > 0) parts.push({ key: 'pillRunning', count: running })
-      if (pending > 0) parts.push({ key: 'summaryPending', count: pending })
+      if (blocking > 0) parts.push({ key: 'summaryPending', count: blocking })
+      if (unread > 0) parts.push({ key: 'summaryUnread', count: unread })
       if (source.collapsed === true && pending > 0) parts.push({ key: 'pillCollapsed', count: 0 })
       if (parts.length === 0) parts.push({ key: 'pillIdle', count: 0 })
       return parts
@@ -1451,8 +1466,10 @@ window.__ModuleLoader__.load({
       const pending = Number.isFinite(snapshot.pending) ? snapshot.pending : items.length
       const running = Number.isFinite(snapshot.running) ? snapshot.running : 0
       const collapsed = snapshot.collapsed === true
-      const blocking = snapshot.blocking > 0
-      const pill = pillStateOf({ running, pending, blocking, collapsed })
+      const blockingCount = Number.isFinite(snapshot.blocking) ? Math.max(0, Math.floor(snapshot.blocking)) : 0
+      const unreadCount = Math.max(0, pending - blockingCount)
+      const alert = blockingCount > 0
+      const pill = pillStateOf({ running, blocking: blockingCount, unread: unreadCount, collapsed })
       const hint = snapshot.notification === 'denied'
         ? props.t('notificationDenied')
         : snapshot.notification === 'unsupported'
@@ -1460,35 +1477,45 @@ window.__ModuleLoader__.load({
           : undefined
 
       // The pill is always on screen (spec §11.1): running, pending, collapsed
-      // pending, or the quiet idle state.
+      // pending, or the quiet idle state. Colour follows the highest-priority
+      // user action; the pulse marks ongoing work (spec §16.2).
       const pillClasses = ['psess-pill']
-      if (pill.alert) pillClasses.push('psess-pillAlert')
+      if (pill.tone === 'blocking') pillClasses.push('psess-pillAlert')
+      if (pill.tone === 'done') pillClasses.push('psess-pillDone')
       if (pill.mode === 'running') pillClasses.push('psess-pillRunning')
       if (pill.mode === 'idle' || pill.mode === 'collapsed') pillClasses.push('psess-pillLow')
       if (pill.mode === 'idle') pillClasses.push('psess-pillIdle')
 
-      const pillText = []
+      // Classified text parts (spec §16.2): no bare numbers; the same parts feed
+      // the aria-label so colour is never the only signal.
+      const textParts = []
       if (pill.mode === 'running') {
-        pillText.push(h('span', { key: 'running', className: 'psess-count' }, props.t('pillRunning', { count: running })))
+        textParts.push({ key: 'running', className: 'psess-count', text: props.t('pillRunning', { count: running }) })
         if (pill.showPendingCount) {
-          pillText.push(h('span', { key: 'sep', className: 'psess-sep' }, '·'))
-          pillText.push(h('span', { key: 'pending', className: 'psess-count' }, props.t('summaryPending', { count: pending })))
+          if (blockingCount > 0) textParts.push({ key: 'pending', className: 'psess-count', text: props.t('summaryPending', { count: blockingCount }) })
+          if (unreadCount > 0) textParts.push({ key: 'unread', className: 'psess-count', text: props.t('summaryUnread', { count: unreadCount }) })
         }
       } else if (pill.mode === 'pending') {
-        pillText.push(h('span', { key: 'pending', className: 'psess-count' }, pending))
+        if (blockingCount > 0) textParts.push({ key: 'pending', className: 'psess-count', text: props.t('summaryPending', { count: blockingCount }) })
+        if (unreadCount > 0) textParts.push({ key: 'unread', className: 'psess-count', text: props.t('summaryUnread', { count: unreadCount }) })
       } else if (pill.mode === 'collapsed') {
-        pillText.push(h('span', { key: 'collapsed', className: 'psess-mutedText' }, props.t('pillCollapsed')))
+        textParts.push({ key: 'collapsed', className: 'psess-mutedText', text: props.t('pillCollapsed') })
       } else {
-        pillText.push(h('span', { key: 'idle', className: 'psess-mutedText' }, props.t('pillIdle')))
+        textParts.push({ key: 'idle', className: 'psess-mutedText', text: props.t('pillIdle') })
+      }
+      const pillText = []
+      for (const part of textParts) {
+        if (pillText.length > 0) pillText.push(h('span', { key: 'sep-' + part.key, className: 'psess-sep' }, '·'))
+        pillText.push(h('span', { key: part.key, className: part.className }, part.text))
       }
 
-      const ariaLabel = pill.mode === 'running'
-        ? props.t('pillRunningAria', { count: running })
-        : pill.mode === 'pending'
-          ? props.t('pillAria', { count: pending })
-          : pill.mode === 'collapsed'
-            ? props.t('pillCollapsedAria')
-            : props.t('pillIdleAria')
+      // aria-label: classified parts joined by a full-width comma; the idle and
+      // collapsed pills keep their dedicated phrases (spec §16.5).
+      const ariaLabel = pill.mode === 'idle'
+        ? props.t('pillIdleAria')
+        : pill.mode === 'collapsed'
+          ? props.t('pillCollapsedAria')
+          : textParts.map((part) => part.text).join('，')
 
       if (!expanded || items.length === 0) {
         const interactive = pill.mode !== 'idle'
@@ -1518,7 +1545,7 @@ window.__ModuleLoader__.load({
             ...pillText))
       }
 
-      const summary = summaryOf({ running, pending, collapsed })
+      const summary = summaryOf({ running, blocking: blockingCount, unread: unreadCount, collapsed })
         .map((part) => props.t(part.key, { count: part.count }))
         .join(' · ')
 
@@ -1544,7 +1571,7 @@ window.__ModuleLoader__.load({
       else panelStyle.top = pillSize.height + PANEL_GAP + 'px'
 
       return h('div', { className: 'psess-root', style: rootStyle(anchor) },
-        h('div', { className: blocking ? 'psess-panel psess-panelAlert' : 'psess-panel', style: panelStyle },
+        h('div', { className: alert ? 'psess-panel psess-panelAlert' : 'psess-panel', style: panelStyle },
           h('div', { className: 'psess-head' },
             h('div', { className: 'psess-headRow' },
               h('span', { className: 'psess-title' }, props.t('title')),
@@ -1578,7 +1605,7 @@ window.__ModuleLoader__.load({
           h('ul', { className: 'psess-list' }, items.map((item) => h('li', { key: item.sessionId },
             h('button', {
               type: 'button',
-              className: item.blocking ? 'psess-item psess-itemAlert' : 'psess-item',
+              className: item.blocking ? 'psess-item psess-itemAlert' : 'psess-item psess-itemDone',
               title: item.title.length > 0 ? item.title : props.t('untitled'),
               onClick: () => props.openSession(item.sessionId),
             },
