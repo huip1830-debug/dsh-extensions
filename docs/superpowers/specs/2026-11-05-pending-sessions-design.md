@@ -314,3 +314,88 @@ plugins/pending-sessions/
 - 改动文件：`plugins/pending-sessions/client.js`（纯函数 `autoOpenOf` + `autoOpenSeq` + `onStatus`/`publish` 接线 + 渲染器消费 effect）、`plugins/pending-sessions/test.mjs`（新用例，并把 `autoOpenOf` 加进 `plugin.pure` 解构）、`plugins/pending-sessions/README.md`（行为表 + 人工验收 + 已知限制）、本 spec、`plugins/pending-sessions/package.json`（0.3.2 → 0.4.0）。
 - i18n：无新键；`locale/*.json` 不改。
 - **判级**：非 gated（无契约面、无外部环境）；`client.js` 约 +35 行、`test.mjs` 约 +60 行，非机械改写 → 全批；与既有批次同文件，单批串行，无并行写。免独立评审（非 gated），主控复跑冻结集成命令 + diff 自查。
+
+## 16. 修订（2026-11-10 第八轮）：药丸/面板状态色与官方三态对齐
+
+**问题**（用户实测报告）：药丸目前只有白/黄两态。白色同时承载「运行中」与「完成未读」——未读-only 时是白底 + 品牌色**静态**点 + 裸数字，与运行中的白底 + 品牌色**脉冲**点只差动画；且 `running > 0` 时 `alert` 恒为 `false`（§11.1 的「运行 > 待处理」优先级）——**只要有任一会话在跑，另一个会话等你批准也不会变黄**。用户要求参考官方 GUI 的 loading / 黄灯 / 绿灯区分。
+
+**官方语义取证**（只读，app.asar）：
+
+| 官方状态 | 触发 | 呈现 |
+|---|---|---|
+| warning | `pendingInteraction` ∈ approval / plan-review / question | 黄 |
+| ongoing | `running` 或子智能体在跑 | loading |
+| done | `completionUnread` | 绿 |
+| idle | 其余 | 灰 |
+
+优先级 `pending > running > completed > idle`（`dsh/node_modules/@deepseek-ai/dsh-client-ui-workspace/lib/client.js:2328-2377` 的 `sessionStatuses`）；绿色 token `--dsw-alias-state-success-primary` 存在于主题别名（`dsh/node_modules/@deepseek-ai/dsh-client-ui-theme/lib/client.js:1858`）。
+
+**决策**（用户已确认，方案 B）：药丸保留单一聚合点的定位——**颜色 = 当前最高优先级的「用户动作」状态**，**脉冲 = 是否仍有会话在跑**（两个独立通道，可叠加）；逐会话语义落在展开面板的列表项上。§11.1 的「运行 > 待处理」**颜色**优先级由本节取代（运行仍保留脉冲）。
+
+### 16.1 聚合优先级
+
+`阻塞（黄） > 运行中（品牌蓝 + 脉冲） > 完成未读（绿） > 空闲（灰）`，与官方 per-session 优先级同序。
+
+- 黄点仍可脉冲：黄 + 脉冲 =「有人等你处理」且「还有会话在跑」；
+- 运行中与未读并存时颜色归运行（官方 running > completed），未读只出现在文字计数里；
+- 收起态（§11.2）仍以安静优先：阻塞/未读不参与颜色（不显示黄边/绿边），运行中只保留脉冲与品牌点。
+
+### 16.2 药丸呈现
+
+| 状态组合 | 边框 + 圆点 | 文字（分隔符 ` · `） |
+|---|---|---|
+| 有阻塞、在跑 | 黄边 + 黄点脉冲 | `{运行数} 运行中 · {阻塞数} 待处理 · {未读数} 待读`（缺项省略） |
+| 有阻塞、没跑 | 黄边 + 黄点 | `{阻塞数} 待处理 · {未读数} 待读` |
+| 无阻塞、在跑 | 中性边 + 品牌蓝点脉冲 | `{运行数} 运行中 · {未读数} 待读` |
+| 无阻塞、没跑、有未读 | 绿边 + 绿点 | `{未读数} 待读` |
+| 全空闲 | 中性边 + 灰点 | `全部空闲` |
+| 暂时收起 | 收起且无运行：现有低调灰；收起且有运行：品牌蓝点脉冲（不显示待处理数量、不警示） | `已收起` |
+
+- 待处理态不再显示裸数字；分类标签让「3 待读」与「1 待处理」自解释。
+- 颜色不是唯一信号：文字分类计数 + aria-label 兜底。
+
+### 16.3 展开面板
+
+- 头部摘要行 = 分类计数：`2 运行中 · 1 待处理 · 3 待读`；全空 `全部空闲`；收起时追加 `已收起`。
+- 列表项状态点：阻塞黄（不变）、**未读绿**（原为品牌蓝）。
+- 运行中会话仍不进列表（不改变「待处理列表」的性质）。
+
+### 16.4 纯函数契约
+
+`pillStateOf({ running, blocking, unread, collapsed })` 改为**计数入参**（`pending = blocking + unread`），返回 `{ mode, tone, pulse, showPendingCount }`：
+
+- `mode`：`running`（running>0）/ `collapsed`（收起且有 pending）/ `pending`（pending>0）/ `idle`；
+- `pulse`：`running > 0`；
+- `tone`：收起 → `running > 0 ? 'running' : 'idle'`；未收起 → `blocking > 0 ? 'blocking'`、`running > 0 ? 'running'`、`unread > 0 ? 'done'`、否则 `'idle'`；
+- `showPendingCount`：运行态且 `pending > 0` 且未收起（语义变为「显示待处理分类计数」）。
+- 移除原 `alert` 字段（与 `tone === 'blocking'` 冗余）；渲染器按 `tone` 加 `psess-pillAlert` / `psess-pillDone` 类，按 `mode === 'running'` 加脉冲类。
+
+`summaryOf({ running, blocking, unread, collapsed })` 返回分类 parts：`pillRunning` / `summaryPending` / `summaryUnread`，收起且有 pending 时追加 `pillCollapsed`，全空回落 `pillIdle`。两个计数都由 `publish()` 的可见投影统计（沿用 §11/§14 的排除规则）；渲染器用 `snapshot.blocking` 与 `max(0, pending − blocking)` 得出。
+
+### 16.5 文案与 i18n
+
+- 新增 `summaryUnread`（zh `{count} 待读` / en `{count} unread`）；`summaryPending` 保留，含义收窄为阻塞类。
+- aria-label 由同一组分类文案以 `，` 拼接；空闲/收起沿用 `pillIdleAria` / `pillCollapsedAria`；删除不再使用的 `pillAria` / `pillRunningAria`。`client.js` 内置字典与 `locale/zh.json`、`locale/en.json` 三处同步（既有同步用例兜底）。
+
+### 16.6 测试
+
+- `pillStateOf`：阻塞+运行（tone blocking、pulse true）、运行+未读（running）、未读-only（done）、阻塞-only、阻塞+未读无运行（blocking 优先）、空闲、收起（无运行 → idle、有运行 → running + pulse、showPendingCount false）、畸形输入。
+- `summaryOf`：仅运行 / 仅阻塞 / 仅未读 / 三类混合 / 收起追加 / 全空。
+- 既有 §11、§14、§15 用例不回归；locale 三处字典键一致。
+- **冻结集成命令（唯一一条）**：`node plugins/pending-sessions/test.mjs`。
+
+### 16.7 人工验收
+
+1. 只跑一个会话（无待处理）→ 药丸品牌蓝点脉冲、`N 运行中`；停止后变灰点「全部空闲」。
+2. 制造一个「等回答」→ 药丸黄边黄点、`1 待处理`；再让另一个会话跑起来 → 仍是黄边黄点**且脉冲**、文字 `1 运行中 · 1 待处理`（修复「运行吞黄」）。
+3. 让一个会话跑完但停在未读 → 药丸绿边绿点、`1 待读`；点开后绿灯消失。
+4. 阻塞 + 未读同时存在 → 黄色优先，文字 `1 待处理 · 1 待读`；运行中再叠加 → `N 运行中 · 1 待处理 · 1 待读`。
+5. 面板头部摘要行与条目状态点（黄/绿）逐项核对；类型标签不变。
+6. 点「暂时收起」→ 药丸回到低调灰（运行中仍脉冲），颜色不警示；恢复后分类计数回来。
+7. 开启系统「减少动态效果」→ 脉冲静止，颜色与文字不变。
+
+### 16.8 实现与判级
+
+- 改动文件：`plugins/pending-sessions/client.js`（CSS 三条 + `pillStateOf` / `summaryOf` 契约 + 药丸文字/类名 + 面板条目类名）、`plugins/pending-sessions/test.mjs`（重写既有药丸断言 + 新增 tone/summary 用例）、`locale/zh.json`、`locale/en.json`、`README.md`（行为表 + 人工验收 + 已知限制）、本 spec、`package.json`（0.4.0 → 0.5.0）。
+- 不新增持久化；通知/自动展开/拖动/位置逻辑不动。
+- **判级**：非 gated（无契约面、无外部环境；纯展示层 + 纯函数）；单文件 `client.js` 约 +50/−15 行、`test.mjs` 约 +40 行，非机械改写 → 全批；同文件单批串行，无并行写。免独立评审（非 gated），主控复跑冻结集成命令 + diff 自查。
