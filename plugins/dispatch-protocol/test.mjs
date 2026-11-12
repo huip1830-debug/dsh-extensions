@@ -30,6 +30,7 @@ import {
   analyzeVerification, DEFAULT_DOC_PATTERNS, evaluateReviewGate, evaluateVerifyGate, isRestoreCommand,
   renderGateText, renderReviewGate, renderVerifyGate, resolveGates,
 } from './lib/gates.mjs'
+import { CONFIG_KEYS } from './lib/config-keys.mjs'
 
 // Reminder behaviour is asserted from the harness messages. Decision logging
 // stays off so a test run never appends to the real `%TEMP%` decision log; the
@@ -68,7 +69,7 @@ test('the default text states all six dispatch rules', () => {
   assert.match(text, /共享产物/, 'shared build outputs stay serial')
   assert.match(text, /循环批/, 'the closing paragraph routes execution work to loop batches')
   assert.match(text, /合并判级/, '0.4.0: a change set cannot be split into normal batches to dodge review')
-  assert.match(text, /重开评审|重开受影响切片/, '0.4.0: post-review changes re-enter review')
+  assert.match(text, /重开评审|重开受影响切片|只重开被判 FAIL 的那一片/, '0.4.0/D6: post-review changes re-open the affected slice only')
   assert.match(text, /拆批方案或一行不派发理由/, '0.4.0: implementation plans must name the batches or the skip reason')
 
   // Rule 4 bounds the review object. The failure it prevents: a review that
@@ -84,7 +85,7 @@ test('the default text states all six dispatch rules', () => {
   assert.match(text, /给定检索词与目录/, 'the sweep names its search space instead of "look everywhere"')
   assert.match(text, /用户可见的遗漏判 FAIL/, 'a sweep hit is a verdict, not a note')
   assert.match(text, /20 个文件或 3 个契约面/, 'the review package has an explicit capacity bound')
-  assert.match(text, /跨切片一致性另设一包/, 'cross-slice consistency is reviewed as its own package')
+  assert.match(text, /跨切片一致性另设一包|跨切片一致性包只在切片确实独立/, 'cross-slice consistency is reviewed as its own package when slices are independent')
   assert.match(text, /程序化比对/, 'read-only shell comparison is in scope; build/test re-runs are not')
 
   // 0.5.1: the rules were reordered by "who decides what". Six rules, not
@@ -123,6 +124,45 @@ test('the default text states all six dispatch rules', () => {
   // every narrow assertion; the single exception is spelled out in rule 3.
   assert.match(text, /集成命令必须覆盖各批窄验证断言点的并集/, 'the no-re-run stance has a coverage precondition')
   assert.match(text, /唯一的复跑例外/, 'the coverage gap exception is the only re-run')
+})
+
+// 0.12.0 — 文档通道实体化（spec §1 D2/D5）：机器检查器先跑，只有非空断言表
+// 才买一次有界评审。断言放在渲染后的注入文本上，避免只改常量名却漏改正文。
+test('0.12.0: rule 1 routes document batches through docs-check and an assertion table', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+  const text = h.sections[0].text
+
+  assert.match(text, /scripts\/docs-check\.mjs/,
+    '0.12.0 D2: rule 1 names the bundled deterministic checker instead of "机器校验"')
+  assert.match(text, /断言 → 代码位置/,
+    '0.12.0 D5: a document batch hands in an assertion → code-location table')
+  assert.match(text, /本批无机制断言/,
+    '0.12.0 D5 hardening: an empty table still leaves a ledger line')
+})
+
+test('0.12.0: rule 4 carries the injection surface and one bounded review', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+  const text = h.sections[0].text
+
+  assert.match(text, /注入面/,
+    '0.12.0 D5: AGENTS.md and docs/agent/* are an injection surface')
+  assert.match(text, /有界评审/,
+    '0.12.0 D5: a non-empty assertion table buys exactly one bounded review')
+  assert.doesNotMatch(text, /必要时派最小只读评审/,
+    '0.12.0 D5: the old "必要时" wording is replaced, not appended')
+})
+
+test('0.12.0 D6: review rhythm is one package per change set, not one per batch', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+  const text = h.sections[0].text
+
+  assert.match(text, /不得每批一评/,
+    'D6: the default is a single final review per change set, not one review per batch')
+  assert.match(text, /只重开被判 FAIL 的那一片/,
+    'D6: a fix re-opens only the failed slice plus its direct impact surface')
 })
 
 test('configured rules replace the default text', () => {
@@ -2521,6 +2561,51 @@ test('D4-4: a custom template may place {action}; old and unknown placeholders s
   assert.equal(renderGateText('{files} {oops}', { files: ['a.ts'] }), 'a.ts {oops}')
   assert.equal(renderGateText('{action}', {}), '{action}')
   assert.equal(renderGateText('{action}', { action: 'X' }), 'X')
+})
+
+// ---------------------------------------------------------------------------
+// 0.12.0 — DOC005 的配置键清单：CONFIG_KEYS 必须等于「推导叶子 − 显式镜像集」。
+
+test('0.12.0: CONFIG_KEYS equals the input keys derived from the resolved config', () => {
+  /**
+   * 由 `resolveGates({})` / `resolveWritePolicy({})` 派生或镜像的字段：出现在
+   * 解析结果里，但**不是可接受的输入键**，不属于 CONFIG_KEYS（H1b 收口）。
+   */
+  const MIRRORED = [
+    'gates.verify.commitRegExp',
+    'gates.verify.controlPlanePatterns',
+    'gates.review.controlPlanePatterns',
+    'gates.review.docPatterns',
+  ]
+
+  /**
+   * 递归取叶子键路径：普通对象递归，数组与 RegExp 等非普通对象视为叶子；
+   * 前缀 `gates` / `writePolicy`。
+   */
+  const leafKeys = (value, prefix) => {
+    const plain = typeof value === 'object' && value !== null && !Array.isArray(value)
+      && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
+    if (!plain) return [prefix]
+    return Object.entries(value).flatMap(([key, child]) => leafKeys(child, `${prefix}.${key}`))
+  }
+
+  const derived = [
+    ...leafKeys(resolveGates({}), 'gates'),
+    ...leafKeys(resolveWritePolicy({}), 'writePolicy'),
+  ]
+
+  // 镜像集自身也要被代码推导覆盖：否则代码改了字段名，MIRRORED 会静默失配。
+  for (const key of MIRRORED) {
+    assert.ok(derived.includes(key), `镜像字段 ${key} 不在推导集合中：MIRRORED 需要同步`)
+  }
+
+  const inputKeys = derived.filter((key) => !MIRRORED.includes(key))
+  console.log(`[config-keys] 推导叶子 ${derived.length} 个 − 镜像 ${MIRRORED.length} 个 → 输入键 ${inputKeys.length} 个；CONFIG_KEYS ${CONFIG_KEYS.length} 个`)
+
+  assert.deepEqual(new Set(inputKeys), new Set(CONFIG_KEYS),
+    'CONFIG_KEYS 与「resolveGates({})/resolveWritePolicy({}) 推导叶子 − MIRRORED」不一致：请按 lib/config-keys.mjs 头部口径重填清单')
+  assert.equal(CONFIG_KEYS.length, new Set(CONFIG_KEYS).size, '清单不得有重复键')
+  assert.equal(inputKeys.length, CONFIG_KEYS.length, '输入键数量应与清单一致（不含镜像字段）')
 })
 
 // ---------------------------------------------------------------------------
