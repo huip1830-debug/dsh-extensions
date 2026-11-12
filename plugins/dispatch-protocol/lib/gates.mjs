@@ -603,7 +603,7 @@ export function renderWaitGate(template, info) {
  */
 const VERIFY_ACTION = '先跑一次集成命令并留存退出码，再收口。'
 const REVIEW_ACTION = '评审已失效：重开受影响切片再收口。'
-const REVIEW_DOC_ACTION = '这类改动不使代码切片失效：跑 docs-check，并按规则 1/4 交「断言 → 代码位置」表（表非空再由派发方派 1 次有界评审）即可，不必重开代码评审。'
+const REVIEW_DOC_ACTION = '这类改动不使代码切片失效：跑 docs-check（仓库无此脚本则记一行台账），并按规则 1/4 交「断言 → 代码位置」表（表非空再由派发方派 1 次有界评审）即可，不必重开代码评审。'
 
 /**
  * 统一渲染闸门文案（0.11.0 D4）：一个模板 + 一个 `{action}`。

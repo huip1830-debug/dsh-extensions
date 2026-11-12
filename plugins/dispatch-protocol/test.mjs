@@ -153,6 +153,30 @@ test('0.12.0: rule 4 carries the injection surface and one bounded review', () =
     '0.12.0 D5: the old "必要时" wording is replaced, not appended')
 })
 
+test('2026-11-12: discipline text gaps', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+  const text = h.sections[0].text
+
+  // D1 (A)：docs-check 在多数仓库不存在，允许「记一行台账」，但不得新建脚本。
+  assert.match(text, /跑 scripts\/docs-check\.mjs（无此脚本的仓库记一行台账、不新建脚本）/,
+    'D1: a repo without scripts/docs-check.mjs records one ledger line instead of failing')
+  // D2 (B1)：只回 ok 不等于逐项确认，记法必须区分。
+  assert.match(text, /用户只回 ok 时记「ok 视为接受推荐项」，不得写「用户已确认」。/,
+    'D2: a bare "ok" is recorded as accepting the recommendation, never as user confirmation')
+  // D3 (B2)：勘察必答现存调用方；没有调用方的实现要标「预防性实现」。
+  assert.match(text, /结论（含现存调用方） \+ 不确定项」写成现状文件并在派发中引用，无现存调用方的实现在 spec 标「预防性实现」/,
+    'D3: the survey answers reachability and marks a call-site-less implementation as preventive')
+  // D4 (C)：多包仓库按端各一条集成命令，每端仍只跑一次。
+  assert.match(text, /同一条命令全系统只跑一次，不重复付费（多包仓库按端各一条，每端只跑一次）。/,
+    'D4: a multi-package repo gets one integrated command per side, each run once')
+  // D5：闸门文案同步「仓库无此脚本则记一行台账」。
+  const gates = resolveGates({})
+  const gateText = renderReviewGate(gates.review.text, { files: ['AGENTS.md'], docOnly: true })
+  assert.match(gateText, /跑 docs-check（仓库无此脚本则记一行台账），并按规则 1\/4 交「断言 → 代码位置」表/,
+    'D5: the doc-only review action carries the ledger-line fallback')
+})
+
 test('0.12.0 D6: review rhythm is one package per change set, not one per batch', () => {
   const h = harness()
   plugin.apply(h.ctx, {})
@@ -2574,7 +2598,7 @@ test('D4-4: a custom template may place {action}; old and unknown placeholders s
   }), 'V：src/a.ts（代码）先跑一次集成命令并留存退出码，再收口。 [changes=2; last=npm test]',
   'D4: {action}, {changes} and {lastVerify} render in a custom template')
   assert.equal(renderReviewGate(gates.review.text, { files: ['a.md'], docOnly: true }),
-    'R：a.md 这类改动不使代码切片失效：跑 docs-check，并按规则 1/4 交「断言 → 代码位置」表（表非空再由派发方派 1 次有界评审）即可，不必重开代码评审。',
+    'R：a.md 这类改动不使代码切片失效：跑 docs-check（仓库无此脚本则记一行台账），并按规则 1/4 交「断言 → 代码位置」表（表非空再由派发方派 1 次有界评审）即可，不必重开代码评审。',
     'D4: the doc-only action fills {action} in a custom review template')
 
   // 未知占位原样保留；没注入 action 时 {action} 不被抹掉。
