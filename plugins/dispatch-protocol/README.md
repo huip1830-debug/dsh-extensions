@@ -2,33 +2,110 @@
 
 > 部署状态不在本文档硬编码：desktop 的实际版本以 profile 安装为准（`dsh plugin --profile desktop list` 或 `profiles/desktop/node_modules/dispatch-protocol/package.json`）；probe 为 `link:` → 直接吃工作区。发布顺序固定为：提交推送 → `dsh plugin --profile desktop update dispatch-protocol` → 重启 DSH → 台账记一笔。没走完不算发布。
 
-把「派发纪律」常驻注入 DSH。四个机制：三个不拦截调用（注入文本 + 收尾提醒 + 状态闸门），一个在工具边界拦截越界写入：
+## 它是什么
 
-1. **系统提示词 section**：每次请求（主控与每个子代理）都会看到六条规则，且**按职责排序**（主控只做什么 → 子代理可碰什么、能花多久 → 谁付执行成本、怎么等 → 评审看什么 → 谁拥有提交权 → 什么能并行、怎么判级）。规则在插件里，不依赖模型是否加载了某个 skill。
-2. **完成检查点**：子代理结束（`stopReason === 'completed'`）时只登记「待验收」，等父代理下一个回合收尾（`agent/turn-stopping`）才判定：已验收就静默丢弃，未验收才提醒读 diff、核对它报告的退出码，并在全批结束后跑一次集成命令。静态规则容易被跳过，时点提醒不会；**父代理已经按子代理汇报处理过的不再重复提醒**。
-3. **写入守卫（0.9.0）**：工具边界拦截。根代理用 `write`/`edit` 写控制面名单（`dispatch/`、`docs/superpowers/specs/`）之外的文件时，DSH 的 `ctx.tools.guard` 当场拒绝这一次调用——模型看到 `Error: <reason>`，回合继续；唯一豁免凭据是本会话写下的 `dispatch/override.json`。纠正点因此从「回合收尾」前移到「动作之前」，零模型步进。详见「写入守卫（0.9.0）」。
-4. **状态闸门（0.6.0/0.7.0）**：等待期只读轮询（WaitGate）、「验证之后又改却准备 present/commit」（VerifyGate）、有子代理在跑时改写契约文件（ContractGate）、只读评审后改动工作区（ReviewGate）、空回合兜底（HandoffGate）各提醒一次；同样只读事件、不拦截调用，详见「状态闸门（0.6.0/0.7.0）」。
+把「派发纪律」常驻注入 DSH：主控只做控制面、执行面一律派发，并在工具边界拦住越界写入——纪律不依赖模型记得住规则。
 
-## 为什么不用 AGENTS.md
+| 机制 | 位置 | 拦不拦 |
+|---|---|---|
+| 注入 | 系统提示词 section `## 派发纪律（DSH）`，主控与每个子代理的每次请求都带着（`lib/config.mjs:167-174`） | 不拦 |
+| 写入守卫 | `ctx.tools.guard`，工具调用边界（`plugin.mjs:279-283`） | **拦**：拒绝这一次 `write`/`edit`，回合继续 |
+| 状态闸门 | `agent/turn-stopping`，五个事件闸门（`plugin.mjs:463-522`） | 不拦，只提醒 |
+| 检查点与观测 | 子代理 settle 登记 → 父代理回合收尾判定；根代理回合收尾写观测行（`plugin.mjs:592-619`、`538-580`） | 不拦 |
+| 文档校验 | `scripts/docs-check.mjs`，仓库根无参运行，只判语法 / 围栏 / 表格列数 / 相对链接 / 配置表键名 | 不拦 |
 
-`AGENTS.md` 是跨工具共享的（Codex、OpenCode、Claude Code 都读），而派发纪律只对 DSH 的子代理机制成立。写进 AGENTS.md 会污染其他工具，并与 OpenCode 的 lead/impl/verify 流程冲突。
-
-插件层是 DSH 专属、且**不依赖模型是否加载某个 skill**：即使主控没有加载 `subagent-driven-development`，这段规则仍在系统提示词里。
+收尾提醒（完成检查点 + 五个闸门）共用一个 `agent/turn-stopping` 处理器，一次收尾最多投一条 `steer`；写入约束不在收尾，而在动作之前。
 
 ## 注入内容
 
-默认六条规则 + 一段收口（`lib/config.mjs` 的 `DEFAULT_RULES` / `DEFAULT_FOOTER`）。顺序按「谁决定什么」排，不按加入时间排，这样以后改规则只会落在对应那一条上，不会习惯性追加第七条：
+默认六条规则 + 一段收口，渲染进 `## 派发纪律（DSH）` 小节：`order: 500`（在一方指引之后、persona suffix 之前）、`interpolate: false`（`{{…}}` 原样保留）。六条各一句主旨，细则以 `lib/config.mjs` 为准：
 
-1. **主控只做控制面，不做执行面**：允许的动作只有七类（问用户、冻结契约与账本、派发与调度、裁决子代理证据、跑唯一一条集成命令、提交交付、结束回合等事件）；`src/**`、`tests/**`、`scripts/**` 的任何写入、真实环境/账套排错、构建与失败测试修复、文档正文、测试、评审与评审修复一律派发，唯一例外是用户显式要求主控亲自做：先在 `dispatch/override.json` 写 `{"reason":"…","source":"…"}` 再动手，守卫只认这个文件（每会话有效，新会话需重写）；被守卫拦截时按错误信息二选一（派发 / 写 override），不要重试同一个调用。**先勘察后派发**：派发前把「文件:行号 + 相关代码 + 结论 + 不确定项」写成现状文件并在派发中引用，同时给出可改文件白名单（逐条列名；以「全批结束后能用一条集成命令验收」为界）；勘察批次的唯一触发条件是主控现有上下文写不出这份现状——刚读过相关模块或属已知模式克隆时免派勘察。禁止把「调研 X 然后实现」交给执行类子代理。**有界直改**：已闭合批次的收尾修复可由主控直接改单文件 ≤10 行（同批累计 ≤20 行），同样先写 override，记一行台账并重开受影响评审切片；第二个文件或超限即转派。（纯文档/单字符级修复只记台账 + docs-check + 断言表，见规则 1/4）
-2. **执行类派发必须自包含**：至少含【现状】【允许修改/允许读取】【验证：唯一一条命令】【预算：墙钟与步数上限】【输出格式】。验证必须是覆盖本批改动的**窄命令**——全量构建/全量测试归派发方的集成命令；预算过半时发一句进度（改到哪、还差什么、有无契约疑点），超预算先报阻塞点再停、不得自行续期。子代理遇到清单外信息或现状与代码不符时停报 `NEEDS_CONTEXT`，不得自行扩大范围。**派发即冻结**：该批运行期间白名单外的契约面（`src`/schema/类型/路由）只读，必须改时先 `interrupt_agent` 停批、改完重派并注明「契约已变」。
-3. **验收与等待**：验收分两层，执行性验证只归派发方——子代理只跑自己那部分的窄验证（负责归因），派发方在相关子代理全部结束后跑那条集成命令（负责集成状态）并留存退出码；宽窄混用会让两边都失真，同一条命令全系统只跑一次、不重复付费。**前提（0.5.4 起写进规则文本）**：集成命令必须覆盖各批窄验证断言点的并集；某批窄验证断言了集成命令覆盖不到的行为时，该批窄命令由派发方自己再跑——这是唯一的复跑例外。派发后结束回合等完成事件：预算过半时的一次主动检查是唯一例外，不要用一串 `Start-Sleep`/`list_agents` 轮询。未跑集成命令不得标记完成。
-4. **评审只审变更集，不审仓库**：命中 gated 的需求另派只读评审子代理（其中判为轻批的批次除外——gated 是需求级判定，不改变轻批免独立评审；默认终评一次、不得每批一评），输入只有需求原文、冻结契约、本批白名单并集的 diff、派发方复跑的集成结果；逐条给 `PASS|FAIL + 文件:行号`。范围、切片与方法是独立的一节，见「评审」。
-5. **提交权归派发方**：子代理不得 commit / push / reset / clean，除非派发中显式授权；派发前先记录目标文件的既有未提交改动，不得覆盖，也不得计入本次成果。
-6. **并行只读，互斥并行写**：只读子问题互不依赖且 ≥2 个时，在同一条消息里并行发出；实施也能并行，但白名单按文件/模块互斥、契约（schema/类型/路由/barrel/lockfile）在派发前定死、不得并发跑共享产物的全量构建。开工先按两轴判级并把拆批方案或一行不派发理由写进任务清单或台账首行：风险轴同一需求合并判级，任一批次命中并行写或契约面即整个需求 gated；规模轴单批满足「单文件 ≤20 行或同模式机械改写 ≤5 文件」且 ≤8 分钟判轻批、免独立评审（子代理跑窄命令，主控复跑 + diff 自查留证），单批预估超过 15 分钟或 30 次编辑就按场景切片（同文件/同构建产物仍串行），保证 10 分钟内出现第一个可验收切片。执行中改动面超出预估必须停手重判。
+1. **主控只做控制面，不做执行面**——七类动作之外一律派发；用户显式要求主控亲做时，先写 `dispatch/override.json` 再动手。
+2. **执行类派发必须自包含**——现状、白名单、唯一一条窄验证、预算、输出格式缺一不可，派发即冻结。
+3. **验收与等待**——执行性验证只付一次：窄验证归子代理、集成命令归派发方，派发后等完成事件。
+4. **评审只审变更集，不审仓库**——输入是本批白名单并集的 diff，不是工作区快照。
+5. **提交权归派发方**——子代理不得 commit / push / reset / clean，除非派发中显式授权。
+6. **并行只读，互斥并行写**——白名单按文件/模块互斥，契约在派发前定死，不得并发跑共享产物的全量构建。
 
-渲染为系统提示词里的 `## 派发纪律（DSH）` 小节，`order: 500`（在一方指引之后、persona suffix 之前），`interpolate: false`（`{{…}}` 原样保留）。
+收口段（`DEFAULT_FOOTER`）回答「谁来做、什么可以直接做、怎么判级」：产出物归属、交付通道按风险缩放、循环批与 `NEEDS_DECISION`、外部未知先派只读 spike、对称预算。
 
-收口段回答「谁来做、什么可以直接做、想不清怎么办」：**归属**（主控权限按「产出物归属」判定，不按「是否判断密集」——产出物在 `src`/`tests`/`scripts`/文档正文里就没有主控的事；只有契约、账本、裁决、验收、提交归主控）；**循环批**（结果未知、需 ≥3 轮「跑→看→改」的工作一律派成循环批：目标判定 + 环境（凭据/端口/库/账号）+ 每轮证据（命令/退出码/错误原文）+ 预算（轮数与墙钟）+ 停止条件 + 契约分叉上报；分叉用 `NEEDS_DECISION` 三行——现象/选项/建议——回主控，主控只回一个决策、不接管循环）；**风险前置**（真实环境的外部未知先派只读 spike 实测出「实测契约表」，再冻结、再实现，不得先实现后验证）；**对称预算**（子代理单批 15 分钟/30 次编辑；主控单回合 15 分钟/20 步，且不得产生第二个未派发的写批次——触顶即停，把剩余工作转成循环批或下一批）。**交付通道按风险缩放**：控制面（主控直写状态文件）、轻批（单文件 ≤20 行或同模式机械改写 ≤5 文件、≤8 分钟、无契约面/外部环境：子代理直做，不写 spec、不派独立评审，主控复跑窄命令 + 读 diff）、全批（spec 冻结 + 独立评审 + 集成）。同时保留**拆批**（步骤穷举不出来就先派只读勘察、再按互斥文件切实现，可多批陆续派发）与**缺 skill**（先写「每条 = 一个决策点或一批派发」的清单，不得据缺 skill 跳过判断）。没有这段时，「步骤一时穷举不出来」会被读成「那我自己做完」：`session-a80150dd` 走完 56 步、2.5 万输出 token，只换来 +26 行。
+## 机制
+
+### 写入守卫
+
+主控用 `write`/`edit` 写控制面名单（`dispatch/`、`docs/superpowers/specs/`，`lib/write-policy.mjs:28`）之外的文件时，DSH 在工具边界拒绝**这一次**调用：模型收到 `Error: <reason>`，回合继续。纠正点因此从「回合收尾」前移到「动作之前」，零模型步进。
+
+- **注册**：`ctx.effect(() => ctx.tools.guard(makeGuard(config)))`，`inject` 带 `'tools'`，插件卸载时随 disposer 一起移除；`writePolicy.enabled: false` 或宿主没有 `ctx.tools.guard` 时不注册（`plugin.mjs:66`、`279-283`）。
+- **判定顺序**：①名单内 → 放行且**不写日志**（控制面写入是主控的合法动作，不制造噪音）；②`dispatch/override.json` 有效 → 放行，日志 `reason: 'override'`；③否则拒绝，`reason` 为 `no-override`/`stale`/`invalid`——`mode: enforce` 返回拒绝串，`shadow` 只记日志（`lib/write-policy.mjs:201-218`、`plugin.mjs:238-256`）。
+- **豁免**：没有 `agent`；子代理（`session.header.origin === 'subagent'`，执行面本来就该写）；工具不在 `writePolicy.tools`；参数里既无 `file_path` 也无 `path`（`plugin.mjs:223-231`）。**子代理放行是有意的**——派发要的正是它在 `src`/`tests`/`scripts` 里写。
+- **路径口径**：`\` → `/`、去 `./`、折叠 `..`；相对路径相对 `session.cwd ?? header.cwd`，绝对路径先转 cwd 相对、cwd 外一律视为不在名单；名单大小写不敏感，带尾 `/` 按前缀匹配，无尾 `/` 按词边界（`lib/write-policy.mjs:82-140`）。
+- **override 是唯一凭据**：默认 `<cwd>/dispatch/override.json`（`writePolicy.overridePath` 可改）；schema 是 `{"reason":"…","source":"…","createdAt":"…"}`，代码只校验 `reason` 非空，`source`/`createdAt` 不参与判定；有效 = JSON 可解析 + `reason` 非空 + **本会话写下**（`mtimeMs >= session.createdAt ?? header.createdAt`），新会话必须重写；取不到会话开始时间时跳过新鲜度判断（fail-open），日志记 `reason: 'override-unbounded'` 以区分（`lib/write-policy.mjs:153-188`、`plugin.mjs:200-203`）。
+- **只拦 `write`/`edit` 的参数路径**：`pwsh` 里的 `Set-Content`/`Remove-Item` 不拦，只在观测与闸门的口径里计为写入（`lib/tool-calls.mjs:250`）。
+- **fail-open**：守卫内部异常一律按放行处理，日志写失败也不影响调用（`plugin.mjs:257-260`）；拒绝串说清「拦了什么、不在哪份名单」，并给两条出路——派给执行批，或按用户明确授权先写 override 再重试（`lib/write-policy.mjs:233-236`）。
+
+### 状态闸门
+
+五个事件闸门都在 `agent/turn-stopping` 里判定：只对根代理生效、每回合最多一条、判定与投递异常一律吞掉、不阻断任何工具调用；判据只读 `session.snapshotEvents()`，不跑 git、不读磁盘（`lib/gates.mjs:12-14`、`plugin.mjs:463-522`）。
+
+| 闸门 | 触发 | 动作 | 决定日志 |
+|---|---|---|---|
+| WaitGate | 本回合 `gates.wait.tools` 调用数 ≥ `gates.wait.threshold`，且没有 write/edit、派发、`present`、`send_message`、`interrupt_agent`、`job_kill`，也没有命中 `gates.verify.commands` 的 `pwsh` | 「结束回合等完成事件」提醒，占位 `{count}` / `{tools}`（去重，最多 4 个） | `kind:"gate", gate:"wait", observations:<查询次数>` |
+| VerifyGate | 本回合出现 `present` 或命中 `commitRegExp` 的 `git commit/push`，且（有写入但从未成功验证〔无结果照算〕，或最近一次成功验证之后又脏）；整批脏改动全是文档/控制面时不触发 | 「先跑集成命令再收口」提醒，占位 `{files}`（脏路径，最多 3 个）/ `{kind}`（`代码`\|`未知`）/ `{action}`（固定句，见下） | `kind:"gate", gate:"verify", changes:<脏改动数>, lastVerify:<命令或 null>` |
+| ContractGate | 本回合 write/edit 的路径命中 `gates.contract.patterns`，且收尾时仍有未结束子代理 | 「派发即冻结：先 interrupt 停批」提醒，占位 `{files}`（最多 3 个） | `kind:"gate", gate:"contract", files:[...]` |
+| ReviewGate | 只读评审子代理 `completed` 之后，父代理又有 write/edit（失败的不算、无结果照算；控制面写入不算） | 「评审已失效」提醒，占位 `{files}`（本轮 dirty 去重路径，最多 3 个）/ `{action}`（固定句，见下） | `kind:"gate", gate:"review", files:[...], docOnly:<true\|false>` |
+| HandoffGate | 本回合为空（无本回合 `tool/call`、无非空 text），且往前连续空回合数 ≥ `gates.handoff.emptyTurns` | 「先写 `dispatch/state/<需求>.md` 再开新会话」提醒，占位 `{emptyTurns}` | `kind:"gate", gate:"handoff", emptyTurns:<n>` |
+
+- **让位顺序**：checkpoint → Wait → Verify → Contract → Review → Handoff，固定顺序、不依赖订阅顺序；checkpoint 投递后闸门让位，同一收尾的后续机制不再发第二条（`plugin.mjs:592-619`）。
+- **`{action}` 三句固定、不可配置**：verify 一句（先跑集成命令并留存退出码再收口）、review 代码改动一句（重开受影响切片）、review 文档改动一句（跑 `docs-check` + 交「断言 → 代码位置」表，不必重开代码评审）；`docOnly` 为真时用第三句（`lib/gates.mjs:602-604`、`806-808`）。
+- **验证成功口径**：`pwsh` 命中 `gates.verify.commands`、有对应 `tool/result`、`isError !== true`、结果文本无 `exit code: N` 或 `N === 0`；失败或没有结果的验证不算验证（`lib/gates.mjs:385-388`、`454-474`）。
+- **纯只读 present 不提醒**：整会话零写入、也从未验证时没有 diff 可验（`lib/gates.mjs:578-581`）。
+- **脏判定**：最近一次成功验证之后有成功 write/edit，或命中 `DEFAULT_PWSH_SHELL_PATTERN` 的 `pwsh`；没有对应结果的调用按脏处理；`git checkout -- <路径>` / `git restore <路径>` 这类还原不算脏（`lib/gates.mjs:416-435`、`339-365`）。
+- **控制面豁免**：VerifyGate 与 ReviewGate 跳过 `gates.controlPlanePatterns`（默认 `dispatch/`、`docs/superpowers/specs/`，与 `writePolicy.allowlist` 同值），控制面写入不计脏、不使评审失效；分类走唯一 `classifyPath`（cwd 锚定 + 段级前缀），`src/**/dispatch/**` 按代码处理（`lib/tool-calls.mjs:189-205`）。
+- **ContractGate 只看收尾时刻**：活跃子代理在 `agent/created` 登记、`subagent/end` 标 `ended`，写入之后、收尾之前结束的子代理不触发（`plugin.mjs:440-446`、`lib/gates.mjs:670-683`）。
+- **ReviewGate 只看「评审完成 + 之后有写入」**：label 以 `gates.review.labelPrefixes` 开头（默认 `只读评审`/`只读复审`），不解析评审报告 PASS/FAIL，每个基线只提醒一次（`lib/gates.mjs:763-794`、`plugin.mjs:636-680`）。
+- **HandoffGate 是 best-effort**：空回合 = 无本回合 `tool/call` 且无非空 text；宿主在空流/中断回合不再触发 `agent/turn-stopping` 时无法提醒（`lib/gates.mjs:698-738`）。
+
+### 完成检查点与回合观测
+
+三处记录各写各的、互不回读：检查点提醒父代理验收，观测行记回合事实，决定日志记判定。
+
+**完成检查点**（`plugin.mjs:643-717`）
+
+- 子代理 `subagent/end` 且 `stopReason === 'completed'` 才登记「待验收」（每个子代理一次，失败/中止不登记）；判定挪到父代理的 `agent/turn-stopping`，此时父代理整回合的动作已在日志里。
+- 判定：父代理已按汇报动过手 → 静默（`reason: 'handled'`）；子代理整个会话零写入 → 静默（`reason: 'read-only'`）；其余投一条 `steer`，同回合多个 pending 合并成波次消息（`checkpoint.waveText`，`{count}`/`{labels}`）（`plugin.mjs:369-433`）。
+- 「已验收」的三个条件：父代理日志有 `agent/inbox/spliced` 且文本含 `Agent {childId} sent a message`、那次汇报之后父代理有任意一次 `tool/call`、子代理最后一次 `send_message` 之后没再 `write`/`edit`（`plugin.mjs:720-743`）。
+- 只读判定用 `callTouchesFile`：`write`/`edit` **尝试即算**，`pwsh` 命中变更动词也算；判定抛错按执行类处理（`plugin.mjs:93-99`、`lib/tool-calls.mjs:265-271`）。
+- 父代理没有 hook 作用域时（如嵌套子代理作父）回退为 settle 时 `followup`，判定顺序不变，`turn` 记 `null`（`plugin.mjs:704-716`）。
+
+**回合观测行**（`plugin.mjs:538-580`）
+
+- 根代理回合只要有写入、`pwsh` 变更或派发（任一非零），收尾时往 `<cwd>/dispatch/runs/<sessionId>.jsonl` 追加一行：`time`/`session`/`turn`/`writes`/`files`/`shellWrites`/`failedWrites`/`delegations`；默认目录 `dispatch/runs`（`observation.dir`，`config.mjs:161`）。
+- 同一 `(session, turn)` 只保留首行：`steer` 会让同一回合再跑一步，首行才是自然的回合末快照（`plugin.mjs:547`）。
+- 口径：控制面路径的写入不计入；`write`/`edit` 以失败结果为准排除（没有结果照算，回合被打断时不能把写入抹掉）；`pwsh` 命中变更动词才算 `shellWrites`，`git commit` 不计（`lib/tool-calls.mjs:307-366`）。
+- **观测行不参与判定**：没有任何机制回读它，写盘失败静默吞掉——观测不是门禁（`plugin.mjs:530-532`、`577-579`）。
+
+**决定日志**（`config.mjs:185-189`、`plugin.mjs:139-176`）
+
+- 键是顶层 `log`，默认 `%TEMP%\dispatch-protocol-decisions.jsonl`，`false` 时 checkpoint、写入守卫、闸门都不记；三者写同一文件（`lib/config.mjs:71`）。
+- 只记事实、便于事后分辨「没触发」和「触发后被静默」：checkpoint 每个子代理一行（含 `reason: 'handled'|'read-only'`）、写入守卫每次判定一行（控制面放行不写行）、闸门只记 `delivered`（`plugin.mjs:404-419`、`477-479`）。
+
+### 交接
+
+模型失稳（连续空回合、`/compact` 之后丢了上下文）时不要在旧会话里硬撑：先写 `dispatch/state/<需求>.md`，再开新会话接力。HandoffGate 的提醒文案指向本节（`lib/gates.mjs:90`），模板保持最小：
+
+```text
+需求：<slug>
+进行中：<批次 / 文件:行号>
+下次开工：<一条命令或一次派发>
+```
+
+### 多会话
+
+一个工作区同时开多个会话，机制只兜三件事：
+
+- **台账按需求分文件**：`dispatch/state/<需求>.md` 与 `dispatch/ledger/<需求>.md`，两处同一个 slug；只写自己需求那份。
+- **开工先看 `dispatch/state/`**：先看目录里已有哪些需求在进行，同一需求已有进行中的文件时先问用户是否接手（这一步是约定，守卫认不出文件属于谁）；遗留 `dispatch/state.md` 只读。
+- **`dispatch/override.json` 仍是单文件**（已知限制）：它按 mtime 判本会话新鲜度，并行会话里 A 的直改豁免可被 B 复用；需要隔离时手动删除该文件再各自重写（`lib/write-policy.mjs:177-187`）。
 
 ## 评审
 
@@ -37,335 +114,115 @@
 - **触发与节奏**：gated 需求——同一需求**合并判级**，任一批次命中并行写或契约面，整个需求按 gated 处理，不得按子代理切分绕过。**默认一个变更集一个评审包、终评一次**：全部实现批落地且跑过集成命令后再派，禁止每批一评——后批改动会让前批评审立即失效，等于白付一次上下文。唯一例外：被后续批次依赖的契约批（产物是后续批的只读输入）在后续批启动前做一次只读契约复核，范围仅白名单 + 契约面（它错了的返工倍数最高）。规模轴判为轻批的批次免独立评审：子代理跑窄命令，主控复跑 + diff 自查留证。
 - **输入四项**：需求原文、冻结契约、本批**白名单并集**的 diff、派发方复跑的集成结果（退出码与输出全文）。评审对象是这份 diff，**不是工作区快照**——从 `git status` 或「看看仓库」起步的评审会把一次跨切面改动变成仓库审计，报告再也挂不回任何一个批次。
 - **不做的部分**：不逐文件通读未改动文件；默认只回答「这批改动是否满足这条需求」。
-- **全仓不变量核查（单列）**：只看 diff 必然漏掉跨切面的遗漏点。当需求本身是全局不变量（「彻底统一」「不得残留」「所有调用方」这类）时另开一栏：给定检索词与目录（不是「到处看看」），输出命中点排除表，每个命中点标注满足或遗漏，**用户可见的遗漏判 FAIL**。证据见「设计取舍」第 ④ 条。
+- **全仓不变量核查（单列）**：只看 diff 必然漏掉跨切面的遗漏点。当需求本身是全局不变量（「彻底统一」「不得残留」「所有调用方」这类）时另开一栏：给定检索词与目录（不是「到处看看」），输出命中点排除表，每个命中点标注满足或遗漏，**用户可见的遗漏判 FAIL**。证据：KOL 会话 `session-37256e00` 的评审按检索词全仓 grep，抓到 3 处白名单外、用户可见的漏点。
 - **切片上限**：一个评审包超过 **20 个文件或 3 个契约面**才按契约面切片；单个契约面自身超 20 个文件时按读写路径再切并在报告里写明切法；跨切片一致性包只在切片确实独立（接口/类型/别名表/路由边界）时开，不得重复已报缺陷。
 - **方法**：只做 read/grep 语义核对——纯读取的 `git diff`、`Select-String`、程序化比对都算；禁止重跑构建/测试/集成命令。
 - **不采信自述**：实现者的说明、以及它自己的测试通过，都不算证据（实现与测试可能共享同一个盲点）。
 - **输出**：逐条 `PASS|FAIL + 文件:行号`；全 PASS 须说明每条例子的验证方式。可以给建议，但不得改文件；建议归派发方，裁决也归派发方。评审后任何改动（含派发方自修）只重开被判 FAIL 的那一片及其直接影响面，不重开全包。（纯文档级修复：docs-check 绿 + 断言表，见规则 1/4）
 
-## 派发预算与等待
-
-规则原先只约束「怎么派发」，不约束派发之后主控干什么。本版起第 2、3 条把「花多久、怎么等」也写进规则——等待期最容易失守的是主控自己：子代理在跑，主控用 `Start-Sleep` / `list_agents` 反复探，每探一次都付一次完整模型步进，子代理的状态却没有变。
-
-- **【预算】字段**：执行类派发必须在【验证】之后给出【预算：墙钟与步数上限】。默认取规则 6 的数字——**15 分钟 / 30 次编辑**；任务本身就更大时按场景切片，不要靠放宽预算硬塞。
-- **预算过半**：子代理发一条一句话进度（改到哪、还差什么、有无契约疑点）。这一句是派发方唯一的主动检查依据，不是汇报礼节。
-- **超预算**：先报阻塞点再停，**不得自行续期**。派发方据此决定继续、停批还是切片——续期由派发方给，不由子代理自己延长。
-- **契约冻结（派发即冻结）**：批在跑期间，白名单外的契约面（`src`/schema/类型/路由）只读。必须改时先 `interrupt_agent` 停批，改完重派并在派发词里注明「契约已变」；运行中直接改的代价见文末实测。
-- **等待**：派发后结束回合等完成事件；预算过半时的一次主动检查是唯一例外。不要用一串 `Start-Sleep` / `list_agents` 轮询——轮询拿不到新状态，只是把回合拆成多次付费步进。
-- **看门狗（仅软兜底）**：只跑一个批次、且没有别的在跑任务时，可用 `schedule` 设一条「预算 + 5 分钟」的提醒兜底；收到进度或完成事件就删掉。它不是主路径——多批并行时它反而会打断注意力。它只发一条提醒，不会 steer 回合，也不改变「等完成事件」的付费口径。
-
-实测证据（`session-1433e747`）：子代理 30.8 分钟 / 192 步 / 57 次 `edit`；派发方在同一段里 31 次 `Start-Sleep` 合计 54.1 分钟（会话总长 106 分钟）。更贵的一次是契约冻结失守——子代理开工 8 分钟后（08:46:41）派发方改了 `GradingViewModel.cs`，子代理随后返工。
-
-## 完成检查点
-
-`agent/created` 记录每个子代理的父会话；`subagent/end` 在 `completed` 时**不再直接投递**，而是把「待验收」登记进 pending（每个子代理只登记一次，失败/中止不登记），投递时机见下。消息仍是 `[dispatch-protocol]` 一条，模板支持 `{childId}` 与 `{label}` 占位。
-
-**投递时序（0.3.4 起）**：settle 与父代理的验收动作天然赛跑——子代理汇报后通常立刻 settle，此时父代理的验收回合还没动手，settle 时判定只会读到「尚未验收」，检查点因此必然误发。所以判定挪到父代理的回合收尾：
-
-- 父代理有 hook 作用域：settle 时登记 pending，并给该父代理挂一个（每个父代理只挂一次）`agent/turn-stopping` 监听；回合收尾时逐个判定，判定完立即从 pending 移除，后续回合不会重复发。
-- 已验收（汇报后整回合有 `tool/call`，且子代理汇报后没再写文件）→ **静默丢弃**：零消息、零额外步骤。
-- 未验收 → `steer` 一条提醒（与状态闸门同机制：回合还开着，花一步）。
-- 父代理没有 hook 作用域（如嵌套子代理作父等异常形态）→ **回退**为 settle 时立即 `followup`，判定顺序不变。
-
-真机依据：`session-96dda908` 的父会话 seq——241 子代理汇报 splice → 246 settle（旧版在这里判定）→ 247 检查点误发 → 249 父代理才第一次 `tool/call`（读 diff）。判定比验收早了 3 个事件，正是 0.3.4 要消除的赛跑。离线用例覆盖：settle 后 0 条、回合收尾才补验收仍 0 条（时序赛跑回归）；判定后不重复发；同回合多个 pending 合并为一条波次消息（`checkpoint.waveText`，`{count}`/`{labels}` 占位），已验收的静默丢弃（决定日志仍每个子代理一行）。
-
-**只读跳过（0.3.3 起）**：子代理**整个会话**没有任何一次文件变更调用时，检查点**不发**（0.3.4 起该判定同样挪到 `agent/turn-stopping` 执行）。勘察类子代理只读文件、跑命令、汇报结论，既没有 diff 可读，也没有退出码可核对，提醒只会空转。判定只看 `session.snapshotEvents()` 里 `tool/call`，**尝试即算**——写入被拒绝或抛错也算执行类，照旧发（判定抛错同样照旧发）。判定与回合观测共用 `lib/tool-calls.mjs` 的 `callTouchesFile`：`pwsh` 命中变更动词（`Remove-Item`/`Set-Content`/重定向等）也算写——样本 `session-82db5b7d` 的 W-5 纯用 `pwsh` 删文件、零 `write`/`edit`，被判只读而漏验收。真机依据：`session-03f065ca` 回合 3 的勘察子代理 `56f7d82d` 汇报「未修改任何文件」、主控 0 次工具调用，检查点仍然发出，主控只能在回合 4 补一句「只读任务、无命令可复跑」。
-
-**去重（0.3.2 起）**：子代理通常先用 `send_message` 汇报，父代理会当场读 diff + 跑集成命令；等 `subagent/end` 再提醒同一件事，父代理只能回一个空回合。所以投递前先判定「父代理是否已经按这份汇报动过手」，满足下列全部条件就**不发**（条件与内部逻辑自 0.3.2 起不变；0.3.4 起判定时机随投递一起挪到 `agent/turn-stopping`，看的是父代理整个回合）：
-
-1. 父代理日志里存在 `agent/inbox/spliced`，文本含 `Agent {childId} sent a message`（子代理**汇报过**）；
-2. 那次汇报之后，父代理有任意一次 `tool/call`（**动过手**）；
-3. 子代理在它最后一次 `send_message` 之后**没有**再 `write`/`edit`（汇报即终态）。
-
-任一条不成立就照旧发；判定抛错、父代理没有日志、子代理没汇报过，也一律照旧发。**已知边界**：条件 2 不区分那次调用是不是针对这个子代理，属有意近似——宁可少提醒一次，也不要在已验收后重复打扰。
-
-## 写入守卫（0.9.0）
-
-**0.7.0 及以前**，六条规则只约束派发的**形式**，没有任何机制要求「必须派发」；0.8.0 起规则 1 把执行面划给子代理。0.8.x 的「漏派发 nudge」在回合收尾才评估，实测投递全部发生在最终答复之后、从未促成派发（2 次投递均误报，历史 45 次去重投递 0 次促成派发，合计 9.45M cache-read，见变更历史 0.9.0）。0.9.0 把约束前移到**工具调用边界**：
-
-- **注册**：`apply()` 里 `ctx.effect(() => ctx.tools.guard(guard))`，`inject` 增加 `'tools'`，插件卸载时守卫随 disposer 一起移除；`writePolicy.enabled: false` 或宿主没有 `ctx.tools.guard` 时不注册。
-- **`ctx.tools.guard` 语义**：同步、单调；返回字符串即拒绝**这一次**工具调用，模型收到 `Error: <reason>`，**回合继续**（不是回合级中断）；整个守卫包在 try/catch 里，任何异常按放行处理（fail-open），绝不影响宿主。
-- **判定顺序**：①控制面 allowlist（`writePolicy.allowlist`，默认 `dispatch/`、`docs/superpowers/specs/`）→ 放行，**不写日志**（控制面写入是主控的合法动作，不制造噪音）；②`overridePath` 指向的 override 有效 → 放行，日志 `reason: 'override'`（取不到会话时间戳时记 `override-unbounded`）；③否则拒绝，`reason` 为 `no-override`/`stale`/`invalid`——`mode: enforce` 返回拒绝串，`shadow` 放行且日志带 `mode: 'shadow'`。
-- **豁免（不进入判定）**：没有 `agent`（宿主无作用域）；子代理（`session.header.origin === 'subagent'`，执行面本来就该写）；工具不在 `writePolicy.tools`（默认 `write`/`edit`）；参数里既无 `file_path` 也无 `path`。
-- **路径口径**：`\` → `/`、去 `./`、折叠 `..`；相对路径相对 `session.cwd ?? session.header.cwd`；绝对路径先转 cwd 相对，cwd 外一律视为不在名单；名单大小写不敏感，带尾 `/` 按前缀匹配，无尾 `/` 按词边界（条目本身或 `条目 + '/'`）——避免 `dispatch-notes.md` 被 `dispatch` 误放行。
-- **拒绝串**（模型在 `Error: ` 之后看到的内容，单条模板）：
-
-```text
-[dispatch-protocol] 拦截：write 要写 src/service.ts，不在主控白名单内（dispatch/、docs/superpowers/specs/）。
-两条出路：①把这项写入派给执行批；②若用户本轮明确要求主控亲自做，先写 dispatch/override.json（如 {"reason":"用户要求直接修这 4 行"}）再重试。
-```
-
-- **override 文件**：`<cwd>/<writePolicy.overridePath>`，默认 `dispatch/override.json`；schema 为 `{"reason":"…","source":"…","createdAt":"…"}`——`reason` 必填且为非空字符串，`source`/`createdAt` 可选、仅供记录。有效性 = JSON 可解析 + `reason` 非空 + **本会话写下**（`mtimeMs >= session.createdAt ?? session.header.createdAt`）。**每会话有效**：新会话不继承，必须重写；取不到会话开始时间时跳过新鲜度判断（fail-open），日志记 `reason: 'override-unbounded'` 以区分。
-- **不适用于子代理**：子代理是执行面，守卫直接放行——派发要的正是它在 `src`/`tests`/`scripts` 里写。
-- **日志**：控制面放行不写行；override 放行、enforce/shadow 下的拒绝都往共用决定日志写一行 `kind: "write-policy"`（守卫没有回合概念，`turn` 恒为 `null`；字段 `tool`/`file`/`mode`/`reason`）。
-
-```json
-{"time":"...","session":"...","turn":null,"kind":"write-policy","decision":"denied","reason":"no-override","tool":"write","file":"src/service.ts","mode":"enforce"}
-```
-
-**已知边界**：
-
-- **`pwsh` 写不拦**：守卫只看 `write`/`edit` 的参数；`pwsh` 里的 `Set-Content`/`Remove-Item`/重定向仍只进回合观测的 `shellWrites`（二期再议）。
-- **只识别 `file_path`/`path`**：两个键都没有时不判定（宁可放行，不猜目录或命令）；工具若改用别的键名，守卫不会拦。
-- **与观测/闸门的口径不同**：观测行按 `writePolicy.tools`/`writePolicy.delegationTools`/`writePolicy.allowlist` 计数；`gates` 的 VerifyGate/ReviewGate 用 `gates.controlPlanePatterns`（默认与 `writePolicy.allowlist` 同值 `['dispatch/','docs/superpowers/specs/']`，0.10.0 C1 起），差异只在取参口径——守卫按 cwd 相对路径的前缀 + 词边界，闸门把同一组 pattern 交给 `classifyPath` 做 cwd 锚定 + 段级前缀判定（0.11.0 起 `src/**/dispatch/**` 不再连带豁免，这类路径按代码处理）。观测行只按路径计数，不做豁免判断。
-- **`dispatch/override.json` 写入不留守卫日志**：它在主控白名单 `dispatch/` 内，写入照常放行且**不写** `write-policy` 行——它是机器可读的**记录**而非审批门（没有「批准/拒绝」动作，守卫只读它的 `reason` 与 mtime）。审计时直接看该文件与各需求自己的 `dispatch/state/<需求>.md` 台账（谁在什么时候豁免了什么；遗留 `dispatch/state.md` 只读），不要指望决定日志里出现 override 的写入行。
-- **fail-open**：守卫内部异常一律按放行处理，宿主稳定性优先于拦截完整性；日志写入失败也不会影响调用。
-
-## 提醒让位（0.3.10 起）
-
-完成检查点与五个状态闸门由同一个 `agent/turn-stopping` 处理器按固定顺序判定：**先 checkpoint，再按 Wait → Verify → Contract → Review → Handoff 顺序判定状态闸门**，不依赖订阅顺序。`steer` 会让本回合再跑一步，所以同一收尾最多投递一条提醒：checkpoint 占用回合后闸门让位，任一闸门投递后也不再投第二条。**0.9.0 起收尾只剩这一条提醒链**——写入越界由工具边界的写入守卫拦截，属于「动作之前」而不是「回合收尾」。
-
-| 优先级 | 提醒 | 触发 | 让位/静默 |
-|---|---|---|---|
-| 1 | 完成检查点 | 子代理 `completed` + 父代理未验收 | 只读子代理；父代理已按汇报动过手 |
-| 2 | WaitGate | 回合内状态查询 ≥ 阈值且无写入/派发/验证 | 本回合已投递 checkpoint；每回合最多一条 |
-| 3 | VerifyGate | present/commit 且有成功写入未验证、验证后又脏 | 纯只读 present（零写入）；上一条闸门已投递；每回合最多一条 |
-| 4 | ContractGate | 有未结束子代理时改写契约文件 | 收尾时无活跃子代理；每回合最多一条 |
-| 5 | ReviewGate | 只读评审完成后父代理又写工作区 | 同一轮评审已提醒（warned）；每个 completed 建立新基线；每回合最多一条 |
-| 6 | HandoffGate | 连续空回合 ≥ `emptyTurns` | 回合有工具调用或非空文本；子代理回合；每回合最多一条 |
-
-- **checkpoint 先占用回合**：本回合投递了 checkpoint，闸门不再评估。
-- **checkpoint 自身被跳过**（只读/已验收）时，闸门仍按自身条件判定；`read-only` 不占用回合，也不写 `lastDeliveredTurn`。
-
-## 决定日志（0.3.10 起）
-
-checkpoint 与写入守卫的每次判定都写一行（守卫的控制面放行除外），checkpoint 的 suppressed 也写——否则日志分不清「没触发」和「触发后被静默」；**状态闸门只记 delivered**（闸门不产生 suppressed 行）。日志键是顶层 `log`（0.9.0 起，取代 `nudge.log`）：默认 `%TEMP%\dispatch-protocol-decisions.jsonl`，`false` 三个机制都不记，字符串则覆盖路径（checkpoint、写入守卫与闸门写同一文件）。
-
-```json
-{"time":"...","session":"...","turn":36,"kind":"checkpoint|gate","decision":"delivered|suppressed","reason":"handled|read-only","childId":"...","label":"...","gate":"wait|verify|contract|review|handoff","observations":6,"changes":2,"lastVerify":"npm test","emptyTurns":1}
-{"time":"...","session":"...","turn":null,"kind":"write-policy","decision":"allowed|denied","reason":"override|override-unbounded|no-override|stale|invalid","tool":"write","file":"src/service.ts","mode":"enforce"}
-```
-
-- 公共字段：`time`、`session`、`turn`、`kind`、`decision`；`reason` 只在 suppressed 时出现（写入守卫行也带 `reason`）。
-- checkpoint 行额外带 `childId`、`label`（每个 pending 子代理一行）；没有回合可用（无 hook 作用域的回退 `followup`）时 `turn` 为 `null`。
-- 闸门行额外带 `gate`（`wait`/`verify`/`contract`/`review`/`handoff`）：wait 行带 `observations`（查询次数）；verify 行带 `changes`（脏改动数）与 `lastVerify`（命令或 `null`）；contract/review 行带 `files`（命中的去重路径）；handoff 行带 `emptyTurns`（连续空回合数）。
-- 写入守卫行：`turn` 恒为 `null`（守卫没有回合概念）；`decision` 为 `allowed`（override 放行）或 `denied`；`reason` 为 `override`/`override-unbounded`/`no-override`/`stale`/`invalid`；`tool`/`file` 是被判定或拦下的具体调用（`file` 为模型原样给出的路径），`mode` 只在拒绝行出现。控制面名单内放行**不写行**。
-
-## 回合观测
-
-根代理回合只要发生了写入或派发（写入次数、shell 变更次数、委派次数任一非零），其中控制面路径（`writePolicy.allowlist`，默认 `dispatch/`、`docs/superpowers/specs/`）的写入不计入，收尾时往 `<cwd>/dispatch/runs/<sessionId>.jsonl` 追加一行，一行一条 JSON：
-
-```json
-{"time":"...","session":"...","turn":36,"writes":3,"files":["a.ts","b.ts"],"shellWrites":1,"failedWrites":0,"delegations":0}
-```
-
-- 一行写明：时间、回合号、文件集、写入次数、shell 变更次数、委派次数。
-- **同一 `(session, turn)` 只保留首行**：`steer` 会让同一回合再跑一步、`agent/turn-stopping` 二次触发，此时丢弃 steer 之后那行快照——首行才是自然的回合末快照。
-- **写调用按结果算**：`write`/`edit` 成功才计数（`tool/result.isError === true` 的失败调用计入 `failedWrites`、不进 `files`；没有对应结果的调用照算，回合被打断时不能把写入抹掉）；`pwsh` 命中 `DEFAULT_PWSH_SHELL_PATTERN` 才算 `shellWrites`，观测档不计 `git commit`。写入守卫只看 `write`/`edit` 的参数路径，不解析 `pwsh`。
-- **观测不是门禁**：不回读、不阻断任何事，写盘失败静默吞掉（目录不可写、磁盘满都不会让回合失败）。
-- **开关**：`observation.enabled: false` 关闭；`observation.dir: false` 一并关闭；字符串则改目录（相对会话 cwd，默认 `dispatch/runs`）。
-
-## 状态闸门（0.6.0/0.7.0）
-
-五个事件闸门，都在 `agent/turn-stopping` 里判定：只对根代理生效、每回合最多一条、判定与投递异常一律吞掉、不阻断任何工具调用。判据只读 `session.snapshotEvents()`，不跑 git、不读磁盘。依据 `session-92f462d1`：同一会话 66 次状态查询轮询（每次查询都付一整步模型步进，子代理状态却没有变），最终 diff 在最后一次集成命令（事件 1112）之后又被写入，主控却已经准备 present/commit 收口；同一会话还在子代理运行期间改过契约文件、在只读评审之后继续改工作区，并出现过无工具调用、无文本的空回合。
-
-| 闸门 | 触发 | 动作 | 决定日志 |
-|---|---|---|---|
-| WaitGate | 本回合 `gates.wait.tools` 调用数 ≥ `threshold`，且没有 write/edit、派发、`present`、`send_message`、`interrupt_agent`、`job_kill`，也没有命中 `gates.verify.commands` 的 `pwsh` 验证 | 一条「结束回合等完成事件」提醒，占位 `{count}` / `{tools}`（去重、最多 4 个） | `kind:"gate", gate:"wait", observations:<查询次数>` |
-| VerifyGate | 本回合出现 `present` 或命中 `commitPattern` 的 `git commit/push`，且（有成功写入但从未成功验证 或 最近一次成功验证之后又脏）；纯文档/控制面改动不触发（`gates.verify.docPatterns`） | 一条「先跑集成命令再收口」提醒，占位 `{files}`（脏路径，最多 3 个，多余追加「等 N 个」）/ `{kind}`（`代码`\|`未知`）/ `{action}`（固定为「先跑一次集成命令并留存退出码，再收口」，不可配置）；0.9.x 的 `{changes}` / `{lastVerify}` 保留兼容，旧自定义文案照旧渲染 | `kind:"gate", gate:"verify", changes:<脏改动数>, lastVerify:<命令或 null>` |
-| ContractGate | 本回合 write/edit 的 `file_path`/`path` 命中 `gates.contract.patterns`，且收尾时仍有未结束子代理 | 一条「派发即冻结：先 interrupt 停批」提醒，占位 `{files}`（最多 3 个） | `kind:"gate", gate:"contract", files:[...]` |
-| ReviewGate | 只读评审子代理 `completed` 之后，父代理又成功 write/edit；文档/控制面改动只提示机器校验（`{action}` 自动换成「机器校验即可，不必重开代码评审」） | 一条「评审已失效：重开受影响切片」提醒，占位 `{files}`（本轮 dirty 的去重路径，最多 3 个）/ `{action}`（固定两句之一：代码改动「重开受影响切片」、文档改动「机器校验即可」，不可配置） | `kind:"gate", gate:"review", files:[...], docOnly:<true\|false>` |
-| HandoffGate | 当前收尾回合为空（无本回合 tool/call、无本回合非空 text），且往前连续空回合数 ≥ `gates.handoff.emptyTurns` | 一条「先写 dispatch/state/<需求>.md 再开新会话」提醒，占位 `{emptyTurns}`（可选） | `kind:"gate", gate:"handoff", emptyTurns:<n>` |
-
-- **验证成功口径**：`pwsh` 命中 `gates.verify.commands`（大小写不敏感子串），有对应 `tool/result`、`isError !== true`、结果文本无 `exit code: N` 或 `N === 0`。失败的验证不算验证——一条红的 `npm test` 不能把闸门永久静音。
-- **纯只读 present 不提醒**：整会话零写入、也从未验证时没有 diff 可验（例如 present 一份报告/计划），VerifyGate 不触发（契约 §11-A）。
-- **脏判定**：最近一次成功验证之后，存在成功的 write/edit，或命中 `DEFAULT_PWSH_SHELL_PATTERN` 的 pwsh（观测档，不计 `git commit`）。没有对应结果的调用按脏处理——宁可多提醒，也不要把被中断的写入抹掉。例外：`pwsh` 里「还原到 HEAD」的命令（`git checkout -- <路径…>`、`git restore <路径…>`，含与只读 git 段组合的复合命令）不算脏改动（C3/C3a）。
-- **控制面路径豁免（0.8.2 起；0.10.0 起与写入守卫同值）**：VerifyGate 的脏判定与 ReviewGate 的写入扫描都跳过 `gates.controlPlanePatterns`（默认 `['dispatch/','docs/superpowers/specs/']`，解析后同时挂到 `gates.verify`/`gates.review`），控制面写入不计入提醒，不会让验证或评审失效、也不会强制冗余复跑。**0.10.0 起该默认集合与写入守卫的 `writePolicy.allowlist` 同值**（0.8.2–0.9.1 只豁免 state/ledger/specs，`dispatch/` 其余子树仍被当脏改动，`dispatch/override.json` 的误报即源于此）。**口径注意**：0.11.0 起闸门也走 `classifyPath`——路径先按会话 cwd 相对化、再按段级前缀判定，因此 `src/**/dispatch/**` 这类同形路径**不再连带豁免**（按代码处理）；`cwd` 缺失时一律按代码兜底（宁可多提醒）。
-- **ContractGate 只看收尾时刻**：`activeChildren` 在 `agent/created` 登记、`subagent/end` 标 `ended`；子代理在写入之后、回合收尾之前结束的，本闸门不会触发（契约 §3 已知边界）。契约文件按路径大小写不敏感子串识别，默认只认 `contract`。**误报**：`src/contracts.ts`、`tmp/contract-notes.md` 在子代理运行时同样命中（`patterns` 是路径子串，不是文件类型），且失败的 write（`isError`）也按 §3 字面视为写入——提醒是建议性的，按需缩小 `patterns`。
-- **ReviewGate 只看「有评审完成 + 之后有写入」**：label 以 `gates.review.labelPrefixes` 开头（默认 `只读评审`/`只读复审`）；任一评审子代理 completed 都建立新基线（`since=max(旧基线,当前父事件长度)`、`warned=false`）；不解析评审报告的 PASS/FAIL——FAIL 后返修同样应重开，方向一致。非评审子代理（勘察/实现）不改变状态（契约 §4 已知边界）。**`warned` 在下一轮评审 `created` 或任一评审 `completed` 时重置；每个基线只提醒一次；同一波次里第二个评审切片完成会重新建立基线。** 同一 childId 的重复 settle 不会重建基线（契约 §12-B）。
-- **HandoffGate 是 best-effort**：若宿主在空流/中断回合根本不再触发 `agent/turn-stopping`，本闸门无法提醒；连续空回合会在下一个空回合再次提醒（弱提醒，不阻断）。**空回合口径**：只认 `type:'text'` 非空文本，仅 reasoning、无 text 的回合也算空回合。
-- **让位顺序**：checkpoint → Wait → Verify → Contract → Review → Handoff。前一环投递后，后面的机制让位；闸门投递后设 `lastDeliveredTurn`；闸门投递仍写回合观测行。**同回合已投递过任何提醒（checkpoint/闸门）→ 后续收尾不再发闸门**（契约 §11-A：一条 steer 之后不叠加第二条）。
-- **配置边界**：派发工具名复用 `writePolicy.delegationTools`（与观测行、WaitGate 共用一份名单）；`{lastVerify}` 为 `null` 时文案渲染「从未验证」。
-- **已知误报与边界**：`present` 只按工具名识别；`pwsh` 里的 `git commit` 即使写在未执行分支也会触发（与观测的过度包含口径一致）；验证命令按子串匹配，`npm test -- --watch=false` 也算 `npm test`。**子串匹配的误报**：`Get-Content tsconfig.json` 会命中 `tsc`、`cat jest.config.js` 会命中 `jest`，非代码会话请按需追加 `gates.verify.commands`。子代理回合不判定。闸门是提醒而非门禁——它不会阻止 `present`/`commit`，只要求模型先补一次集成命令。
-
-## 交接（0.7.0）
-
-HandoffGate 只提醒「这个回合什么都没产出」，它不写文件（闸门不读盘、不写盘）。连续空回合（默认 1 个；模型失稳时常见连续 2 个以上）出现时，正确的动作是先落状态再开新会话，而不是继续 `/compact`：
-
-```markdown
-# dispatch/state/<需求>.md
-
-- run: <目标一句话 + 冻结契约路径>
-- head: <当前分支 / 最近提交>
-- diffHash: <git diff 的 sha256，或 `git status --short` 摘要>
-- batches: <已完成批次 / 在跑批次 / 待派批次>
-- verifies: <集成命令 + 退出码 + 时间；失败的也记>
-- reviews: <评审轮次 + PASS|FAIL + 切片>
-- open: <未决问题 / 阻塞点 / 契约疑点>
-- next: <下一步唯一动作；恢复会话先读这一行>
-```
-
-- **先落状态，再开新会话**：空回合往往意味着上下文已经失真，继续压缩只会把状态越压越少；把上面八项写进自己需求的 `dispatch/state/<需求>.md` 后开新会话接力，恢复成本最低。同一工作区并行多个会话时，只写自己需求那份（见「多会话（0.9.1）」）。
-- **状态文件是记忆，不是证据**：恢复会话时用 `head`/`diffHash` 核对工作区；不一致时以工作区为准，并把 `open` 里的疑点重新问一遍。
-- **best-effort**：若宿主在空流/中断回合根本不再触发 `agent/turn-stopping`，闸门无法提醒——不能把「没收到提醒」当成「没有空回合」。
-
-## 多会话（0.9.1）
-
-一个工作区同时开多个会话是真实用法（用户 2026-11-09 报告：台账混乱、没法维护）。0.9.0 及以前台账是**全项目唯一一份单文件** `dispatch/state.md`，后写会话直接覆盖先写会话的任务清单与冻结契约。0.9.1 起**台账按需求分文件**：
-
-- **路径**：`dispatch/state/<需求>.md` 与 `dispatch/ledger/<需求>.md`，两处用同一个 slug（小写 kebab，如 `dispatch-0.9.1-multi-session`）。规则 1 的注入文本直接点名这两条路径。
-- **开工先列 `dispatch/state/`**：新会话的第一件事是看这个目录里已有哪些需求在进行，而不是直接写文件。
-- **同一需求已有进行中的文件 → 先问用户是否接手**：接手就接着写那一份，不接手就另立需求名。这一步是**约定，不是机制**——守卫认不出「这份文件是谁的需求」。
-- **同需求两个会话并行仍会撞**：不仅台账是同一份文件，白名单也会交叉（同一需求的 `src`/`tests` 切片可能重叠）。机制不兜底，只能靠「先问用户」这条约定。
-- **`dispatch/override.json` 仍是单文件**（已知限制）：它按 mtime 判新鲜度，并行会话里 A 的直改豁免可被 B 复用；需要隔离时手动删除该文件再各自重写。
-- **遗留 `dispatch/state.md` 只读**：它保留为单需求旧台账，新会话不再覆盖。需要接续时把内容抄进自己需求的 `dispatch/state/<需求>.md`，并在头部注明 `resumedFrom: dispatch/state.md`。
-- **观察行不受影响**：`dispatch/runs/<sessionId>.jsonl` 本来就按会话隔离。
-
 ## 配置
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
-| `enabled` | `true` | `false` = 总开关关闭：不注入提示词、不注册写入守卫、不投递任何提醒（0.9.0 起） |
+| `enabled` | `true` | 总开关：`false` 时完全不加载——不注入提示词、不注册写入守卫、不投递任何提醒 |
 | `order` | `500` | 在系统提示词中的排序（必须有限数字） |
 | `rules` | 六条默认 | 非空字符串数组，整体替换默认规则 |
-| `footer` | 白名单与循环批（含循环批格式、风险前置、对称预算） | 追加在规则之后；`''` 关闭该段 |
+| `footer` | 白名单与循环批（见「注入内容」收口段） | 追加在规则之后；`''` 关闭该段 |
 | `checkpoint.enabled` | `true` | 子代理完成后是否给父代理发检查点 |
 | `checkpoint.text` | 内置模板 | 覆盖检查点文案，支持 `{childId}` / `{label}` |
 | `checkpoint.waveText` | 内置模板 | 波次聚合文案，支持 `{count}` / `{labels}` |
 | `observation.enabled` | `true` | 是否写回合观测行（不是门禁） |
 | `observation.dir` | `dispatch/runs` | 观测行目录（相对会话 cwd）；`false` 关闭 |
-| `log` | `%TEMP%\dispatch-protocol-decisions.jsonl` | 共用决定日志（checkpoint / write-policy / gate）；`false` 三个机制都不记 |
+| `log` | `%TEMP%\dispatch-protocol-decisions.jsonl` | checkpoint / 写入守卫 / 闸门共用的决定日志；`false` 三者都不记 |
 | `writePolicy.enabled` | `true` | 是否注册写入守卫（宿主没有 `ctx.tools.guard` 时静默跳过） |
 | `writePolicy.mode` | `enforce` | `enforce` 拦截并返回拒绝串；`shadow` 只记日志、不拦 |
 | `writePolicy.allowlist` | `['dispatch/','docs/superpowers/specs/']` | 主控可直接写的前缀（cwd 相对、大小写不敏感；尾 `/` 前缀匹配，无尾 `/` 词边界）；命中放行且不写日志 |
-| `writePolicy.overridePath` | `dispatch/override.json` | 唯一豁免凭据（cwd 相对）；`{"reason":"…"}` 且本会话写下才有效 |
+| `writePolicy.overridePath` | `dispatch/override.json` | 唯一豁免凭据（cwd 相对）；`reason` 非空且本会话写下才有效 |
 | `writePolicy.tools` | `['write','edit']` | 守卫检查的工具名 |
 | `writePolicy.delegationTools` | `['subagent','subagent_fork','workflow']` | 观测行与 WaitGate 复用的「已派发」工具名 |
 | `gates.enabled` | `true` | 五个事件闸门（Wait/Verify/Contract/Review/Handoff）总开关 |
-| `gates.controlPlanePatterns` | `['dispatch/','docs/superpowers/specs/']`（解析后同时挂到 `gates.verify`/`gates.review`；0.10.0 C1 起与 `writePolicy.allowlist` 同值） | 控制面路径豁免：命中的 write/edit 不计为 VerifyGate 的脏改动或 ReviewGate 的评审失效（经 `classifyPath` 做 cwd 锚定 + 段级前缀，反斜杠归一为正斜杠；0.11.0 起 `src/**/dispatch/**` 不再豁免） |
+| `gates.controlPlanePatterns` | `['dispatch/','docs/superpowers/specs/']` | 控制面豁免：解析后同时挂到 `gates.verify` / `gates.review`，默认与 `writePolicy.allowlist` 同值（两者独立配置，改一个不会同步）；命中的写入不计脏、不使评审失效（`classifyPath` 做 cwd 锚定 + 段级前缀，`src/**/dispatch/**` 按代码处理） |
 | `gates.wait.enabled` | `true` | 是否提醒等待期的只读状态轮询 |
 | `gates.wait.threshold` | `3` | 本回合状态查询次数达到该值、且无写/派发/验证时提醒（正整数） |
 | `gates.wait.tools` | `['list_agents','job_list','schedule_list','get_goal']` | 计入「状态查询」的工具名 |
 | `gates.wait.text` | 内置模板 | 覆盖等待提醒，支持 `{count}` / `{tools}` |
 | `gates.verify.enabled` | `true` | 是否提醒「未验证就收口」 |
 | `gates.verify.commands` | `['npm test','npm run build','dotnet test','jest','tsc','prisma migrate deploy','node test']` | 视为集成验证的命令片段（大小写不敏感子串） |
-| `gates.verify.commitPattern` | 内置正则字符串（完整默认值见 `lib/gates.mjs` 的 `DEFAULT_VERIFY_COMMIT_PATTERN`） | 收口动作里的 commit/push 识别，加载期编译，非法即报错 |
-| `gates.verify.text` | 内置模板（`DEFAULT_VERIFY_TEXT`，见 `lib/gates.mjs`） | 覆盖验证提醒，支持 `{files}`（脏路径，最多 3 个，多余追加「等 N 个」）/ `{kind}`（`代码`\|`未知`）/ `{action}`（固定为「先跑一次集成命令并留存退出码，再收口」，不可配置）；0.9.x 的 `{changes}` / `{lastVerify}` 保留兼容 |
-| `gates.verify.docPatterns` | `['.md','.mdx','docs/','dispatch/','LICENSE','.gitignore','.gitattributes']` | 「文档/控制面改动」的路径判定：扩展名后缀 / 目录段前缀 / 整段相等（大小写不敏感，反斜杠归一）；整批脏改动全命中才不触发 VerifyGate，ReviewGate 的文档判定**复用同一列表**（不是独立配置键） |
+| `gates.verify.commitPattern` | 内置正则字符串（默认值见 `lib/gates.mjs` 的 `DEFAULT_VERIFY_COMMIT_PATTERN`） | 收口动作里的 commit/push 识别，加载期编译，非法即报错 |
+| `gates.verify.text` | 内置模板（`DEFAULT_VERIFY_TEXT`） | 覆盖验证提醒，支持 `{files}` / `{kind}` / `{action}`，兼容旧占位 `{changes}` / `{lastVerify}` |
+| `gates.verify.docPatterns` | `['.md','.mdx','docs/','dispatch/','LICENSE','.gitignore','.gitattributes']` | 「文档/控制面改动」判定（后缀 / 目录段 / 整段相等，大小写不敏感）；整批脏改动全命中才不触发 VerifyGate，ReviewGate 复用同一列表（不是独立配置键） |
 | `gates.contract.enabled` | `true` | 有子代理运行时改写契约文件的提醒 |
 | `gates.contract.patterns` | `['contract']` | 契约文件路径片段（大小写不敏感子串） |
 | `gates.contract.text` | 内置模板 | 覆盖契约冻结提醒，支持 `{files}` |
 | `gates.review.enabled` | `true` | 评审后改动未重开的提醒 |
 | `gates.review.labelPrefixes` | `['只读评审','只读复审']` | 识别只读评审子代理的 label 前缀 |
-| `gates.review.text` | 内置模板 | 覆盖评审失效提醒，支持 `{files}` / `{action}`（固定两句之一：代码改动「重开受影响切片」、文档改动「机器校验即可」，不可配置） |
+| `gates.review.text` | 内置模板 | 覆盖评审失效提醒，支持 `{files}` / `{action}` |
 | `gates.handoff.enabled` | `true` | 空回合兜底提醒 |
 | `gates.handoff.emptyTurns` | `1` | 连续空回合达到该值才提醒（正整数） |
 | `gates.handoff.text` | 内置模板 | 覆盖交接提醒，支持 `{emptyTurns}` |
 
-非法配置（`order` 非有限数字、`rules` 为空/非数组、`footer`/`checkpoint.text` 非字符串、`log` 既非非空路径（字符串或空白串）也非 `false`、`writePolicy.mode` 不是 `enforce`/`shadow`、`writePolicy.allowlist`/`writePolicy.tools`/`writePolicy.delegationTools` 为空数组或含空白串、`writePolicy.overridePath` 为空白串、`nudge` 段出现、`gates.wait.threshold` 非正整数、`gates.wait.tools`/`gates.verify.commands`/`gates.contract.patterns`/`gates.review.labelPrefixes` 为空数组或含非字符串项、`gates.handoff.emptyTurns` 非正整数、`gates.*.text` 为空白串、`gates.verify.commitPattern` 无法编译、`gates.verify.docPatterns` 为空数组或含非字符串项（错误前缀 `dispatch-protocol: gates.verify.docPatterns`）、`gates.contract`/`gates.review`/`gates.handoff` 非对象）在插件加载时直接报错，不会静默降级。
+表内 26 个 `gates.*` / `writePolicy.*` 键就是 `resolveGates({})` / `resolveWritePolicy({})` 的叶子键减去 4 个镜像/编译字段；`enabled`/`order`/`rules`/`footer`/`checkpoint.*`/`observation.*`/`log` 是 `resolveConfig` 的顶层键。
 
-## 文档校验（0.12.0）
+**占位符语义**（`lib/gates.mjs:602-626`）：`{files}` 脏路径（去重，最多 3 个，多余追加「等 N 个」，为空时用「工作区」）；`{kind}` 为 `代码` 或 `未知`（`<shell>` 占位算未知）；`{action}` 是闸门固定给出的一句结论——verify 一句「先跑集成命令」，review 按 `docOnly` 给两句之一（代码：重开切片；文档：跑 docs-check + 交断言表）；`{changes}` 脏改动计数、`{lastVerify}` 最近一次成功验证命令（缺失记为「从未验证」）是兼容占位；模板里未知占位原样保留、不抛错。
+
+非法配置在插件加载时直接报错，不会静默降级：`order` 非有限数字、`rules` 为空/非数组、`footer` 或 `checkpoint.*` 非字符串、`log` 既非非空路径也非 `false`、`observation.dir` 非非空字符串也非 `false`、`nudge` 段出现、`writePolicy.mode` 不是 `enforce`/`shadow`、`writePolicy.allowlist`/`tools`/`delegationTools` 为空数组或含空白串、`writePolicy.overridePath` 空白、`gates.wait.threshold` 与 `gates.handoff.emptyTurns` 非正整数、`gates.*.text` 空白、`gates.verify.commitPattern` 无法编译、各字符串列表为空或含非字符串、`gates.contract`/`review`/`handoff` 非对象。
+
+## 文档校验
 
 `scripts/docs-check.mjs` 是插件自带的确定性检查器：纯 Node、零依赖、只读（只有 `--self-test` 会写 `os.tmpdir()`，结束即删）。
 
-- **调用**：`node plugins/dispatch-protocol/scripts/docs-check.mjs [files...]`（无参时从 cwd 扫「当前事实文档」：`AGENTS.md`、`README.md`、`docs/agent/**/*.md`、`plugins/*/README.md`、`docs/superpowers/specs/**/*.md`；跳过 `docs/reviews/`、`docs/superpowers/plans/`、`node_modules/`、`.git/`、`tmp/`）；`--self-test` 跑内建 fixture 自检；`--root <dir>` 换扫描根。逐条输出 `PASS|FAIL <code> <file>:<line> <detail>`，末行 `docs-check: files=<N> fail=<M>`，`M>0` 时 exit 1。
-- **五个 code**：
-  - `DOC001` 括号平衡：全角/半角括号逐行平衡，跳过围栏内与行内代码。
-  - `DOC002` 围栏：三反引号代码围栏成对闭合（计数为偶数），围栏内的不再重复计数。
-  - `DOC003` 表格列数：同一表格块内每行列数与块首行一致，忽略行内代码里的竖线与转义竖线。
-  - `DOC004` 相对链接：行内 `](path)` 形态的相对目标必须存在；跳过 `http(s)://`、`mailto:` 与 `#` 锚点，先按文档所在目录、再按 root 解析。
-  - `DOC005` 配置表键名：表格行首的 `gates.*` / `writePolicy.*` 必须逐字命中 `lib/config-keys.mjs` 的 `CONFIG_KEYS`（26 个输入键；`gates.verify.commitRegExp`、`gates.verify.controlPlanePatterns`、`gates.review.controlPlanePatterns`、`gates.review.docPatterns` 这 4 个派生/镜像字段不是输入键，写成配置键即 FAIL）。
-- **与断言表的分工**：机器只判语法、链接、表格与键名，判不了「这句话与它引用的那行代码是否一致」。所以文档批必须交「断言 → 代码位置」表：表空（纯措辞/格式/排版）→ docs-check 绿即收口；表非空 → 派 **1 次**有界只读评审（范围仅本批 md 的 diff + 表中代码锚点，输出逐条 `PASS|FAIL` + 未入表断言清单），修完只复跑 docs-check、不再复审；`AGENTS.md` 与 `docs/agent/*` 属注入面，断言表强制非空。
-
-## 从 0.8.x 迁移到 0.9.0
-
-0.9.0 删除漏派发 nudge，改为工具边界写入守卫；配置随之换名。**`nudge` 段一旦出现就在加载期抛错**（消息带迁移指引），不会静默忽略——静默忽略会让人以为提醒还在生效。
-
-| 0.8.x | 0.9.0 |
-|---|---|
-| `nudge.log` | `log`（checkpoint、写入守卫、闸门共用） |
-| `nudge.delegationTools` | `writePolicy.delegationTools`（观测行与 WaitGate 复用） |
-| `nudge.writeTools` | `writePolicy.tools` |
-| `nudge.controlPlanePatterns` | `writePolicy.allowlist`（口径更严：cwd 相对前缀 + 词边界，不再是子串） |
-| `nudge.justifiedPatterns` | 删除；豁免只认 `dispatch/override.json` |
-| `nudge.enabled` / `nudge.threshold` / `nudge.text` | 删除；漏派发提醒整体由写入守卫取代 |
-| —（新增） | `writePolicy.enabled` / `writePolicy.mode` / `writePolicy.overridePath` |
-
-override 文件 schema：`{"reason":"…","source":"…","createdAt":"…"}`——`reason` 必填非空，`source`/`createdAt` 可选、仅供记录。**每会话有效**：`mtimeMs >=` 会话开始时间才认（`session.createdAt ?? session.header.createdAt`）；取不到时间戳时跳过新鲜度判断（fail-open）并记 `reason: override-unbounded`。新会话不继承 override，必须重写。
-
-## 0.10.0 → 0.11.0 迁移
-
-只有两条（0.10.0 从未发布，故不涉及运行期迁移）：
-
-- **`gates.review.textDocOnly` 删除**：该键已删除；写入会被忽略（插件不做未知键校验），请改用 `gates.review.text` 的 `{action}`（闸门按分类填固定句：代码改动提示重开切片、文档改动提示机器校验即可）。
-- **`gates.controlPlanePatterns` 判定改为 cwd 锚定 + 段级前缀**：不再是不区分大小写的子串匹配，`src/**/dispatch/**` 这类路径**不再被豁免**（按代码处理）；会话 `cwd` 缺失时一律按代码兜底。
-
-## 设计取舍
-
-**① 验收为什么分两层**：一条集成命令覆盖全树，它红的时候无法判断是哪个子代理引入的。逐个复跑全量能保住归因，但是 N 倍成本；全批只跑一次能压住成本，但失败后要 bisect。所以拆成「子代理跑窄验证（只覆盖自己那部分）+ 派发方在相关子代理全部结束后跑一次集成命令」：前者负责归因，后者负责集成状态。宽窄混用（子代理跑全量、父代理只跑窄的）会让两边都失真。
-
-**② 为什么要只读评审（0.3.9）**：写实现的人同时写了验收标准时，两者共享同一个理解错误——测试全绿只能证明「实现符合它自己的理解」。2026-10-22 的真机样本构造了这个形状：`tagify` 漏了契约要求的去重，实现者的测试也没有任何重复标签用例，窄验证 4/4 全绿、`EXIT=0`，但契约表格两行不满足（`'a, B ,a,,c'` 得到 `["a","b","a","c"]`）。派出的只读评审从契约表与 diff 做语义核对后判 `FAIL` 并点名 `tagify.mjs:5-8`，还明确指出「实现与测试同一盲点」；补上去重后同一评审复评 `PASS`，且没有因为派发方说「已修复」就放行，另用顺序探针（`'b,a,b, ,B'` → `["b","a"]`）和七种非字符串输入确认去重之外的行为没有回归。两个方向（判 FAIL 与复评 PASS）都验过，所以它不是橡皮图章。（0.3.9 当时评审还允许实跑探针；0.5.1 起执行性验证只归派发方，评审只做 read/grep 语义核对——这个样本的价值在于「实现与测试同一盲点」，不在评审跑了命令。）代价是符合触发条件的批次多一个只读子代理；小型串行批次不触发。
-
-**③ 两个数字各有身份，主控另有单回合预算**：`20 个文件 / 3 个契约面` 是**评审容量**——一个读者一次能核完的 diff 有多大，属物理约束；`15 分钟 / 30 次编辑` 是**单批预算**——一批跑多久就该回头看一眼，超过就该切片而不是硬撑。0.8.0 起不再有「>2 个文件 / ≥3 处改写」的分流标定值：0.8.1 起的轻批按「单文件 ≤20 行或同模式机械改写 ≤5 文件且 ≤8 分钟」判定，分流按产出物归属，不按文件数；主控单回合另受 15 分钟 / 20 步约束。数字都不是白名单上限：白名单的边界仍是「全批结束后一条集成命令能验完」，仍逐条列名、不设数量封顶；任务清单的边界仍是「每条一个决策或一批」，同样不封顶。
-
-**④ 为什么全仓核查必须单列**：只审 diff 必然漏掉跨切面的遗漏点，因为漏掉的东西不在 diff 里。KOL 会话 `session-37256e00` 的评审没有停在 diff 上，而是按给定检索词全仓 grep，抓到 3 处用户可见漏点：`ApplyForm.tsx:16` 的预填、`ApplicationsPanel.tsx:282`、admin 的 `ApplicationsPage.tsx:139`——三处全部在本批白名单之外。若按「只审变更集」收口，这三处会随 `PASS` 一起漏出去；所以单列一栏、给检索空间、把用户可见遗漏直接判 FAIL，而其余部分仍不重开仓库通读。
-
-**⑤ 为什么并行条要写触发条件、0.3.7 起又允许并行写（现第 6 条）**：旧措辞只有「可以并行」这个许可，没有触发条件。实测几天里并行的分支一次都没走到——本机留存的会话日志中 4 次派发全在同一个父会话（`session-4d76d479`），按 `createdAt` + 运行时长还原出四个完全不相交的区间，`workflow` 一次未调用。0.3.5 补上触发句，0.3.6 在真机上验到只读并行（同批 1ms 启动、重叠 16.7s）。但「同工作区写操作串行」这句太粗：互不相交的文件并行写并不冲突，真正会坏的只有三类面——**同文件/同模块的写**、**共享构建产物**（`dist`、缓存目录、同一端口）、**契约面**（schema、类型、路由、barrel、lockfile）。0.3.7 把门槛改成「白名单互斥 + 契约派发前冻结 + 禁止并发跑共享产物的全量构建」，大改动需要各自完整构建时仍拆独立 worktree。
-
-**⑥ 为什么等待要走完成事件**：`session-1433e747` 里派发方 31 次 `Start-Sleep` 合计 54.1 分钟，而会话总共 106 分钟——sleep 轮询是**用完整模型步进换零信息**：每次醒来都付一次模型步进，子代理的状态却没有变。完成事件由宿主推送，等到就有；「一批最多一次主动检查（预算过半时）」是为了让跑偏早暴露，不是为了盯进度。
-
-**⑦ 为什么不复跑子代理的窄验证命令（0.5.2）**：实测一个评审任务里评审子代理花了大量时间评审、主控又把验收重复做了一遍——同一执行性信号付了两到三次钱。复跑防的从来不是主要风险：设计取舍②的 `tagify` 样本里，「实现与测试同一盲点」是语义评审抓的，命令复跑两边都绿、毫无作用；复跑实际只防「声称跑过但没跑 / 谎报退出码」这一类窄风险。所以执行性验证只付一次：窄验证留给子代理（负责归因），派发方的执行性预算集中在批末集成命令（负责集成状态），主控读 diff 时核对其退出码报告与 diff 的一致性。**边界（0.5.4 起写进规则 3 文本）**：集成命令必须覆盖各批窄验证断言点的并集——白名单本就以「一条集成命令能验完全批」为界，此条把它显式化为验收前提；某批窄验证断言了集成命令覆盖不到的行为时，该批窄命令由派发方再跑，这是唯一的复跑例外。完整裁决见 `docs/superpowers/specs/2026-10-28-dispatch-0.5x-followup.md` §2。
-
-## 变更历史
-
-| 版本 | 要点 | 依据 |
-|---|---|---|
-| 0.3.6 | 正文已解释就不发 nudge，只记 `"decision":"suppressed","reason":"justified"`。静默判定只看本回合 `assistant/message`。 | 真机 `session-a2e9f600` turn 3：主控已写清豁免理由，提醒仍发，用户只收到重复消息。 |
-| 0.3.10 | checkpoint 与 nudge 收进同一个 `agent/turn-stopping` 处理器，固定「先 checkpoint 后 nudge」，不依赖订阅顺序；每次判定写决定日志（含被抑制的）。 | 两个提醒原按订阅顺序各自判定、同一回合可能都发；且没有日志时分不清「没触发」与「触发后被静默」。 |
-| 0.4.0 | `pwsh` 变更计入判定、checkpoint 按波次聚合、被打断回合补评估、回合观测行；新增判级与评审闭环规则（合并判级、评审后改动重评、任务清单须含拆批方案或不派发理由）。 | 三样本评审 `docs/reviews/2026-10-23-dispatch-pipeline-review.md`：G2 切分绕过、G4 评审后改动不重评、N1 派发按任务类型触发；W-5 用 `Remove-Item` 删死代码被判只读。 |
-| 0.4.1 | nudge 档不计 `git commit`（提交权归派发方）、文案口径把文件与 shell 变更分开、观测行按 `(session, turn)` 去重、`git -C <path>` 计入与 `=>`/`->` 泛型误报修复、只读 label 约定、`scripts/verify-install.mjs` 安装核验。 | 三样本复核 §10.3（I3/I4/I5 + 只读 label 约定）；四例纯 `git commit` 回合被计入（样本四 T3、S5 t34、S6 t13、S7 t2）。 |
-| 0.5.0 | 执行性验证只归派发方（同一条命令全系统只复跑一次）、微批分流表进 footer、判级从一维风险扩为风险 × 规模、勘察触发条件显式化。 | 两日全量实测 `docs/superpowers/specs/2026-10-27-dispatch-cost-redesign.md`（10-26 `session-8634bdc8` 主 + 10 子；10-27 全天 8 主 + 20 子）。 |
-| 0.5.1 | 评审对象收窄为变更集：输入四项、白名单并集 diff、不逐文件通读；「全仓不变量核查」单列为有条件的一栏；评审包 20 个文件 / 3 个契约面切片上限；六条规则按职责重排，评审从判级条拆出独立一条。 | 评审实测成本倒挂（评审重跑主控已复跑过的构建/测试，`pwsh×24~33`，成本多次超过被评审的实现批次之和）；KOL 会话 `session-37256e00` 证明只审 diff 会漏白名单外的 3 处用户可见点。 |
-| 0.5.2 | 单批预算（过半报进度、超预算报阻塞点再停）、派发即冻结（契约窗口）、等待改走完成事件（禁止 sleep 轮询）、超预算按场景切片。 | `session-1433e747`：30.8 分钟子代理 / 192 步，派发方 31 次 `Start-Sleep` 合计 54.1 分钟；运行中改契约导致返工。 |
-| 0.5.3 | locales 与注释口径收口：验收描述改为「派发方跑集成命令」，plugin.mjs 注释去掉 re-run 说法，checkpoint 测试补 `doesNotMatch(/复跑/)` 防回流。 | 0.5.2 复审的三条非阻断建议（`plugin.mjs:219` 注释、checkpoint 负向断言、locale 描述）。 |
-| 0.5.4 | 规则 3 补「集成命令必须覆盖各批窄验证断言点的并集」前提与唯一复跑例外——把设计取舍⑦的边界从文档层写进注入文本。 | `docs/superpowers/specs/2026-10-28-dispatch-0.5x-followup.md` §2 裁决：移除复跑以该覆盖前提成立为边界，此前边界只在文档里、模型看不到。 |
-| 0.6.0 | WaitGate / VerifyGate 两个事件闸门：等待期只读轮询、以及收口前的「未验证/验证后又改」各提醒一次；接线顺序 checkpoint → 闸门 → nudge，每回合最多一条；`gates` 加载期校验；决定日志新增 `kind:"gate"`。 | `session-92f462d1`：同一会话 66 次状态查询轮询；最终 diff 在最后一次集成命令（事件 1112）之后又被改，却准备 present 收口。 |
-| 0.7.0 | 新增 ContractGate（有子代理在跑时改写契约文件）、ReviewGate（只读评审完成后又改工作区，同一轮只提醒一次）、HandoffGate（连续空回合兜底）；闸门顺序扩为 Wait → Verify → Contract → Review → Handoff；`subagent/end` 先更新闸门状态再走 checkpoint 早退；README 新增「交接」状态文件模板。 | `session-92f462d1`：子代理运行期间在线改写契约、只读评审后改动未重开切片、以及无工具调用无文本的空回合中断。 |
-| 0.8.0 | 注入文本改按产出物归属判定：规则 1 改为「主控只做控制面，不做执行面」（七类动作、执行面一律派发、用户显式 override、先勘察后派发）；footer 改为「白名单与循环批」（循环批六要素、`NEEDS_DECISION` 分叉、实测契约表、风险前置、对称预算）；nudge 文案改为「不在主控白名单内」；移除单文件/纯文案豁免与微批分流表。 | `session-e691e70b`：主控 172 次写盘、T+ 排错 84 分钟/173 步/23.9M cache 读；改为产出物归属判定 + 循环批 + 风险前置 + 对称预算。 |
-| 0.8.1 | 交付通道分档：控制面 / 轻批 / 全批；有界直改（单文件 ≤10 行、同批 ≤20 行、记账、重开评审切片）；规则 6 的微批改为轻批。 | 用户实测反馈：0.8.0 文本批约 30 分钟，直接改约 10–15 分钟；固定成本 8–20 分钟/批，小任务被仪式拖慢。 |
-| 0.8.2 | 控制面路径豁免：nudge 计数器与 VerifyGate/ReviewGate 不再把 dispatch/state.md、dispatch/ledger/*、docs/superpowers/specs/* 的写入计为违规/脏改动（新增 nudge.controlPlanePatterns、gates.controlPlanePatterns 配置）；规则 4 明确 gated 需求内的轻批仍免独立评审；规则 6 判级载体放宽为任务清单或台账首行。 | 0.8.1 实测（dispatch/ledger/2026-10-30-dispatch-0.8.1-verification.md）：3 会话 9+ 次控制面误报；cea2278e 轻批 0 使用；6/6 会话判级未进任务清单。 |
-| 0.9.0 | 删除漏派发 nudge（评估/投递/延迟评估全删），改为工具边界写入守卫：`ctx.tools.guard` 拦截根代理名单外的 `write`/`edit`，`dispatch/override.json` 成为唯一豁免凭据（每会话有效）；配置 `nudge.*` → `log` + `writePolicy.*`，`nudge` 段出现即加载期报错；`lib/nudge.mjs` 更名 `lib/tool-calls.mjs` 并裁剪；规则 1 改为先写 override 再动手；顶层 `enabled` 改为总开关（此前只关提示词、守卫仍拦）。 | 2026-11-04 决策日志：nudge 投递 2 次全部误报（一次是用户显式授权、一次是控制面文件不在豁免），历史 45 次去重投递 45/45 在最终答复之后、0 次促成派发，合计 9.45M cache-read。 |
-| 0.9.1 | 台账按需求分文件：规则 1 的路径文案改为 `dispatch/state/<需求>.md` + `dispatch/ledger/<需求>.md`，段末追加「同一工作区可能并行多个会话」一段（只写自己需求那份、开工先看 `dispatch/state/`、同需求已在进行中先问用户、遗留 `dispatch/state.md` 只读）；`DEFAULT_CONTROL_PLANE_PATTERNS` 增加 `dispatch/state/`（带尾斜杠，不误豁免 `src/**/dispatch/state.ts`）；HandoffGate 文案与 README 交接模板改新路径；README 新增「多会话（0.9.1）」小节（含「同需求两会话白名单也交叉」「`dispatch/override.json` 仍单文件」两条已知限制）。 | 用户 2026-11-09 报告：同一工作区并行多个会话时，单文件 `dispatch/state.md` 被后写会话覆盖，台账混乱、没法维护。 |
-| 0.10.0 | 守卫按改动类型分级：文档豁免（`gates.verify.docPatterns`——整批脏改动全是文档/控制面时 VerifyGate 不提醒）、还原豁免（`git checkout --`/`git restore` 段不算脏）、切片归属（`gates.review.textDocOnly`——评审后只有文档/控制面改动时不重开代码评审）；闸门文案点名 `{files}`/`{kind}`；纪律正文补 T1–T8（勘察批只读、文档直改只记台账 + 机器校验、克隆澄清 2 问、机械改写一次多 hunk、窄验证只看本模块、集成结果按覆盖文件集记账、文档切片免独立评审、依赖同一新契约文件的批次串行）。**该版本从未发布**：`gates.review.textDocOnly` 在 0.11.0 已删除，自定义文案改用 `{action}`。 | `docs/superpowers/specs/2026-11-12-dispatch-guard-risk-grading.md`（§2 C1–C5、§3 T1–T8）；真实误报：全 `dispatch/` 写入仍触发 VerifyGate、`git checkout --` 还原被算成脏改动。 |
-| 0.11.0 | 分类器收敛：唯一 `classifyPath`（扩展优先 + 段级折叠）+ `cwd` 锚定，替代子串口径的 `isControlPlanePath`（A1 假阴性修复：`src/app/dispatch/x.ts` 不再被当成控制面）；`dispatch/../src/x.ts` 路径穿越按代码处理；闸门改只消费分类结果。文案收敛为单一模型：`{action}` 由闸门给出（verify / review 代码 / review 文档三句固定文案，不可配置），删除 `gates.review.textDocOnly`。纪律正文按「每条规则只有一个家」去重：删 T8（集成结果按覆盖文件集记账——代码里没有该机制）、规则 6 合并 T7、footer 只留指向（有界直改/轻批判据/拆批三处复述删除）。 | `docs/superpowers/specs/2026-11-12-dispatch-guard-artifact-class.md` §1 D1–D5；`src/app/dispatch/x.ts` 假阴性、`dispatch/../src/x.ts` 穿越、`textDocOnly` 与 `{action}` 双份文案。 |
-
-| 0.12.0 | 文档按「断言类型」分通道：新增确定性检查器 `scripts/docs-check.mjs`（DOC001 括号 / DOC002 围栏 / DOC003 表格列数 / DOC004 相对链接 / DOC005 配置表键名，含 `--self-test`）与 `lib/config-keys.mjs`（26 个输入键，4 个镜像字段显式排除）；规则 1/4 把「机器校验」实体化——文档批改交「断言 → 代码位置」表，表空即收口，表非空派 1 次有界评审（取代原「必要时派最小只读评审」）；修复本文件 165/243 两处表格渲染缺陷。**无配置变更，无需迁移**。 | `docs/superpowers/specs/2026-11-12-doc-verification-by-assertion.md` §1 D1–D5、§2–§3。 |
+- **调用**：`node plugins/dispatch-protocol/scripts/docs-check.mjs [files...]`；无参时从 cwd 扫「当前事实文档」——`AGENTS.md`、`README.md`、`docs/agent/**/*.md`、`plugins/*/README.md`、`docs/superpowers/specs/**/*.md`，跳过 `docs/reviews/`、`docs/superpowers/plans/`、`node_modules/`、`.git/`、`tmp/`；`--self-test` 跑内建 fixture 自检；`--root <dir>` 换扫描根。逐条输出 `PASS|FAIL <code> <file>:<line> <detail>`，末行 `docs-check: files=<N> fail=<M>`，`M>0` 时 exit 1。
+- **DOC001** 括号平衡：全角/半角括号逐行平衡，跳过围栏内与行内代码。
+- **DOC002** 围栏：三反引号代码围栏成对闭合（计数为偶数）。
+- **DOC003** 表格列数：同一表格块内每行列数与块首行一致，忽略行内代码里的竖线与转义竖线。
+- **DOC004** 相对链接：行内 `](path)` 形态的相对目标必须存在；跳过 `http(s)://`、`mailto:` 与 `#` 锚点，先按文档所在目录、再按 root 解析。
+- **DOC005** 配置表键名：表格行首的 `gates.*` / `writePolicy.*` 必须逐字命中输入键集合；集合由本脚本运行时从 `resolveGates({})` / `resolveWritePolicy({})` 的叶子键推导，再减去 4 个镜像/编译字段（`gates.verify.commitRegExp`、`gates.verify.controlPlanePatterns`、`gates.review.controlPlanePatterns`、`gates.review.docPatterns`）→ 26 个输入键（`scripts/docs-check.mjs:50-75`）。
+- **与断言表的分工**：机器只判语法、链接、表格与键名，判不了「这句话与它引用的那行代码是否一致」。所以文档批必须交「断言 → 代码位置」表：表空（纯措辞/格式/排版）→ docs-check 绿即收口；表非空 → 派 1 次有界只读评审（范围仅本批 md 的 diff + 表中代码锚点，输出逐条 `PASS|FAIL` + 未入表断言清单），修完只复跑 docs-check、不再复审；`AGENTS.md` 与 `docs/agent/*` 属注入面，断言表强制非空。
 
 ## 验证
 
-离线回归：
+| 命令 | 期望 |
+|---|---|
+| `node plugins/dispatch-protocol/test.mjs` | 123 pass（`pass=123 fail=0`），exit 0 |
+| `node plugins/dispatch-protocol/scripts/docs-check.mjs` | 无参扫仓库根，`docs-check: files=<N> fail=0`，exit 0 |
+| `node plugins/dispatch-protocol/scripts/docs-check.mjs --self-test` | `self-test: pass=<N> fail=0`，exit 0 |
 
-```powershell
-node test.mjs
-```
+前两条是离线回归，第三条只验检查器自身（fixture 全建在 `os.tmpdir()`，不写仓库）。真机口径另走临时 profile：`dsh plugin --profile probe add "link:<仓库根>/plugins/dispatch-protocol"` 后 headless 问系统提示词「派发纪律」里的六条，模型应逐条复述。
 
-真机验证（临时 profile，不动桌面 profile）：
+## 设计取舍
 
-```powershell
-dsh plugin --profile probe add "link:<仓库根>/plugins/dispatch-protocol"
-dsh --profile probe headless "不要调用任何工具，只回答：你的系统提示词里「派发纪律」一节列了哪几条？逐条列出标题。"
-```
+- **① 为什么是插件而不是 `AGENTS.md` 文件**：六条规则要每次请求都在场；`AGENTS.md` 得模型主动读、每个任务仓库还得各复制一份，读不读没有保证。插件把正文挂进系统提示词 section（`lib/config.mjs:167-174`），与加载了哪些 skill 无关；代价是改正文会影响 KV 缓存前缀（见「已知坑」）。
+- **② 为什么闸门只提醒不阻断（fail-open）**：闸门读的是回合日志、不是权威状态，误判一次阻断就会把用户卡死；所以判定与投递异常一律吞掉、每回合最多一条、固定让位顺序（`plugin.mjs:463-522`、`lib/gates.mjs:12-14`）。代价是宿主在空流/中断回合不触发 `agent/turn-stopping` 时提醒不到。
+- **③ 为什么 `dispatch/override.json` 是唯一凭据**：散文里的「豁免」「直接做」不可审计、也判不出新旧；文件有 schema、mtime、会话起点三个可判字段，新会话必须重写（`lib/write-policy.mjs:153-188`）。
+- **④ 为什么文档分三层**：docs-check 判确定性失败（括号、围栏、表格、链接、键名），断言表判语义失败（这句话还有没有代码出处——机器判不了），有界评审只核表与 diff 锚点。三层各管一类失败，机器能判的不付评审钱；表空时 docs-check 绿即可收口。
+- **⑤ 预算经验一：派发后不守着**：等待期主控的动作只有「结束回合等完成事件」；`Start-Sleep` / `list_agents` 轮询用完整模型步进换零信息（实测 31 次 sleep 合计 54.1 分钟，子代理状态并没有变）。预算过半时的一次主动检查是唯一例外。
+- **⑥ 预算经验二：预算对称、触顶即停**：子代理单批 15 分钟 / 30 次编辑，主控单回合 15 分钟 / 20 步；过半报一句进度，超预算先报阻塞点再停，不得自行续期——续期由派发方给，量不够按场景切片。
 
-预期：模型复述出「主控只做控制面，不做执行面」「执行类派发必须自包含」「验收与等待」「评审只审变更集，不审仓库」「提交权归派发方」「并行只读，互斥并行写」六条。
+## 版本历史
 
-写入守卫的真机口径（需重装 profile 插件并重启 DSH）：主控会话里直接 `write` 一个 `src/` 下的文件，应看到工具错误以 `[dispatch-protocol] 拦截：` 开头、回合继续；`%TEMP%\dispatch-protocol-decisions.jsonl` 出现一行 `kind:'write-policy'` 的拒绝记录（`reason` 为 `no-override`，`mode` 为 `enforce`，`turn:null`）。写 `dispatch/state/<需求>.md` 这类控制面文件不产生该行；`shadow` 模式下同样的写入放行、日志带 `mode:'shadow'`。
+| 版本 | 要点 |
+|---|---|
+| `0.9.0` | 删除漏派发 nudge，改为工具边界写入守卫：`ctx.tools.guard` 拦截根代理名单外的 `write`/`edit`，`dispatch/override.json` 成为唯一豁免凭据（每会话有效）；配置 `nudge.*` → `log` + `writePolicy.*`，`nudge` 段出现即加载期报错；顶层 `enabled` 改为总开关。 |
+| `0.9.1` | 台账按需求分文件：`dispatch/state/<需求>.md` + `dispatch/ledger/<需求>.md`；`DEFAULT_CONTROL_PLANE_PATTERNS` 增加 `dispatch/state/`；HandoffGate 文案与「交接」模板改新路径；新增「多会话」。 |
+| `0.12.0` | 文档收口：新增 `scripts/docs-check.mjs`（DOC001–DOC005 + `--self-test`）；配置键集合改为运行时从解析器推导（26 个输入键，4 个镜像/编译字段排除）；`gates.review.textDocOnly` 删除、闸门收成一句 `{action}`；控制面判定改为 `classifyPath`（cwd 锚定 + 段级前缀，`src/**/dispatch/**` 不再豁免）；规则 1/4 改为「断言表 + 有界评审」。中间版本 0.10.0（文档/还原豁免、`{files}`/`{kind}` 点名）与 0.11.0（分类器收敛、文案收敛）的内容一并并入本版。 |
 
-**0.3.6 真机证据（只读并行，2026-10-22，desktop 0.3.6）**：
+0.10.0–0.11.0 为未发布的中间提交，内容并入 0.12.0。
 
-- 只读并行：同一条消息发出两个只读子代理，`childCreatedAt` 相差 1 ms、运行区间重叠 16.7 s（19.1 s 与 16.8 s 两个区间），两个都没有触发完成检查点。并行由模型在同一 assistant 消息里发两个 `subagent` 调用驱动，宿主不自动派生。
+迁移要点：
+
+- `gates.review.textDocOnly` 已删除（写入会被忽略，插件不做未知键校验），改用 `gates.review.text` 的 `{action}`。
+- `gates.controlPlanePatterns` 改为 cwd 锚定 + 段级前缀，`src/**/dispatch/**` 不再豁免（按代码处理）。
+- 规则 1/4 改为「断言表 + 有界评审 / 一个变更集一个包」——文档批不再靠「必要时派最小只读评审」。
 
 ## 已知坑
 
-- **系统提示词改动会影响 KV 缓存前缀**：`order` 与文本变化会让后续请求失去前缀复用；规则固定后不要频繁改。
+- **系统提示词改动会影响 KV 缓存前缀**：`order` 与正文变化会让后续请求失去前缀复用；规则固定后不要频繁改。
 - **section 名重复会报错**：同一 profile 只能挂一个 `dispatch-protocol`；改配置用同 id 覆盖，不要重复插入。
-- **规则是建议，守卫只覆盖一个面**：六条规则仍可能被无视；目前唯一的硬拦截是写入守卫（根代理 `write`/`edit` 的越界写入，见「写入守卫（0.9.0）」），`pwsh` 写、`git` 操作与其它工具都不拦。
-- **守卫零模型步进**：拒绝发生在工具边界，模型看到 `Error: ...` 后在同一回合改走派发或写 override；被拦下的调用本身不计写入（观测行按 `tool/result.isError` 排除）。
-- **override 是文件不是散文**：只能通过 `dispatch/override.json` 放行，正文里写「豁免」「直接做」彻底无效；每会话有效，新会话必须重写。取不到会话开始时间时会 fail-open（日志 `override-unbounded`），此时旧 override 也会生效。
-- **检查点只在未验收时花一步**：0.3.4 起 settle 只登记，回合收尾判定已验收就零消息、零额外步骤（比 0.3.2/0.3.3 的 settle 即发更省）；未验收才 `steer` 一条，花一步，与状态闸门同价。父代理没有 hook 作用域时仍回退为 settle 时 `followup`，行为同 0.3.3。
-- **观测计数与守卫是两套口径**：观测行按去重路径计（同一文件多次编辑算 1 个）；`write`/`edit` 以 `tool/result.isError` 为准，失败的不计（无结果可查时照算）；`pwsh` 命中变更正则才算 `shellWrites`，`dotnet format` 等间接副作用不计。守卫只看 `write`/`edit` 的参数路径，不解析 `pwsh`。
-- **检查点的只读判定按调用名、尝试即算**：`write`/`edit` 只要出现在子代理的 `tool/call` 里就算执行类，**不解析 `tool/result`**——失败或被拒绝的写入也不豁免检查点。这与观测行「成功才计数」的口径不同，是有意的保守方向：宁可多提醒一次，也不要漏掉真正的执行类子代理。
-- **记账在 TEMP 里**：`log` 默认落在系统临时目录（`dispatch-protocol-decisions.jsonl`，checkpoint、写入守卫与状态闸门共用），不随仓库版本化；要长期留档就把路径指到固定位置（或 `false` 全关）。
-- **profile 插件不支持热加载**：装完必须重启 DSH，新会话才生效。
-- **update 失败会留下半残目录，且可能卡成 delete-pending**：`dsh plugin --profile desktop update` 先把 `node_modules/<pkg>` 整块 rename 掉；任一步失败就可能只剩一半文件，而失败时被打开的子目录（实测是 `lib/`）会进入 delete-pending —— 之后**连改父目录、删除、读 ACL 都 Access denied**，`diagnose-windows-sandbox-acl` 报 `VERDICT=UNREADABLE`、Restart Manager 返回 `ACCESS_DENIED`，只有**重启 Windows** 能清。2026-10-22 踩过一次。
-  - 预防：**完全退出 DSH → update → 启动**；确认没有遗留的 `robocopy`/`pnpm` 子进程再跑（那次真正的持有者是一条被我挂住的 robocopy）。
-  - 恢复：重启后 `lib/` 自动消失，重跑同一条 update 即可归位；验收标志是 `lib/config.mjs` 存在且没有手工补丁目录。
+- **守卫只覆盖一个面**：唯一的硬拦截是根代理 `write`/`edit` 的参数路径越界（见「机制 › 写入守卫」）；`pwsh` 里的 `Set-Content`/`Remove-Item`、`git` 操作与其它工具都不拦，只在观测与闸门口径里计为写入。
+- **只识别 `file_path` / `path`**：参数里两个都没有时守卫直接放行，闸门与观测则按「未知路径」计脏，不会当成文档。
+- **fail-open**：守卫内部异常按放行处理、日志写失败不影响调用；闸门的判定与投递异常同样吞掉——所以「没提醒」不等于「没问题」，补救只能看决定日志。
+- **override 是文件不是散文**：正文里写「豁免」「直接做」彻底无效；每会话有效、新会话必须重写；它仍是单文件，并行会话可互相复用；取不到会话开始时间时跳过新鲜度判断（日志 `override-unbounded`）。
+- **记账在 TEMP 里**：`log` 默认落系统临时目录（`dispatch-protocol-decisions.jsonl`），不随仓库版本化；要长期留档就把路径指到固定位置，或写 `false` 全关。
+- **观测计数与守卫是两套口径**：观测行按去重路径计、失败写入不计；检查点的只读判定按调用名、尝试即算（失败或被拒也算执行类）；守卫只看参数路径，不解析 `pwsh`。
+- **HandoffGate 是 best-effort**：空回合依赖宿主触发 `agent/turn-stopping`，空流/中断回合可能不触发，提醒不到时按「交接」模板手工落盘。
+- **profile 插件不支持热加载**：装完必须重启 DSH；`dsh plugin update` 失败可能留下半残目录（被打开的子目录进入 delete-pending），只能重启 Windows 清——先完全退出 DSH 再 update。

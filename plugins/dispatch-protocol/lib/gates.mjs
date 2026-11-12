@@ -601,7 +601,7 @@ export function renderWaitGate(template, info) {
  */
 const VERIFY_ACTION = '先跑一次集成命令并留存退出码，再收口。'
 const REVIEW_ACTION = '评审已失效：重开受影响切片再收口。'
-const REVIEW_DOC_ACTION = '这类改动不使代码切片失效：机器校验（路径/链接/括号/术语）即可，不必重开代码评审；若改的正是刚评审的那份文档，最小复核该文档即可。'
+const REVIEW_DOC_ACTION = '这类改动不使代码切片失效：跑 docs-check，并按规则 1/4 交「断言 → 代码位置」表（表非空再由派发方派 1 次有界评审）即可，不必重开代码评审。'
 
 /**
  * 统一渲染闸门文案（0.11.0 D4）：一个模板 + 一个 `{action}`。
@@ -797,7 +797,8 @@ export function evaluateReviewGate(events, gates, state, cwd) {
  * 渲染 ReviewGate 文案（`{files}` 最多 3 个，多余追加「等 N 个」）。
  *
  * 0.11.0 D4：按 `info.docOnly` 自行选 `{action}`——文档/控制面改动不使代码
- * 切片失效，给出「机器校验 + 最小复核」；混入代码时给出「重开受影响切片」。
+ * 切片失效，给出「docs-check + 断言表 + 有界评审」；混入代码时给出「重开受
+ * 影响切片」。
  * 调用方只传一个模板，不再自己挑文案键。
  * @param template - `gates.review.text`。
  * @param info - `evaluateReviewGate` 的返回值（`{ files, docOnly }`）。

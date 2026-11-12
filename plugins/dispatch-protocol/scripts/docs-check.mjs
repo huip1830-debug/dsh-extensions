@@ -15,9 +15,11 @@
  * 输出逐条 `PASS|FAIL <code> <file>:<line> <detail>`，末行
  * `docs-check: files=<N> fail=<M>`；M>0 → exit 1。
  *
- * DOC005 的「键名是真实配置键」只查 `lib/config-keys.mjs` 的 `CONFIG_KEYS`
- * 显式清单（逐字命中）。0.12.0 前的「末段属性名兜底」已删除——兜底会让
- * `gates.review.textDocOnly` 这类已删除的键靠注释/错误串里的属性名蒙混过关。
+ * DOC005 的「键名是真实配置键」在运行时推导：对 `resolveGates({})` /
+ * `resolveWritePolicy({})` 的解析结果递归取叶子键（普通对象递归，数组/RegExp
+ * 视为叶子），减去 4 个派生/镜像字段，逐字命中才算输入键。0.12.0 前的「末段
+ * 属性名兜底」已删除——兜底会让 `gates.review.textDocOnly` 这类已删除的键靠
+ * 注释/错误串里的属性名蒙混过关。
  *
  * 只读：仅 --self-test 会写 os.tmpdir()，结束即删除；绝不写被检查文件。
  */
@@ -28,10 +30,48 @@ import { tmpdir } from 'node:os'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
-import { CONFIG_KEYS } from '../lib/config-keys.mjs'
+import { resolveGates } from '../lib/gates.mjs'
+import { resolveWritePolicy } from '../lib/write-policy.mjs'
 
 const SKIP_DIRS = new Set(['node_modules', '.git', 'tmp'])
 const CODES = ['DOC001', 'DOC002', 'DOC003', 'DOC004', 'DOC005']
+
+/**
+ * 解析结果里的派生/镜像字段：出现在返回值里，但**不是**用户能写进 profile
+ * patch 的输入键；文档把它们写成配置键时 DOC005 必须 FAIL。
+ *
+ * 常量内联在本脚本而不是从插件导入：它只服务文档检查对「输入面」的判定，
+ * 且与 `resolveGates` 的返回结构强绑定——字段改名时 self-test 的漂移断言会红。
+ * 理由逐条：
+ *   - `commitRegExp` 是 `commitPattern` 的编译产物（RegExp）；
+ *   - 两个 `controlPlanePatterns` 是顶层 `gates.controlPlanePatterns` 的镜像；
+ *   - `review.docPatterns` 是 `verify.docPatterns` 的镜像副本。
+ */
+const MIRRORED = [
+  'gates.verify.commitRegExp',
+  'gates.verify.controlPlanePatterns',
+  'gates.review.controlPlanePatterns',
+  'gates.review.docPatterns',
+]
+
+/** 递归取叶子键：普通对象递归，数组/RegExp 等非普通对象视为叶子。 */
+function leafKeys(value, prefix) {
+  const plain = typeof value === 'object' && value !== null && !Array.isArray(value)
+    && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
+  if (!plain) return [prefix]
+  return Object.entries(value).flatMap(([key, child]) => leafKeys(child, `${prefix}.${key}`))
+}
+
+/**
+ * 输入键的**唯一真源**是解析器本身：两份解析结果取叶子键，前缀 `gates.` /
+ * `writePolicy.`，再减去 MIRRORED。不再维护手写清单——手写清单的正确性只能
+ * 靠「与推导比对」的测试保证，那是循环论证，且代码新增输入键时就地漂移。
+ */
+const DERIVED_KEYS = [
+  ...leafKeys(resolveGates({}), 'gates'),
+  ...leafKeys(resolveWritePolicy({}), 'writePolicy'),
+]
+const CONFIG_KEYS = DERIVED_KEYS.filter((key) => !MIRRORED.includes(key))
 const CONFIG_KEY_SET = new Set(CONFIG_KEYS)
 
 /** 结果记录：{ code, file, line, detail }。 */
@@ -252,7 +292,7 @@ function analyzeDocument(text, ctx) {
     }
   }
 
-  // DOC005：配置表行首键必须逐字命中 CONFIG_KEYS 清单（只查表格行）。
+  // DOC005：配置表行首键必须逐字命中运行时推导的输入键集合（只查表格行）。
   const keyRe = /^\|\s*`(gates|writePolicy)\.[A-Za-z.]+`/
   for (let i = 0; i < lines.length; i += 1) {
     if (inFence[i]) continue
@@ -260,7 +300,7 @@ function analyzeDocument(text, ctx) {
     if (!m) continue
     const key = m[0].replace(/^\|\s*`/, '').replace(/`$/, '')
     if (!CONFIG_KEY_SET.has(key)) {
-      findings.push(finding('DOC005', file, i + 1, `配置键不在 CONFIG_KEYS 清单中：${key}`))
+      findings.push(finding('DOC005', file, i + 1, `配置键不是输入键（不在解析结果 − 镜像集内）：${key}`))
     }
   }
 
@@ -453,19 +493,19 @@ function selfTest() {
       const fs8 = analyzeDocument(readFileSync(p, 'utf8'), { file: 'doc004-bad.md', docDir: docs, root: base })
       t('DOC004 链接不存在', fs8.some((f) => f.code === 'DOC004'), JSON.stringify(fs8))
     }
-    // 9) 配置键在 CONFIG_KEYS 清单内 → PASS。
+    // 9) 配置键在运行时推导的输入键集内 → PASS。
     {
       const p = writeFixture('doc005-ok.md', ['| 键 | 默认 |', '| --- | --- |', '| `gates.wait.enabled` | true |'].join('\n'))
       const fs9 = analyzeDocument(readFileSync(p, 'utf8'), { file: 'doc005-ok.md', docDir: docs, root: base })
       t('DOC005 清单内键通过', !fs9.some((f) => f.code === 'DOC005'), JSON.stringify(fs9))
     }
-    // 10) 清单内的嵌套数组叶子（gates.verify.docPatterns 是输入键）逐字命中 → PASS。
+    // 10) 推导集内的嵌套数组叶子（gates.verify.docPatterns 是输入键）逐字命中 → PASS。
     {
       const p = writeFixture('doc005-nested.md', ['| 键 | 默认 |', '| --- | --- |', '| `gates.verify.docPatterns` | `[]` |'].join('\n'))
       const fs10a = analyzeDocument(readFileSync(p, 'utf8'), { file: 'doc005-nested.md', docDir: docs, root: base })
       t('DOC005 清单内嵌套键通过', !fs10a.some((f) => f.code === 'DOC005'), JSON.stringify(fs10a))
     }
-    // 11) 清单外键：0.10.0 已删除的 gates.review.textDocOnly 必须 FAIL。
+    // 11) 推导集外键：0.10.0 已删除的 gates.review.textDocOnly 必须 FAIL。
     {
       const p = writeFixture('doc005-bad.md', ['| 键 | 默认 |', '| --- | --- |', '| `gates.review.textDocOnly` | false |'].join('\n'))
       const fs10 = analyzeDocument(readFileSync(p, 'utf8'), { file: 'doc005-bad.md', docDir: docs, root: base })
@@ -483,6 +523,21 @@ function selfTest() {
       const fs10c = analyzeDocument(readFileSync(p, 'utf8'), { file: 'doc005-mirror.md', docDir: docs, root: base })
       t('DOC005 镜像字段冒充配置键失败（0.10.0 docPatterns 漂移形态）',
         fs10c.some((f) => f.code === 'DOC005'), JSON.stringify(fs10c))
+    }
+    // 11d) MIRRORED 四项必须仍出现在推导结果里（字段改名 → 本断言红，而不是
+    // 让排除清单静默失配），且全部被判 FAIL——它们不是输入键。
+    {
+      t('镜像字段仍在解析结果中（MIRRORED 未漂移）',
+        MIRRORED.every((key) => DERIVED_KEYS.includes(key)), JSON.stringify(DERIVED_KEYS))
+      const p = writeFixture('doc005-mirrors.md', [
+        '| 键 | 默认 |',
+        '| --- | --- |',
+        ...MIRRORED.map((key) => `| \`${key}\` | — |`),
+      ].join('\n'))
+      const fs10d = analyzeDocument(readFileSync(p, 'utf8'), { file: 'doc005-mirrors.md', docDir: docs, root: base })
+      t('DOC005 全部镜像字段判 FAIL',
+        MIRRORED.every((key) => fs10d.some((f) => f.code === 'DOC005' && f.detail.includes(key))),
+        JSON.stringify(fs10d))
     }
     // 12) 文件不存在 → DOC000，且整体 exit 1。
     {

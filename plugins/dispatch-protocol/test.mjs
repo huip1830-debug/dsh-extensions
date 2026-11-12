@@ -30,7 +30,6 @@ import {
   analyzeVerification, DEFAULT_DOC_PATTERNS, evaluateReviewGate, evaluateVerifyGate, isRestoreCommand,
   renderGateText, renderReviewGate, renderVerifyGate, resolveGates,
 } from './lib/gates.mjs'
-import { CONFIG_KEYS } from './lib/config-keys.mjs'
 
 // Reminder behaviour is asserted from the harness messages. Decision logging
 // stays off so a test run never appends to the real `%TEMP%` decision log; the
@@ -2527,12 +2526,14 @@ test('D4-1: the verify default ends in {action} and renders the integration acti
     'D4: the verify action is the fixed integration command')
 })
 
-test('D4-2: a doc-only review renders the machine-check action, never the re-review one', () => {
+test('D4-2: a doc-only review renders the docs-check action, never the re-review one', () => {
   const gates = resolveGates({})
   assert.match(gates.review.text, /\{action\}$/, 'the default template ends in the action placeholder')
   const text = renderReviewGate(gates.review.text, { files: ['AGENTS.md'], docOnly: true })
   assert.match(text, /不必重开代码评审/, 'D4: a doc-only change does not invalidate the code slice')
-  assert.match(text, /机器校验（路径\/链接\/括号\/术语）/, 'D4: it asks for machine checks instead')
+  assert.match(text, /docs-check/, 'D4: a doc-only change points at the deterministic checker')
+  assert.match(text, /断言 → 代码位置/, 'D4: it asks for the assertion → code-location table')
+  assert.match(text, /1 次有界评审/, 'D4: a non-empty table buys one bounded review')
   assert.doesNotMatch(text, /重开受影响切片/, 'D4: the code action must not leak in')
   assert.match(text, /AGENTS\.md/)
 })
@@ -2554,58 +2555,13 @@ test('D4-4: a custom template may place {action}; old and unknown placeholders s
   }), 'V：src/a.ts（代码）先跑一次集成命令并留存退出码，再收口。 [changes=2; last=npm test]',
   'D4: {action}, {changes} and {lastVerify} render in a custom template')
   assert.equal(renderReviewGate(gates.review.text, { files: ['a.md'], docOnly: true }),
-    'R：a.md 这类改动不使代码切片失效：机器校验（路径/链接/括号/术语）即可，不必重开代码评审；若改的正是刚评审的那份文档，最小复核该文档即可。',
+    'R：a.md 这类改动不使代码切片失效：跑 docs-check，并按规则 1/4 交「断言 → 代码位置」表（表非空再由派发方派 1 次有界评审）即可，不必重开代码评审。',
     'D4: the doc-only action fills {action} in a custom review template')
 
   // 未知占位原样保留；没注入 action 时 {action} 不被抹掉。
   assert.equal(renderGateText('{files} {oops}', { files: ['a.ts'] }), 'a.ts {oops}')
   assert.equal(renderGateText('{action}', {}), '{action}')
   assert.equal(renderGateText('{action}', { action: 'X' }), 'X')
-})
-
-// ---------------------------------------------------------------------------
-// 0.12.0 — DOC005 的配置键清单：CONFIG_KEYS 必须等于「推导叶子 − 显式镜像集」。
-
-test('0.12.0: CONFIG_KEYS equals the input keys derived from the resolved config', () => {
-  /**
-   * 由 `resolveGates({})` / `resolveWritePolicy({})` 派生或镜像的字段：出现在
-   * 解析结果里，但**不是可接受的输入键**，不属于 CONFIG_KEYS（H1b 收口）。
-   */
-  const MIRRORED = [
-    'gates.verify.commitRegExp',
-    'gates.verify.controlPlanePatterns',
-    'gates.review.controlPlanePatterns',
-    'gates.review.docPatterns',
-  ]
-
-  /**
-   * 递归取叶子键路径：普通对象递归，数组与 RegExp 等非普通对象视为叶子；
-   * 前缀 `gates` / `writePolicy`。
-   */
-  const leafKeys = (value, prefix) => {
-    const plain = typeof value === 'object' && value !== null && !Array.isArray(value)
-      && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
-    if (!plain) return [prefix]
-    return Object.entries(value).flatMap(([key, child]) => leafKeys(child, `${prefix}.${key}`))
-  }
-
-  const derived = [
-    ...leafKeys(resolveGates({}), 'gates'),
-    ...leafKeys(resolveWritePolicy({}), 'writePolicy'),
-  ]
-
-  // 镜像集自身也要被代码推导覆盖：否则代码改了字段名，MIRRORED 会静默失配。
-  for (const key of MIRRORED) {
-    assert.ok(derived.includes(key), `镜像字段 ${key} 不在推导集合中：MIRRORED 需要同步`)
-  }
-
-  const inputKeys = derived.filter((key) => !MIRRORED.includes(key))
-  console.log(`[config-keys] 推导叶子 ${derived.length} 个 − 镜像 ${MIRRORED.length} 个 → 输入键 ${inputKeys.length} 个；CONFIG_KEYS ${CONFIG_KEYS.length} 个`)
-
-  assert.deepEqual(new Set(inputKeys), new Set(CONFIG_KEYS),
-    'CONFIG_KEYS 与「resolveGates({})/resolveWritePolicy({}) 推导叶子 − MIRRORED」不一致：请按 lib/config-keys.mjs 头部口径重填清单')
-  assert.equal(CONFIG_KEYS.length, new Set(CONFIG_KEYS).size, '清单不得有重复键')
-  assert.equal(inputKeys.length, CONFIG_KEYS.length, '输入键数量应与清单一致（不含镜像字段）')
 })
 
 // ---------------------------------------------------------------------------

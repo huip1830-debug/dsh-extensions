@@ -21,9 +21,9 @@
 | DOC002 | 代码围栏成对闭合（``` 计数为偶数） | 围栏内的 ``` 不再重复计数 |
 | DOC003 | 同一表格块内列数一致（按 `\|` 切，去掉首尾） | 忽略行内代码里的 `\|` |
 | DOC004 | 相对链接目标存在（`](x)`） | 跳过 `http(s)://`、`mailto:`、`#…`；先按文档所在目录解析，再按 root 解析 |
-| DOC005 | 配置表行首键真实存在：匹配 `^\|\s*`(gates\|writePolicy)\.[A-Za-z.]+`` 行，键名必须**逐字命中** `lib/config-keys.mjs` 的 `CONFIG_KEYS` 清单（不再做末段兜底——兜底会让 `gates.review.docPatterns` 这类**内部字段冒充配置键**蒙混过关，即 0.10.0 的真实漂移样本） | 只查表格行；迁移/历史正文不查 |
+| DOC005 | 配置表行首键真实存在：匹配 `^\|\s*`(gates\|writePolicy)\.[A-Za-z.]+`` 行，键名必须**逐字命中**运行时推导的输入键集合（`resolve*` 叶子 − 4 个镜像/编译字段；不再做末段兜底——兜底会让 `gates.review.docPatterns` 这类**内部字段冒充配置键**蒙混过关，即 0.10.0 的真实漂移样本） | 只查表格行；迁移/历史正文不查 |
 
-**`CONFIG_KEYS` 的正确性由测试保证**（不靠人工维护）：`test.mjs` 用 `resolveGates({})` / `resolveWritePolicy({})` 递归推导叶子键路径（前缀 `gates.` / `writePolicy.`），断言与 `CONFIG_KEYS` **集合相等**；代码新增/删除键而未同步清单 → 测试红。
+**DOC005 的键集合在 `docs-check` 运行时现算**：递归 `resolveGates({})` / `resolveWritePolicy({})` 取叶子（前缀 `gates.` / `writePolicy.`），再减去 4 个镜像/编译字段（`commitRegExp`、两个 `controlPlanePatterns`、`review.docPatterns`）。**不设静态清单文件**——0.13.0 已删除 `lib/config-keys.mjs` 与对应等值测试：那是「用测试保证一份重复清单」的循环验证，加文件与加测试的收益都是零。
 
 **输出**：逐条结果 + 末行 `docs-check: files=<N> fail=<M>`；`M>0` → exit 1；全部通过 → exit 0。
 **`--self-test`**：在 tmpdir 造 8 个 fixture（括号平衡/不平衡、围栏闭合/不闭合、表格齐/不齐、链接存在/不存在、键存在/不存在），逐条断言判定与退出码，输出 `self-test: pass=<n> fail=<m>`，`fail>0` → exit 1。
