@@ -28,7 +28,7 @@ import {
 } from './lib/write-policy.mjs'
 import {
   analyzeVerification, DEFAULT_DOC_PATTERNS, evaluateReviewGate, evaluateVerifyGate, isRestoreCommand,
-  renderGateText, renderReviewGate, renderVerifyGate, resolveGates,
+  matchesVerifyCommand, renderGateText, renderReviewGate, renderVerifyGate, resolveGates,
 } from './lib/gates.mjs'
 
 // Reminder behaviour is asserted from the harness messages. Decision logging
@@ -1021,9 +1021,28 @@ test('gates config rejects values that would silently never fire', () => {
   assert.equal(gates.wait.threshold, 3)
   assert.deepEqual(gates.wait.tools, ['list_agents', 'job_list', 'schedule_list', 'get_goal'])
   assert.deepEqual(gates.verify.commands,
-    ['npm test', 'npm run build', 'dotnet test', 'jest', 'tsc', 'prisma migrate deploy', 'node test'])
+    ['npm test', 'npm run build', 'dotnet test', 'jest', 'tsc', 'prisma migrate deploy', 'node test', 'test.mjs'])
   assert.equal(gates.verify.commitRegExp.test('git -C "G:\\repo" commit -m x'), true)
   assert.equal(gates.verify.commitRegExp.test('git status --short'), false)
+})
+
+test('verify commands recognise node <path>/test.mjs invocations', () => {
+  const commands = resolveConfig({}).gates.verify.commands
+
+  // 仓库根带路径、`& $node` 变量拼装、无路径三种写法都算跑过集成命令。
+  for (const command of [
+    'node test.mjs',
+    'node plugins/dispatch-protocol/test.mjs',
+    '& $node plugins/x/test.mjs',
+  ]) {
+    assert.equal(matchesVerifyCommand(command, commands), true, command)
+  }
+
+  // 反例：窄跑一个 spec 文件不该被新增的 `test.mjs` 片段误命中。注意整表仍会命中，
+  // 因为既有的 `node test` 片段本就覆盖 `node tests/...`（旧口径，本次不动）。
+  assert.equal(matchesVerifyCommand('node tests/foo.spec.ts', commands.filter(f => f === 'test.mjs')), false)
+  // 整表反例：普通脚本不是集成命令。
+  assert.equal(matchesVerifyCommand('node scripts/seed.ts', commands), false)
 })
 
 test('gates only judge root-agent turns', () => {

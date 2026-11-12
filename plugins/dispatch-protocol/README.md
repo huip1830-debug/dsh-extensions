@@ -147,7 +147,7 @@
 | `gates.wait.tools` | `['list_agents','job_list','schedule_list','get_goal']` | 计入「状态查询」的工具名 |
 | `gates.wait.text` | 内置模板 | 覆盖等待提醒，支持 `{count}` / `{tools}` |
 | `gates.verify.enabled` | `true` | 是否提醒「未验证就收口」 |
-| `gates.verify.commands` | `['npm test','npm run build','dotnet test','jest','tsc','prisma migrate deploy','node test']` | 视为集成验证的命令片段（大小写不敏感子串） |
+| `gates.verify.commands` | `['npm test','npm run build','dotnet test','jest','tsc','prisma migrate deploy','node test','test.mjs']` | 视为集成验证的命令片段（大小写不敏感子串） |
 | `gates.verify.commitPattern` | 内置正则字符串（默认值见 `lib/gates.mjs` 的 `DEFAULT_VERIFY_COMMIT_PATTERN`） | 收口动作里的 commit/push 识别，加载期编译，非法即报错 |
 | `gates.verify.text` | 内置模板（`DEFAULT_VERIFY_TEXT`） | 覆盖验证提醒，支持 `{files}` / `{kind}` / `{action}`，兼容旧占位 `{changes}` / `{lastVerify}` |
 | `gates.verify.docPatterns` | `['.md','.mdx','docs/','dispatch/','LICENSE','.gitignore','.gitattributes']` | 「文档/控制面改动」判定（后缀 / 目录段 / 整段相等，大小写不敏感）；整批脏改动全命中才不触发 VerifyGate，ReviewGate 复用同一列表（不是独立配置键） |

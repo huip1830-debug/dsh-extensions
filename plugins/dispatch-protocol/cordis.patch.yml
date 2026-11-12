@@ -7,7 +7,7 @@
       name: dispatch-protocol
       config:
         enabled: true
-        order: 500            # after first-party guidance, before persona suffix (10200)
+        order: 500            # ordering within the system prompt (lower runs earlier)
         # rules: []           # override the six defaults; non-empty string array
         # footer: ''          # override the closing paragraph (cost + exemption); '' drops it
         # log: false          # shared decision log (checkpoint + write-policy + gates); default %TEMP%/dispatch-protocol-decisions.jsonl, false disables all
@@ -30,9 +30,9 @@
         #     # text: ''        # overrides DEFAULT_WAIT_TEXT; supports {count} {tools}
         #   verify:
         #     enabled: true
-        #     commands: ['npm test', 'npm run build', 'dotnet test', 'jest', 'tsc', 'prisma migrate deploy', 'node test']
+        #     commands: ['npm test', 'npm run build', 'dotnet test', 'jest', 'tsc', 'prisma migrate deploy', 'node test', 'test.mjs']
         #     # commitPattern: '\bgit\s+(commit|push)\b'  # YAML single-quoted regex; full default is DEFAULT_VERIFY_COMMIT_PATTERN in lib/gates.mjs
-        #     # text: ''        # overrides DEFAULT_VERIFY_TEXT; supports {changes} {lastVerify}
+        #     # text: ''        # overrides DEFAULT_VERIFY_TEXT; supports {files} {kind} {action}; legacy {changes} {lastVerify}
         #   contract:             # 0.7.0 ContractGate: contract files edited while a child is still running
         #     enabled: true
         #     patterns: ['contract']          # case-insensitive path substrings; supports {files}
@@ -40,7 +40,7 @@
         #   review:               # 0.7.0 ReviewGate: parent writes after a read-only review completed
         #     enabled: true
         #     labelPrefixes: ['只读评审', '只读复审']
-        #     # text: ''        # overrides DEFAULT_REVIEW_TEXT; supports {files}
+        #     # text: ''        # overrides DEFAULT_REVIEW_TEXT; supports {files} {action}
         #   handoff:              # 0.7.0 HandoffGate: consecutive empty turns
         #     enabled: true
         #     emptyTurns: 1     # consecutive turns with no tool/call and no non-empty text

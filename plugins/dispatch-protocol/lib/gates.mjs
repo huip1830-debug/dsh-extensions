@@ -27,7 +27,9 @@ export const DEFAULT_WAIT_THRESHOLD = 3
 export const DEFAULT_WAIT_TEXT = '[dispatch-protocol] 本回合 {count} 次状态查询（{tools}），写入/派发/验证均为 0。结束回合等完成事件；只允许预算过半时主动检查一次。'
 
 /** 视为「集成验证」的命令片段（大小写不敏感子串，契约 §4）。 */
-export const DEFAULT_VERIFY_COMMANDS = ['npm test', 'npm run build', 'dotnet test', 'jest', 'tsc', 'prisma migrate deploy', 'node test']
+// 末项 `test.mjs` 覆盖 `node <任意路径>/test.mjs` 与 `& $node .../test.mjs` 这类变量拼装写法
+// （纯子串匹配，不校验可执行文件）；代价是窄跑 `*.test.mjs` 也会被计入——与既有 `tsc` 口径一致，闸门只提醒不证明。
+export const DEFAULT_VERIFY_COMMANDS = ['npm test', 'npm run build', 'dotnet test', 'jest', 'tsc', 'prisma migrate deploy', 'node test', 'test.mjs']
 
 /**
  * 文档类改动片段（0.10.0 C2；扩展名/段前缀判定，不复用 ContractGate 的 `matchesPath` 子串口径）。
