@@ -470,6 +470,9 @@ function registerReminders(ctx, config) {
       || lastDeliveredTurn.get(parentId) === turn) return false
     try {
       const events = target?.session?.snapshotEvents?.() ?? []
+      // 0.11.0 D2：闸门用的 cwd 与写入守卫同源（`session.cwd ?? header.cwd`）；
+      // 分类器靠它把绝对路径相对化，取不到时按保守口径把写入当代码。
+      const cwd = target?.session?.cwd ?? target?.session?.header?.cwd
       /** 投递一条闸门消息：steer + 决定日志 + 本回合去重。 */
       const deliver = (text, payload) => {
         steerText(target, text)
@@ -483,7 +486,7 @@ function registerReminders(ctx, config) {
       const wait = evaluateWaitGate(events, turn, gates, writePolicy.delegationTools)
       if (wait !== null) return deliver(renderWaitGate(gates.wait.text, wait), { gate: 'wait', observations: wait.count })
 
-      const verify = evaluateVerifyGate(events, turn, gates)
+      const verify = evaluateVerifyGate(events, turn, gates, cwd)
       if (verify !== null) {
         return deliver(renderVerifyGate(gates.verify.text, verify),
           { gate: 'verify', changes: verify.changes, lastVerify: verify.lastVerify })
@@ -494,12 +497,11 @@ function registerReminders(ctx, config) {
         return deliver(renderContractGate(gates.contract.text, contract), { gate: 'contract', files: contract.files })
       }
 
-      const review = evaluateReviewGate(events, gates, reviewState.get(parentId))
+      const review = evaluateReviewGate(events, gates, reviewState.get(parentId), cwd)
       if (review !== null) {
-        // 0.10.0 C4：文档/控制面改动换一套文案——不使代码切片失效，机器校验
-        // 即可；混合含代码时仍用原文案（重开受影响切片）。
-        const text = review.docOnly ? gates.review.textDocOnly : gates.review.text
-        const delivered = deliver(renderReviewGate(text, review),
+        // 0.11.0 D4：文案模型统一——`renderReviewGate` 按 `docOnly` 自己选
+        // `{action}`（文档/控制面改动只提示机器校验，混合代码时重开受影响切片）。
+        const delivered = deliver(renderReviewGate(gates.review.text, review),
           { gate: 'review', files: review.files, docOnly: review.docOnly })
         // 同一轮评审只提醒一次；下一轮评审 created 或任一评审 completed 时重置
         // （契约 §4/§11-B/§12-B）。
@@ -555,6 +557,7 @@ function registerReminders(ctx, config) {
         writeTools: writePolicy.tools,
         delegationTools: writePolicy.delegationTools,
         controlPlanePatterns: writePolicy.allowlist,
+        cwd,
       })
       if (summary.writes === 0 && summary.shellWrites === 0 && summary.delegations === 0) return
       const dir = join(cwd, observation.dir)

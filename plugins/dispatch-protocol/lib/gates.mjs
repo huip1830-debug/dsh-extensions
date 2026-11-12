@@ -14,7 +14,7 @@
 // 不阻断任何工具调用。判定与投递失败一律吞掉——闸门是提醒，不是门禁。
 
 import {
-  DEFAULT_CONTROL_PLANE_PATTERNS, DEFAULT_PWSH_SHELL_PATTERN, DEFAULT_WRITE_TOOLS, isControlPlanePath,
+  ARTIFACT, classifyPath, DEFAULT_CONTROL_PLANE_PATTERNS, DEFAULT_PWSH_SHELL_PATTERN, DEFAULT_WRITE_TOOLS,
 } from './tool-calls.mjs'
 
 /** await 闸门的默认查询工具：全是「只读状态」类工具，不产生新证据。 */
@@ -30,7 +30,7 @@ export const DEFAULT_WAIT_TEXT = '[dispatch-protocol] 本回合 {count} 次状�
 export const DEFAULT_VERIFY_COMMANDS = ['npm test', 'npm run build', 'dotnet test', 'jest', 'tsc', 'prisma migrate deploy', 'node test']
 
 /**
- * 文档类改动片段（0.10.0 C2，大小写不敏感子串，复用 `matchesPath`）。
+ * 文档类改动片段（0.10.0 C2；扩展名/段前缀判定，不复用 ContractGate 的 `matchesPath` 子串口径）。
  *
  * 纯文档改动没有可验证的代码行为：上游 session-32cd3319 里 3 次 VerifyGate
  * 全部由 `.md` / `AGENTS.md` 写入触发，代价是三端 build+test。这里只豁免
@@ -56,13 +56,14 @@ const SHELL_PATH = '<shell>'
 export const DEFAULT_VERIFY_COMMIT_PATTERN = '\\bgit\\s+(?:-C\\s+(?:"[^"]*"|\'[^\']*\'|\\S+)\\s+)?(commit|push)\\b'
 
 /**
- * VerifyGate 默认文案（0.10.0 C5 点名文件）。
+ * VerifyGate 默认文案（0.10.0 C5 点名文件；0.11.0 D4 收敛为 `{action}`）。
  *
  * `{files}` 为脏路径（最多展示 3 个，多余追加「等 N 个」），`{kind}` 为
- * `代码`|`未知`；0.9.x 的 `{changes}`/`{lastVerify}` 保留兼容，旧自定义文案
- * 不会因新占位缺失而抛错。
+ * `代码`|`未知`；收口动作由 `{action}` 承载（闸门固定给出，不可配置）。
+ * 0.9.x 的 `{changes}`/`{lastVerify}` 保留兼容，旧自定义文案不会因新占位缺失
+ * 而抛错。
  */
-export const DEFAULT_VERIFY_TEXT = '[dispatch-protocol] 本回合准备 present/commit，但 {files}（{kind}改动）在最后一次成功集成命令之后又有改动（或从未跑过）。先跑一次集成命令并留存退出码，再收口。'
+export const DEFAULT_VERIFY_TEXT = '[dispatch-protocol] 本回合准备 present/commit，但 {files}（{kind}改动）在最后一次成功集成命令之后又有改动（或从未跑过）。{action}'
 
 /** ContractGate：写入路径命中这些片段的文件算「契约文件」（大小写不敏感子串）。 */
 export const DEFAULT_CONTRACT_PATTERNS = ['contract']
@@ -73,17 +74,14 @@ export const DEFAULT_CONTRACT_TEXT = '[dispatch-protocol] 本回合在有子代�
 /** ReviewGate：label 以这些前缀开头的子代理算只读评审（与 footer 的 label 约定一致）。 */
 export const DEFAULT_REVIEW_LABEL_PREFIXES = ['只读评审', '只读复审']
 
-/** ReviewGate 默认文案；`{files}` 为评审后 dirty 期间命中的去重路径（最多 3 个）。 */
-export const DEFAULT_REVIEW_TEXT = '[dispatch-protocol] 本批在只读评审之后又改动了工作区（{files}）。评审已失效：重开受影响切片再收口。'
-
 /**
- * ReviewGate 文档/控制面改动的文案（0.10.0 C4）。
+ * ReviewGate 默认文案；`{files}` 为评审后 dirty 期间命中的去重路径（最多 3 个）。
  *
- * 评审之后再写文档或控制面，不会让已评审的代码切片失效；原文案要求「重开受
- * 影响切片」，上游证据里主控只能为一个文档切片再派一次评审（10.4 min /
- * 2.37M token）。这里改问「机器校验 + 最小复核」，但每个评审波次仍只提醒一次。
+ * 0.11.0 D4：代码改动与文档/控制面改动共用一个模板，差异只由 `{action}` 承载
+ * （由 `renderReviewGate` 按 `docOnly` 选一句固定文案）——0.10.0 的 review
+ * 文档文案键与 `DEFAULT_REVIEW_TEXT_DOC_ONLY` 随之删除。
  */
-export const DEFAULT_REVIEW_TEXT_DOC_ONLY = '[dispatch-protocol] 只读评审之后又改了文档/控制面（{files}）。这类改动不使代码切片失效：机器校验（路径/链接/括号/术语）即可，不必重开代码评审；若改的正是刚评审的那份文档，最小复核该文档即可。'
+export const DEFAULT_REVIEW_TEXT = '[dispatch-protocol] 本批在只读评审之后又改动了工作区（{files}）。{action}'
 
 /** HandoffGate：连续空回合达到该数量才提醒（默认 1）。 */
 export const DEFAULT_HANDOFF_EMPTY_TURNS = 1
@@ -187,8 +185,6 @@ export function resolveGates(source = {}) {
     controlPlanePatterns,
     docPatterns: verify.docPatterns,
     text: readText(reviewSource.text, DEFAULT_REVIEW_TEXT, 'review.text'),
-    // 0.10.0 C4：文档/控制面改动走另一套文案，明确「不必重开代码评审」。
-    textDocOnly: readText(reviewSource.textDocOnly, DEFAULT_REVIEW_TEXT_DOC_ONLY, 'review.textDocOnly'),
   }
 
   const handoffSource = config.handoff ?? {}
@@ -410,17 +406,19 @@ function collectResults(events) {
  * 被打断时不能把写入抹掉）；其余 → 改过。0.8.2 起 write/edit 先取路径，命中
  * 控制面（state/ledger/specs）的写入不算脏改动——那是主控的合法动作。0.10.0
  * 起控制面扩为 `dispatch/` 整树，且 `pwsh` 里「还原到 HEAD」的命令不算脏
- * （C1/C3）。
+ * （C1/C3）。0.11.0：控制面判定收敛到 `classifyPath`（D1/D3），`cwd` 用于把
+ * 绝对路径相对化；省略 `cwd` 时控制面判定失败 → 写入按脏处理（保守）。
  * @param call - 一条 `tool/call` 事件。
  * @param results - `collectResults` 的结果。
  * @param patterns - 控制面路径片段（`gates.verify.controlPlanePatterns`）。
+ * @param cwd - 会话工作目录（`session.cwd ?? session.header.cwd`）。
  */
-function touchedWorkingTree(call, results, patterns = DEFAULT_CONTROL_PLANE_PATTERNS) {
+function touchedWorkingTree(call, results, patterns = DEFAULT_CONTROL_PLANE_PATTERNS, cwd) {
   const data = call.data ?? {}
   const name = data?.name
   if (DEFAULT_WRITE_TOOLS.includes(name)) {
     const path = readPath(data?.arguments)
-    if (isControlPlanePath(path, patterns)) return false
+    if (classifyPath(path, { cwd, controlPlanePatterns: patterns }) === ARTIFACT.CONTROL) return false
     const message = results.get(data?.callId)
     return message === undefined || message.isError !== true
   }
@@ -445,13 +443,15 @@ function touchedWorkingTree(call, results, patterns = DEFAULT_CONTROL_PLANE_PATT
  * 决定日志要能回答「到底改了多少」）。
  *
  * 0.10.0 C2：返回值加 `files`（去重脏路径，`pwsh` 等无法定位的记 `<shell>`）
- * 与 `docOnly`（脏条目全部命中 `verify.docPatterns` 或控制面）。`docOnly` 只
- * 描述「这一批脏改动是不是纯文档」，`changes` 语义不变。
+ * 与 `docOnly`（脏条目全部是控制面或文档）。0.11.0 D3：`docOnly` 只消费
+ * `classifyPath` 的结果——每个脏条目必须 ∈ `{CONTROL, DOC}`；`UNKNOWN`（无路径
+ * write / pwsh）按代码处理。`changes` 语义不变。
  * @param events - `session.snapshotEvents()`。
  * @param verify - 解析后的 `gates.verify`。
+ * @param cwd - 会话工作目录（省略时控制面判定失败，按代码处理）。
  * @returns `{ lastVerify, dirty, changes, files, docOnly }`。
  */
-export function analyzeVerification(events, verify) {
+export function analyzeVerification(events, verify, cwd) {
   const log = events ?? []
   const results = collectResults(log)
   const docPatterns = verify.docPatterns ?? DEFAULT_DOC_PATTERNS
@@ -480,13 +480,15 @@ export function analyzeVerification(events, verify) {
   for (let i = lastIndex + 1; i < log.length; i++) {
     const event = log[i]
     if (event?.type !== 'tool/call') continue
-    if (!touchedWorkingTree(event, results, controlPlanePatterns)) continue
+    if (!touchedWorkingTree(event, results, controlPlanePatterns, cwd)) continue
     dirty = true
     changes += 1
     const path = dirtyPath(event)
     if (!files.includes(path)) files.push(path)
-    if (path === SHELL_PATH) documentationOnly = false
-    else if (!matchesPath(path, docPatterns) && !isControlPlanePath(path, controlPlanePatterns)) documentationOnly = false
+    // D3：只消费分类结果。`<shell>`（无路径 write / pwsh）分类为 CODE，所以
+    // 「不知道改了什么」不会被当成纯文档。
+    const artifact = classifyPath(path, { cwd, controlPlanePatterns, docPatterns })
+    if (artifact !== ARTIFACT.CONTROL && artifact !== ARTIFACT.DOC) documentationOnly = false
   }
 
   return { lastVerify, dirty, changes, files, docOnly: changes > 0 && documentationOnly }
@@ -550,13 +552,15 @@ export function evaluateWaitGate(events, turn, gates, delegationTools = []) {
  * 了」（契约 §11-A：零写入的纯只读 present 豁免）。
  * 判定对齐的是「准备收口时的实际状态」，不是「这一回合有没有跑过命令」。
  * 0.10.0 C2：整批脏改动都是文档/控制面（`docOnly`）时静默——纯文档改动没有
- * 可验证的代码行为，「从未跑过」分支同样适用。
+ * 可验证的代码行为，「从未跑过」分支同样适用。0.11.0 D2/D3：`cwd` 透传给
+ * `analyzeVerification`，分类结果由 `classifyPath` 给出。
  * @param events - `session.snapshotEvents()`。
  * @param turn - 正在收尾的回合。
  * @param gates - 解析后的 `gates` 段。
+ * @param cwd - 会话工作目录（省略时按保守口径把文档当代码）。
  * @returns `{ changes, lastVerify, dirty, files, docOnly }`，不该提醒时返回 null。
  */
-export function evaluateVerifyGate(events, turn, gates) {
+export function evaluateVerifyGate(events, turn, gates, cwd) {
   if (!gates.verify.enabled) return null
   const calls = (events ?? []).filter(event => event?.type === 'tool/call' && event.data?.turn === turn)
   const closing = calls.some((call) => {
@@ -568,7 +572,7 @@ export function evaluateVerifyGate(events, turn, gates) {
   })
   if (!closing) return null
 
-  const state = analyzeVerification(events, gates.verify)
+  const state = analyzeVerification(events, gates.verify, cwd)
   // C2：纯文档/控制面改动不需要集成命令。
   if (state.docOnly === true) return null
   // 契约 §11-A：整会话零写入、也从未验证的纯只读 present（present 一份报告/
@@ -590,19 +594,47 @@ export function renderWaitGate(template, info) {
 }
 
 /**
- * 渲染 VerifyGate 文案（0.10.0 C5）。
+ * 三个固定收口动作（0.11.0 D4）：由闸门给出，不可配置。
  *
- * 新占位 `{files}`/`{kind}` 负责点名；旧占位 `{changes}`/`{lastVerify}` 保留，
- * 0.9.x 的自定义文案照旧渲染，不会因为模板里没有新占位而抛错。
+ * 0.10.0 用两个模板键表达「要不要重开评审」；那让配置面随每次误报单向增长。这里把「事实描述」留在模板里，把「该怎么做」
+ * 收成三句固定文案——用户能改措辞，但改不了纪律结论。
+ */
+const VERIFY_ACTION = '先跑一次集成命令并留存退出码，再收口。'
+const REVIEW_ACTION = '评审已失效：重开受影响切片再收口。'
+const REVIEW_DOC_ACTION = '这类改动不使代码切片失效：机器校验（路径/链接/括号/术语）即可，不必重开代码评审；若改的正是刚评审的那份文档，最小复核该文档即可。'
+
+/**
+ * 统一渲染闸门文案（0.11.0 D4）：一个模板 + 一个 `{action}`。
+ *
+ * 支持 `{files}`（最多 3 个 + 「等 N 个」）、`{kind}`（`代码`|`未知`）、
+ * `{action}`（闸门固定给出）与 0.9.x 的 `{changes}`/`{lastVerify}`；模板里
+ * 其它未知占位一律原样保留，不抛错。`info` 没给的占位也原样保留
+ * （`{lastVerify}` 沿用旧行为：缺失/null → 「从未验证」）。
+ * @param template - 已解析的闸门文案模板（`gates.*.text`）。
+ * @param info - 闸门判定结果；`action` 由薄封装注入。
+ */
+export function renderGateText(template, info = {}) {
+  const data = info ?? {}
+  const changes = data.changes === undefined ? '{changes}' : String(data.changes)
+  const action = typeof data.action === 'string' ? data.action : '{action}'
+  return template
+    .replaceAll('{files}', formatPaths(data.files))
+    .replaceAll('{kind}', changeKind(data.files))
+    .replaceAll('{action}', action)
+    .replaceAll('{changes}', changes)
+    .replaceAll('{lastVerify}', data.lastVerify ?? '从未验证')
+}
+
+/**
+ * 渲染 VerifyGate 文案（0.10.0 C5；0.11.0 D4 改为薄封装）。
+ *
+ * 收口动作由本函数固定给出（`{action}` = 先跑一次集成命令并留存退出码），
+ * 调用方不需要、也不能自己拼这句话。
  * @param template - `gates.verify.text`。
  * @param info - `evaluateVerifyGate` 的返回值。
  */
 export function renderVerifyGate(template, info) {
-  return template
-    .replaceAll('{files}', formatPaths(info.files))
-    .replaceAll('{kind}', changeKind(info.files))
-    .replaceAll('{changes}', String(info.changes))
-    .replaceAll('{lastVerify}', info.lastVerify ?? '从未验证')
+  return renderGateText(template, { ...info, action: VERIFY_ACTION })
 }
 
 /**
@@ -718,15 +750,17 @@ export function renderHandoffGate(template, info) {
  * 「有评审完成 + 之后有写入」，不解析评审报告 PASS/FAIL——FAIL 后返修同样应
  * 重开，方向一致（契约 §4 已知边界）。
  *
- * 0.10.0 C4：返回值加 `docOnly`——评审后的脏改动全部命中 `docPatterns` 或
- * 控制面时为 true，调用方据此换文案（文档改动不必重开代码评审）。`files` 仍是
- * 去重路径（含 `<shell>` 占位），展示时由 `formatPaths` 截到 3 个。
+ * 0.10.0 C4：返回值加 `docOnly`——评审后的脏改动全部是控制面或文档时为 true，
+ * 调用方据此换文案（文档改动不必重开代码评审）。0.11.0 D3：`docOnly` 只消费
+ * `classifyPath` 的结果（`UNKNOWN` 按代码）；`files` 仍是去重路径（含 `<shell>`
+ * 占位），展示时由 `formatPaths` 截到 3 个。
  * @param events - 父代理的 `session.snapshotEvents()`。
  * @param gates - 解析后的 `gates` 段。
  * @param state - `{ pending, warned, since }`。
+ * @param cwd - 会话工作目录（省略时控制面/文档判定失败，按代码处理）。
  * @returns `{ files, docOnly }`，不该提醒时返回 null。
  */
-export function evaluateReviewGate(events, gates, state) {
+export function evaluateReviewGate(events, gates, state, cwd) {
   if (!gates.review.enabled || state === undefined) return null
   if (!state.pending || state.warned) return null
   const log = events ?? []
@@ -743,23 +777,32 @@ export function evaluateReviewGate(events, gates, state) {
     const name = event.data?.name
     if (name !== 'write' && name !== 'edit') continue
     // 0.8.2/0.10.0：控制面写入（dispatch/ 整树、specs）是主控的合法动作，不会
-    // 让评审失效（既不计 `changes`，也不入 `files`）。
+    // 让评审失效（既不计 `changes`，也不入 `files`）。0.11.0：分类器判定。
     const path = readPath(event.data?.arguments)
-    if (isControlPlanePath(path, controlPlanePatterns)) continue
+    if (classifyPath(path, { cwd, controlPlanePatterns }) === ARTIFACT.CONTROL) continue
     // 与 VerifyGate 的防御口径一致：有失败结果才算没改；没有结果按改过算。
     const message = results.get(event.data?.callId)
     if (message?.isError === true) continue
     changes += 1
     const file = path ?? SHELL_PATH
     if (!files.includes(file)) files.push(file)
-    if (file === SHELL_PATH) documentationOnly = false
-    else if (!matchesPath(file, docPatterns) && !isControlPlanePath(file, controlPlanePatterns)) documentationOnly = false
+    const artifact = classifyPath(file, { cwd, controlPlanePatterns, docPatterns })
+    if (artifact !== ARTIFACT.CONTROL && artifact !== ARTIFACT.DOC) documentationOnly = false
   }
   if (changes === 0) return null
   return { files, docOnly: documentationOnly }
 }
 
-/** 渲染 ReviewGate 文案（`{files}` 最多 3 个，多余追加「等 N 个」）。 */
+/**
+ * 渲染 ReviewGate 文案（`{files}` 最多 3 个，多余追加「等 N 个」）。
+ *
+ * 0.11.0 D4：按 `info.docOnly` 自行选 `{action}`——文档/控制面改动不使代码
+ * 切片失效，给出「机器校验 + 最小复核」；混入代码时给出「重开受影响切片」。
+ * 调用方只传一个模板，不再自己挑文案键。
+ * @param template - `gates.review.text`。
+ * @param info - `evaluateReviewGate` 的返回值（`{ files, docOnly }`）。
+ */
 export function renderReviewGate(template, info) {
-  return template.replaceAll('{files}', formatPaths(info.files))
+  const action = info?.docOnly === true ? REVIEW_DOC_ACTION : REVIEW_ACTION
+  return renderGateText(template, { ...info, action })
 }

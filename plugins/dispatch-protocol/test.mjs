@@ -20,15 +20,15 @@ import { join } from 'node:path'
 import * as plugin from './plugin.mjs'
 import { resolveConfig, DEFAULT_RULES } from './lib/config.mjs'
 import {
-  callTouchesFile, DEFAULT_CONTROL_PLANE_PATTERNS, DEFAULT_PWSH_MUTATION_PATTERN,
-  DEFAULT_PWSH_SHELL_PATTERN, isControlPlanePath, summarizeTurn,
+  ARTIFACT, callTouchesFile, classifyPath, DEFAULT_CONTROL_PLANE_PATTERNS, DEFAULT_PWSH_MUTATION_PATTERN,
+  DEFAULT_PWSH_SHELL_PATTERN, summarizeTurn,
 } from './lib/tool-calls.mjs'
 import {
   DEFAULT_ALLOWLIST, DEFAULT_OVERRIDE_PATH, DEFAULT_WRITE_POLICY_MODE, resolveWritePolicy,
 } from './lib/write-policy.mjs'
 import {
-  analyzeVerification, evaluateReviewGate, evaluateVerifyGate, isRestoreCommand, renderReviewGate,
-  renderVerifyGate, resolveGates,
+  analyzeVerification, DEFAULT_DOC_PATTERNS, evaluateReviewGate, evaluateVerifyGate, isRestoreCommand,
+  renderGateText, renderReviewGate, renderVerifyGate, resolveGates,
 } from './lib/gates.mjs'
 
 // Reminder behaviour is asserted from the harness messages. Decision logging
@@ -133,9 +133,10 @@ test('configured rules replace the default text', () => {
   assert.match(text, /第一条/)
   assert.match(text, /第二条/)
   // The closing paragraph stays: replacing `rules` replaces the numbered rules
-  // only. `先勘察` belongs to default rule 1, so its absence is what proves the
-  // default rules are gone.
-  assert.doesNotMatch(text, /先勘察/)
+  // only. `先勘察后派发` belongs to default rule 1, so its absence is what proves
+  // the default rules are gone (0.11.0: the footer says 「先勘察后实现」, which is
+  // deliberately a different string so this probe stays rule-1-only).
+  assert.doesNotMatch(text, /先勘察后派发/)
   assert.match(text, /白名单与循环批/, 'the closing paragraph is independent of the rules')
 })
 
@@ -197,8 +198,8 @@ test('one closing paragraph states who does what and when a dispatch may be skip
   assert.match(text, /不搞全有或全无/, '0.8.1: the lane split is not all-or-nothing')
   assert.match(text, /默认派给子代理/, 'mechanical volume defaults to children')
   assert.match(text, /拆批/, 'uncertainty must map to batching')
-  assert.match(text, /只读勘察批次/, 'the first batch is a read-only survey')
-  assert.match(text, /可多批陆续派发/, 'several batches are allowed')
+  assert.match(text, /勘察批一律只读/, 'the first batch is a read-only survey')
+  assert.match(text, /可多批陆续派发/, 'several batches are allowed, split along mutually exclusive files')
   assert.match(text, /不许整包留给自己/, 'the fallback-to-self trap must be named')
   assert.match(text, /缺计划类 skill/, 'the missing-plan-skill path must be named')
 
@@ -1510,37 +1511,46 @@ test('control-plane writes are not execution work in the shared counter', () => 
     writeTools: ['write', 'edit'],
     delegationTools: ['subagent', 'subagent_fork', 'workflow'],
     controlPlanePatterns: DEFAULT_ALLOWLIST,
+    cwd: 'G:\\repo',
   })
   assert.equal(summary.writes, 1, '0.9.0: the counter uses the write-policy allowlist')
   assert.deepEqual(summary.files, ['src/a.ts'], 'only the source file is execution work')
   assert.equal(summary.failedWrites, 1, 'a refused write is counted as failed, not as a write')
   assert.equal(summary.delegations, 1)
 
-  const second = summarizeTurn([...events, call(1, 'write', { file_path: 'src/c.ts' })], 1, {})
+  const second = summarizeTurn([...events, call(1, 'write', { file_path: 'src/c.ts' })], 1, { cwd: 'G:\\repo' })
   assert.deepEqual(second.files, ['src/a.ts', 'src/c.ts'],
     'the default control-plane patterns still drop dispatch/ and spec files')
   assert.equal(second.writes, 2)
 
-  const nullOptions = summarizeTurn(events, 1, null)
+  // 0.11.0 D1-6：没有 cwd 时控制面判定失败，写入按执行工作计数（保守方向）。
+  const noCwd = summarizeTurn(events, 1, {})
+  assert.equal(noCwd.writes, 3, 'without cwd the control-plane writes count as execution work')
+
+  const nullOptions = summarizeTurn([
+    call(1, 'write', { file_path: 'src/a.ts' }),
+    call(1, 'subagent', { description: '实现 X' }),
+  ], 1, null)
   assert.equal(nullOptions.writes, 1, 'null options fall back to the defaults instead of throwing')
   assert.equal(nullOptions.delegations, 1)
 })
 
 test('a control-plane edit after a successful verification leaves the verify gate silent', () => {
   const gates = resolveGates({})
+  const cwd = 'G:\\repo'
   const events = [
     call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
     resultWithText(1, 'verify-1', 'exit code: 0'),
     call(2, 'edit', { file_path: 'dispatch/ledger/x.md' }, 'edit-1'),
   ]
 
-  assert.equal(evaluateVerifyGate(events, 2, gates), null,
+  assert.equal(evaluateVerifyGate(events, 2, gates, cwd), null,
     '0.8.2: a control-plane write is not a dirty working-tree change')
 
   // 0.9.1: 新台账目录（dispatch/state/<需求>.md）同样不计脏改动。
   events.push(call(2, 'edit', { file_path: 'dispatch/state/x.md' }, 'edit-state-dir'))
   events.push(call(2, 'present', { file_path: 'report.md' }, 'present-1'))
-  assert.equal(evaluateVerifyGate(events, 2, gates), null,
+  assert.equal(evaluateVerifyGate(events, 2, gates, cwd), null,
     '0.9.1: writing dispatch/state/<需求>.md after the verification does not gate')
 
   const dirtyEvents = [
@@ -1548,7 +1558,7 @@ test('a control-plane edit after a successful verification leaves the verify gat
     call(2, 'edit', { file_path: 'src/a.ts' }, 'edit-2'),
     events[4],
   ]
-  const dirty = evaluateVerifyGate(dirtyEvents, 2, gates)
+  const dirty = evaluateVerifyGate(dirtyEvents, 2, gates, cwd)
   assert.notEqual(dirty, null, 'a source edit after the verification still gates')
   assert.equal(dirty.changes, 1)
   assert.equal(dirty.lastVerify, 'npm test')
@@ -1556,6 +1566,7 @@ test('a control-plane edit after a successful verification leaves the verify gat
 
 test('a control-plane write after a review does not invalidate it', () => {
   const gates = resolveGates({})
+  const cwd = 'G:\\repo'
   const state = { pending: true, warned: false, since: 0 }
   const events = [
     call(2, 'write', { file_path: 'dispatch/ledger/x.md' }, 'write-1'),
@@ -1563,11 +1574,11 @@ test('a control-plane write after a review does not invalidate it', () => {
     call(2, 'edit', { file_path: 'dispatch/state.md' }, 'write-3'),
   ]
 
-  assert.equal(evaluateReviewGate(events, gates, state), null,
+  assert.equal(evaluateReviewGate(events, gates, state, cwd), null,
     '0.8.2/0.9.1: replaying a ledger file is a legal control-plane action')
 
   events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-4'))
-  const review = evaluateReviewGate(events, gates, state)
+  const review = evaluateReviewGate(events, gates, state, cwd)
   assert.notEqual(review, null)
   assert.deepEqual(review.files, ['src/a.ts'], 'the ledger path is not listed as a review-dirty file')
 })
@@ -1578,20 +1589,22 @@ test('controlPlanePatterns is configurable on the gate sections and validated', 
   assert.deepEqual(gates.verify.controlPlanePatterns, ['dispatch/notes/'], 'verify carries the same list')
   assert.deepEqual(gates.review.controlPlanePatterns, ['dispatch/notes/'], 'review carries the same list')
 
+  const cwd = 'G:\\repo'
   const state = { pending: true, warned: false, since: 0 }
   const reviewEvents = [call(2, 'edit', { file_path: 'dispatch/notes/y.md' }, 'write-1')]
-  assert.equal(evaluateReviewGate(reviewEvents, gates, state), null, 'the custom fragment is exempt')
+  assert.equal(evaluateReviewGate(reviewEvents, gates, state, cwd), null, 'the custom fragment is exempt')
   reviewEvents.push(call(2, 'edit', { file_path: 'src/a.ts' }, 'write-2'))
-  assert.notEqual(evaluateReviewGate(reviewEvents, gates, state), null, 'other paths still count')
+  assert.notEqual(evaluateReviewGate(reviewEvents, gates, state, cwd), null, 'other paths still count')
 
-  assert.equal(isControlPlanePath('dispatch\\ledger\\x.md'), true, 'backslashes are normalized')
-  assert.equal(isControlPlanePath('src\\a.ts'), false)
-  assert.equal(isControlPlanePath('dispatch/state/x.md'), true,
+  assert.equal(classifyPath('dispatch\\ledger\\x.md', { cwd }), ARTIFACT.CONTROL,
+    'backslashes are normalized')
+  assert.equal(classifyPath('src\\a.ts', { cwd }), ARTIFACT.CODE)
+  assert.equal(classifyPath('dispatch/state/x.md', { cwd }), ARTIFACT.CONTROL,
     '0.9.1: the per-requirement ledger directory is the control plane')
-  assert.equal(isControlPlanePath('dispatch/state.md'), true,
+  assert.equal(classifyPath('dispatch/state.md', { cwd }), ARTIFACT.CONTROL,
     '0.9.1: the legacy single-file ledger stays control plane (read-only)')
-  assert.equal(isControlPlanePath('src/app/dispatch/state.ts'), true,
-    '0.10.0 C1: the coarse substring match also exempts a same-named source path')
+  assert.equal(classifyPath('src/app/dispatch/state.ts', { cwd }), ARTIFACT.CODE,
+    '0.11.0 A1: a same-named source path is code, not control plane')
   assert.deepEqual(DEFAULT_CONTROL_PLANE_PATTERNS,
     ['dispatch/', 'docs/superpowers/specs/'], '0.10.0 C1: aligned with the write-policy allowlist')
   assert.deepEqual(DEFAULT_CONTROL_PLANE_PATTERNS, DEFAULT_ALLOWLIST,
@@ -2052,6 +2065,7 @@ test('the observation shell tier drops git commit while the mutation tier keeps 
 
 test('C1: dispatch/ subtree writes after a successful verification do not gate', () => {
   const gates = resolveGates({})
+  const cwd = 'G:\\repo'
   const events = [
     call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
     resultWithText(1, 'verify-1', 'exit code: 0'),
@@ -2062,14 +2076,15 @@ test('C1: dispatch/ subtree writes after a successful verification do not gate',
     call(2, 'present', { file_path: 'report.md' }, 'present-1'),
   ]
 
-  assert.equal(evaluateVerifyGate(events, 2, gates), null,
+  assert.equal(evaluateVerifyGate(events, 2, gates, cwd), null,
     'C1: dispatch/override.json and dispatch/recon/* are control-plane writes')
-  assert.equal(analyzeVerification(events, gates.verify).changes, 0,
+  assert.equal(analyzeVerification(events, gates.verify, cwd).changes, 0,
     'C1: control-plane writes are not counted as dirty changes')
 })
 
 test('C2: a docs-only change after the last verification skips the gate, code still gates', () => {
   const gates = resolveGates({})
+  const cwd = 'G:\\repo'
   const prefix = [
     call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
     resultWithText(1, 'verify-1', 'exit code: 0'),
@@ -2080,7 +2095,7 @@ test('C2: a docs-only change after the last verification skips the gate, code st
     result(2, 'write-1', false),
     call(2, 'present', { file_path: 'report.md' }, 'present-1'),
   ]
-  assert.equal(evaluateVerifyGate(docs, 2, gates), null, 'C2: AGENTS.md is documentation')
+  assert.equal(evaluateVerifyGate(docs, 2, gates, cwd), null, 'C2: AGENTS.md is documentation')
 
   const code = [
     ...docs.slice(0, 2),
@@ -2088,7 +2103,7 @@ test('C2: a docs-only change after the last verification skips the gate, code st
     result(2, 'write-1', false),
     call(2, 'present', { file_path: 'report.md' }, 'present-1'),
   ]
-  const state = evaluateVerifyGate(code, 2, gates)
+  const state = evaluateVerifyGate(code, 2, gates, cwd)
   assert.notEqual(state, null, 'C2: a code write still gates')
   assert.equal(state.docOnly, false)
   const text = renderVerifyGate(gates.verify.text, state)
@@ -2101,7 +2116,7 @@ test('C2: a docs-only change after the last verification skips the gate, code st
     result(1, 'write-1', false),
     call(1, 'present', { file_path: 'report.md' }, 'present-1'),
   ]
-  assert.equal(evaluateVerifyGate(never, 1, gates), null,
+  assert.equal(evaluateVerifyGate(never, 1, gates, cwd), null,
     'C2: the never-verified branch exempts documentation too')
 })
 
@@ -2154,6 +2169,7 @@ test('C3: restoring the working tree to HEAD is not a dirty change', () => {
     'C3a: several neutral segments after a restore stay neutral')
 
   const gates = resolveGates({})
+  const cwd = 'G:\\repo'
   const events = [
     call(1, 'write', { file_path: 'src/a.ts' }, 'write-1'),
     result(1, 'write-1', false),
@@ -2161,7 +2177,7 @@ test('C3: restoring the working tree to HEAD is not a dirty change', () => {
     result(2, 'restore-1', false),
     call(2, 'present', { file_path: 'report.md' }, 'present-1'),
   ]
-  const state = evaluateVerifyGate(events, 2, gates)
+  const state = evaluateVerifyGate(events, 2, gates, cwd)
   assert.notEqual(state, null, 'the earlier code write still gates')
   assert.equal(state.changes, 1, 'C3: the restore adds no dirty change')
   assert.equal(state.files.includes('<shell>'), false, 'C3: the restore is not listed as a shell change')
@@ -2175,32 +2191,36 @@ test('C3: restoring the working tree to HEAD is not a dirty change', () => {
     call(2, 'pwsh', { command: 'git checkout -- src/a.ts; git status --porcelain' }, 'restore-2'),
     result(2, 'restore-2', false),
   ]
-  const c3a = analyzeVerification(afterVerify, gates.verify)
+  const c3a = analyzeVerification(afterVerify, gates.verify, cwd)
   assert.equal(c3a.changes, 0, 'C3a: the restore-plus-status call adds no dirty change')
   assert.equal(c3a.files.includes('<shell>'), false, 'C3a: it is not listed as a shell change')
   assert.equal(c3a.dirty, false, 'C3a: a successful verification is still the latest state')
 })
 
-test('C4: a docs-only write after the review swaps in the textDocOnly guidance', () => {
+test('C4: a docs-only write after the review renders the doc-only action', () => {
   const gates = resolveGates({})
+  const cwd = 'G:\\repo'
   const state = { pending: true, warned: false, since: 0 }
   const events = [
     call(2, 'write', { file_path: 'README.md' }, 'write-1'),
     call(2, 'edit', { file_path: 'dispatch/ledger/x.md' }, 'write-2'),
   ]
-  const review = evaluateReviewGate(events, gates, state)
+  const review = evaluateReviewGate(events, gates, state, cwd)
   assert.notEqual(review, null)
   assert.equal(review.docOnly, true, 'C4: markdown plus a control-plane ledger is documentation')
   assert.deepEqual(review.files, ['README.md'], 'the control-plane write is not listed')
-  const text = renderReviewGate(gates.review.textDocOnly, review)
-  assert.match(text, /不必重开代码评审/, 'C4: the doc-only text is chosen')
+  const text = renderReviewGate(gates.review.text, review)
+  assert.match(text, /不必重开代码评审/, 'C4: the doc-only action is chosen')
+  assert.doesNotMatch(text, /重开受影响切片/, 'C4: the code action must not leak into a doc-only change')
   assert.match(text, /README\.md/, 'C5: the doc-only text names the file')
 
   events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-3'))
-  const mixed = evaluateReviewGate(events, gates, state)
+  const mixed = evaluateReviewGate(events, gates, state, cwd)
   assert.equal(mixed.docOnly, false, 'C4: a mixed batch is not doc-only')
-  assert.match(renderReviewGate(gates.review.text, mixed), /src\/a\.ts/,
+  const mixedText = renderReviewGate(gates.review.text, mixed)
+  assert.match(mixedText, /src\/a\.ts/,
     'C4/C5: the original text keeps the {files} placeholder filled')
+  assert.match(mixedText, /重开受影响切片/, 'C4: a mixed batch asks for a re-review')
 })
 
 test('C4: the plugin picks the doc-only review text and logs docOnly', () => {
@@ -2213,7 +2233,7 @@ test('C4: the plugin picks the doc-only review text and logs docOnly', () => {
       log, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
     })
 
-    const parent = h.main('session-review-doc', events)
+    const parent = h.main('session-review-doc', events, {}, 'session-review-doc', dir)
     h.created(parent)
     h.created(h.child('review-doc', 'session-review-doc', '只读评审：diff'))
     h.ended({ childId: 'review-doc', stopReason: 'completed' })
@@ -2222,6 +2242,7 @@ test('C4: the plugin picks the doc-only review text and logs docOnly', () => {
 
     assert.equal(parent.messages.length, 1)
     assert.match(parent.messages[0].text, /不必重开代码评审/)
+    assert.doesNotMatch(parent.messages[0].text, /重开受影响切片/)
     assert.match(parent.messages[0].text, /docs\/agent\/notes\.md/)
     const row = readRows(log).find(entry => entry.kind === 'gate')
     assert.equal(row.gate, 'review')
@@ -2260,18 +2281,16 @@ test('0.10.0 §4-6: the new gate settings are validated and the old config still
     /dispatch-protocol: gates\.verify\.docPatterns/)
   assert.throws(() => resolveGates({ verify: { docPatterns: ['ok', 42] } }),
     /dispatch-protocol: gates\.verify\.docPatterns/)
-  assert.throws(() => resolveGates({ review: { textDocOnly: 42 } }),
-    /dispatch-protocol: gates\.review\.textDocOnly/)
-  assert.throws(() => resolveGates({ review: { textDocOnly: '  ' } }),
-    /dispatch-protocol: gates\.review\.textDocOnly/)
 
   const gates = resolveGates({})
   assert.deepEqual(gates.verify.docPatterns,
     ['.md', '.mdx', 'docs/', 'dispatch/', 'LICENSE', '.gitignore', '.gitattributes'])
   assert.deepEqual(gates.review.docPatterns, gates.verify.docPatterns, 'review reuses the same doc list')
-  assert.match(gates.review.textDocOnly, /不必重开代码评审/)
+  assert.match(gates.review.text, /\{action\}/, '0.11.0 D4: review has a single {action} template')
+  assert.equal('textDocOnly' in gates.review, false, '0.11.0 D3: the textDocOnly key is gone')
   assert.match(gates.verify.text, /\{files\}/)
   assert.match(gates.verify.text, /\{kind\}/)
+  assert.match(gates.verify.text, /\{action\}/)
 
   // 旧配置（没有新键）仍加载，旧自定义文案不被新占位破坏。
   const legacy = resolveGates({
@@ -2280,6 +2299,228 @@ test('0.10.0 §4-6: the new gate settings are validated and the old config still
   })
   assert.equal(renderVerifyGate(legacy.verify.text, { changes: 1, lastVerify: null }), '旧文案 1/从未验证')
   assert.equal(renderReviewGate(legacy.review.text, { files: ['a.md'] }), '旧文案 a.md')
+})
+
+// ---------------------------------------------------------------------------
+// 0.11.0 — 产物分类器（spec D1–D3）：一个分类器，闸门/观测只消费它的结果
+
+test('D1: the classifier maps paths to control-plane, doc, code and unknown', () => {
+  const cwd = 'G:\\repo'
+  const docs = { cwd, docPatterns: DEFAULT_DOC_PATTERNS }
+
+  assert.equal(classifyPath('dispatch/override.json', docs), ARTIFACT.CONTROL,
+    'dispatch/override.json under the project cwd is the control plane')
+  assert.equal(classifyPath('src/app/dispatch/state.ts', docs), ARTIFACT.CODE,
+    'A1: a same-named source path is code, not the control plane')
+  assert.equal(classifyPath('D:\\proj\\dispatch\\x.md', { cwd: 'D:\\proj', docPatterns: DEFAULT_DOC_PATTERNS }),
+    ARTIFACT.CONTROL, 'an absolute path inside cwd is relativized (case-insensitive)')
+  assert.equal(classifyPath('dispatch/x.md', { docPatterns: DEFAULT_DOC_PATTERNS }), ARTIFACT.CODE,
+    'D1-6: without cwd the control-plane verdict fails (conservative)')
+  assert.equal(classifyPath('docs/agent/a.md', docs), ARTIFACT.DOC)
+  assert.equal(classifyPath('docs/agent/a.ts', docs), ARTIFACT.CODE,
+    'D1-4: the extension wins over the docs/ prefix')
+  assert.equal(classifyPath('README.md', docs), ARTIFACT.DOC)
+  assert.equal(classifyPath('LICENSE', docs), ARTIFACT.DOC)
+  assert.equal(classifyPath('LICENSE-MIT', docs), ARTIFACT.DOC, 'D1-4: a root name prefix is documentation')
+  assert.equal(classifyPath('a/LICENSE-BACKUP', docs), ARTIFACT.CODE,
+    'D1-4: a nested LICENSE-BACKUP is not documentation')
+  assert.equal(classifyPath('G:\\repo\\dispatch\\ledger\\x.md', docs), ARTIFACT.CONTROL,
+    'an absolute in-cwd path with backslashes is relativized')
+  assert.equal(classifyPath('', docs), ARTIFACT.UNKNOWN, 'a missing path is unknown')
+  assert.equal(classifyPath(undefined, docs), ARTIFACT.UNKNOWN)
+})
+
+// D1-2a — 路径段归一（折叠 `.`/`..`、丢弃空段）：`..` 不得成为穿越绕过。
+// 每条断言独立成测，便于失败时直接定位到具体形态。
+
+test('D1-2a(a): a traversal out of dispatch/ is code, not control plane', () => {
+  assert.equal(classifyPath('dispatch/../src/x.ts', { cwd: 'G:\\repo', docPatterns: DEFAULT_DOC_PATTERNS }),
+    ARTIFACT.CODE, 'folding turns it into src/x.ts, which is code')
+})
+
+test('D1-2a(b): leading and intermediate dot segments are folded', () => {
+  assert.equal(classifyPath('./dispatch/./state.md', { cwd: 'G:\\repo', docPatterns: DEFAULT_DOC_PATTERNS }),
+    ARTIFACT.CONTROL, 'dot segments normalize to dispatch/state.md')
+})
+
+test('D1-2a(c): folding into dispatch/ is the control plane', () => {
+  assert.equal(classifyPath('src/../dispatch/recon/a.md', { cwd: 'G:\\repo', docPatterns: DEFAULT_DOC_PATTERNS }),
+    ARTIFACT.CONTROL, 'src/../dispatch normalizes to dispatch/')
+})
+
+test('D1-2a(d): a relative path escaping the cwd root is untrusted and code', () => {
+  assert.equal(classifyPath('../dispatch/x.md', { cwd: 'G:\\repo', docPatterns: DEFAULT_DOC_PATTERNS }),
+    ARTIFACT.CODE, 'escaping .. is untrusted, so no control-plane/doc verdict is attempted')
+})
+
+test('D1-2a(e): a drive-rooted traversal keeps the drive and folds the rest', () => {
+  assert.equal(classifyPath('D:\\proj\\dispatch\\..\\src\\x.ts', { cwd: 'D:\\proj', docPatterns: DEFAULT_DOC_PATTERNS }),
+    ARTIFACT.CODE, 'D:/proj/dispatch/../src/x.ts relativizes to src/x.ts')
+})
+
+test('D1-2a(f): repeated slashes produce dropped segments', () => {
+  assert.equal(classifyPath('dispatch//x.md', { cwd: 'G:\\repo', docPatterns: DEFAULT_DOC_PATTERNS }),
+    ARTIFACT.CONTROL, 'the empty segment is dropped and dispatch/x.md stays control plane')
+})
+
+test('D1-2a(g): a traversal write cannot bypass the verify gate', () => {
+  const gates = resolveGates({})
+  const cwd = 'G:\\repo'
+  const events = [
+    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+    resultWithText(1, 'verify-1', 'exit code: 0'),
+    call(2, 'write', { file_path: 'dispatch/../src/x.ts' }, 'write-1'),
+    result(2, 'write-1', false),
+    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+  ]
+  const state = evaluateVerifyGate(events, 2, gates, cwd)
+  assert.notEqual(state, null, 'the folded src path is dirty code, so the gate fires')
+  assert.equal(state.docOnly, false, 'the traversal path is not documentation/control plane')
+  assert.deepEqual(state.files, ['dispatch/../src/x.ts'], 'the raw path is shown, but classified as code')
+})
+
+test('D2/D3: the verify gate consumes the classifier with the session cwd', () => {
+  const gates = resolveGates({})
+  const cwd = 'G:\\repo'
+  const prefix = [
+    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+    resultWithText(1, 'verify-1', 'exit code: 0'),
+  ]
+  const docs = [
+    ...prefix,
+    call(2, 'write', { file_path: 'AGENTS.md' }, 'write-1'),
+    result(2, 'write-1', false),
+    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+  ]
+  assert.equal(analyzeVerification(docs, gates.verify, cwd).docOnly, true,
+    'D3: AGENTS.md is documentation when cwd is known')
+  assert.equal(evaluateVerifyGate(docs, 2, gates, cwd), null,
+    'D2: a docs-only change after the verification is silent with cwd')
+
+  // A1 回归（0.11.0 最重要的一条）：0.10.0 的子串口径把 src/**/dispatch/**
+  // 连带豁免，本批起必须触发。
+  const code = [
+    ...prefix,
+    call(2, 'write', { file_path: 'src/app/dispatch/x.ts' }, 'write-2'),
+    result(2, 'write-2', false),
+    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+  ]
+  const state = evaluateVerifyGate(code, 2, gates, cwd)
+  assert.notEqual(state, null, 'A1: src/app/dispatch/x.ts must trigger the verify gate')
+  assert.equal(state.docOnly, false, 'A1: the dirty entry is code, not documentation')
+  assert.deepEqual(state.files, ['src/app/dispatch/x.ts'])
+
+  // D1-6 / spec §2.4：没有 cwd 时分类退化为代码 —— 文档也要触发（保守）。
+  assert.equal(analyzeVerification(docs, gates.verify).docOnly, false,
+    'D1-6: without cwd even AGENTS.md is not proven documentation')
+  assert.notEqual(evaluateVerifyGate(docs, 2, gates), null,
+    'D1-6: without cwd the gate stays conservative and triggers')
+})
+
+test('D3: the review gate treats src/**/dispatch/** as code and docs as documentation', () => {
+  const gates = resolveGates({})
+  const cwd = 'G:\\repo'
+  const state = { pending: true, warned: false, since: 0 }
+
+  const docReview = evaluateReviewGate(
+    [call(2, 'write', { file_path: 'AGENTS.md' }, 'write-1')], gates, state, cwd,
+  )
+  assert.equal(docReview.docOnly, true, 'D3: a doc write after the review is documentation')
+  assert.deepEqual(docReview.files, ['AGENTS.md'])
+
+  const codeReview = evaluateReviewGate(
+    [call(2, 'write', { file_path: 'src/app/dispatch/x.ts' }, 'write-2')], gates, state, cwd,
+  )
+  assert.equal(codeReview.docOnly, false, 'A1: a same-named source path invalidates the review')
+
+  assert.equal(evaluateReviewGate(
+    [call(2, 'write', { file_path: 'dispatch/ledger/x.md' }, 'write-3')], gates, state, cwd,
+  ), null, 'D3: control-plane writes still do not invalidate the review')
+})
+
+test('D2: the plugin passes the session cwd to the verify gate (A1 end-to-end)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-cwd-'))
+  try {
+    const events = []
+    const h = harness()
+    plugin.apply(h.ctx, { log: false, checkpoint: { enabled: false } })
+    const parent = h.main('session-gate-cwd', events, {}, 'session-gate-cwd', dir)
+    h.created(parent)
+
+    events.push(
+      call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+      resultWithText(1, 'verify-1', 'exit code: 0'),
+    )
+    events.push(
+      call(2, 'write', { file_path: 'AGENTS.md' }, 'write-doc'),
+      result(2, 'write-doc', false),
+      call(2, 'present', { file_path: 'report.md' }, 'present-doc'),
+    )
+    h.turnStopping(parent, 2)
+    assert.equal(parent.messages.length, 0, 'a docs-only closure is silent when the session cwd is known')
+
+    events.push(
+      call(3, 'write', { file_path: 'src/app/dispatch/x.ts' }, 'write-code'),
+      result(3, 'write-code', false),
+      call(3, 'present', { file_path: 'report.md' }, 'present-code'),
+    )
+    h.turnStopping(parent, 3)
+    assert.equal(parent.messages.length, 1, 'A1: the plugin still gates a src/**/dispatch/** change')
+    assert.match(parent.messages[0].text, /src\/app\/dispatch\/x\.ts/)
+    assert.match(parent.messages[0].text, /先跑一次集成命令并留存退出码/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// 0.11.0 — 单一文案模型（spec D4）：一个模板 + 一个闸门给定的 {action}
+
+test('D4-1: the verify default ends in {action} and renders the integration action', () => {
+  const gates = resolveGates({})
+  assert.match(gates.verify.text, /\{action\}$/, 'the default template ends in the action placeholder')
+  const text = renderVerifyGate(gates.verify.text, {
+    changes: 1, dirty: true, docOnly: false, lastVerify: null, files: ['src/a.ts'],
+  })
+  assert.match(text, /src\/a\.ts（代码改动）/, 'the file and kind placeholders still render')
+  assert.match(text, /先跑一次集成命令并留存退出码，再收口。/,
+    'D4: the verify action is the fixed integration command')
+})
+
+test('D4-2: a doc-only review renders the machine-check action, never the re-review one', () => {
+  const gates = resolveGates({})
+  assert.match(gates.review.text, /\{action\}$/, 'the default template ends in the action placeholder')
+  const text = renderReviewGate(gates.review.text, { files: ['AGENTS.md'], docOnly: true })
+  assert.match(text, /不必重开代码评审/, 'D4: a doc-only change does not invalidate the code slice')
+  assert.match(text, /机器校验（路径\/链接\/括号\/术语）/, 'D4: it asks for machine checks instead')
+  assert.doesNotMatch(text, /重开受影响切片/, 'D4: the code action must not leak in')
+  assert.match(text, /AGENTS\.md/)
+})
+
+test('D4-3: a code review renders the re-review action, never the machine-check one', () => {
+  const gates = resolveGates({})
+  const text = renderReviewGate(gates.review.text, { files: ['src/a.ts'], docOnly: false })
+  assert.match(text, /评审已失效：重开受影响切片再收口。/, 'D4: code changes re-open the affected slice')
+  assert.doesNotMatch(text, /不必重开代码评审/, 'D4: the doc-only action must not leak in')
+})
+
+test('D4-4: a custom template may place {action}; old and unknown placeholders survive', () => {
+  const gates = resolveGates({
+    verify: { text: 'V：{files}（{kind}）{action} [changes={changes}; last={lastVerify}]' },
+    review: { text: 'R：{files} {action}' },
+  })
+  assert.equal(renderVerifyGate(gates.verify.text, {
+    changes: 2, lastVerify: 'npm test', files: ['src/a.ts'],
+  }), 'V：src/a.ts（代码）先跑一次集成命令并留存退出码，再收口。 [changes=2; last=npm test]',
+  'D4: {action}, {changes} and {lastVerify} render in a custom template')
+  assert.equal(renderReviewGate(gates.review.text, { files: ['a.md'], docOnly: true }),
+    'R：a.md 这类改动不使代码切片失效：机器校验（路径/链接/括号/术语）即可，不必重开代码评审；若改的正是刚评审的那份文档，最小复核该文档即可。',
+    'D4: the doc-only action fills {action} in a custom review template')
+
+  // 未知占位原样保留；没注入 action 时 {action} 不被抹掉。
+  assert.equal(renderGateText('{files} {oops}', { files: ['a.ts'] }), 'a.ts {oops}')
+  assert.equal(renderGateText('{action}', {}), '{action}')
+  assert.equal(renderGateText('{action}', { action: 'X' }), 'X')
 })
 
 // ---------------------------------------------------------------------------
