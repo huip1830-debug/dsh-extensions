@@ -26,7 +26,10 @@ import {
 import {
   DEFAULT_ALLOWLIST, DEFAULT_OVERRIDE_PATH, DEFAULT_WRITE_POLICY_MODE, resolveWritePolicy,
 } from './lib/write-policy.mjs'
-import { evaluateReviewGate, evaluateVerifyGate, resolveGates } from './lib/gates.mjs'
+import {
+  analyzeVerification, evaluateReviewGate, evaluateVerifyGate, isRestoreCommand, renderReviewGate,
+  renderVerifyGate, resolveGates,
+} from './lib/gates.mjs'
 
 // Reminder behaviour is asserted from the harness messages. Decision logging
 // stays off so a test run never appends to the real `%TEMP%` decision log; the
@@ -1587,10 +1590,12 @@ test('controlPlanePatterns is configurable on the gate sections and validated', 
     '0.9.1: the per-requirement ledger directory is the control plane')
   assert.equal(isControlPlanePath('dispatch/state.md'), true,
     '0.9.1: the legacy single-file ledger stays control plane (read-only)')
-  assert.equal(isControlPlanePath('src/app/dispatch/state.ts'), false,
-    '0.9.1: the trailing slash keeps a same-named source file out of the exemption')
+  assert.equal(isControlPlanePath('src/app/dispatch/state.ts'), true,
+    '0.10.0 C1: the coarse substring match also exempts a same-named source path')
   assert.deepEqual(DEFAULT_CONTROL_PLANE_PATTERNS,
-    ['dispatch/state.md', 'dispatch/state/', 'dispatch/ledger/', 'docs/superpowers/specs/'])
+    ['dispatch/', 'docs/superpowers/specs/'], '0.10.0 C1: aligned with the write-policy allowlist')
+  assert.deepEqual(DEFAULT_CONTROL_PLANE_PATTERNS, DEFAULT_ALLOWLIST,
+    '0.10.0 C1: the gate list and the write-guard list are the same value')
 
   assert.throws(() => resolveGates({ controlPlanePatterns: [] }), /dispatch-protocol: gates\.controlPlanePatterns/)
   assert.throws(() => resolveGates({ controlPlanePatterns: ['ok', null] }), /dispatch-protocol: gates\.controlPlanePatterns/)
@@ -2040,6 +2045,241 @@ test('the observation shell tier drops git commit while the mutation tier keeps 
 
   // The checkpoint tier still treats a committing child as execution-class.
   assert.equal(callTouchesFile('pwsh', commit), true)
+})
+
+// ---------------------------------------------------------------------------
+// 0.10.0 — 守卫按改动类型分级（spec §2 C1–C5 / §4 断言 1–6）
+
+test('C1: dispatch/ subtree writes after a successful verification do not gate', () => {
+  const gates = resolveGates({})
+  const events = [
+    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+    resultWithText(1, 'verify-1', 'exit code: 0'),
+    call(2, 'write', { file_path: 'dispatch/override.json' }, 'write-1'),
+    result(2, 'write-1', false),
+    call(2, 'write', { file_path: 'dispatch/recon/a.md' }, 'write-2'),
+    result(2, 'write-2', false),
+    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+  ]
+
+  assert.equal(evaluateVerifyGate(events, 2, gates), null,
+    'C1: dispatch/override.json and dispatch/recon/* are control-plane writes')
+  assert.equal(analyzeVerification(events, gates.verify).changes, 0,
+    'C1: control-plane writes are not counted as dirty changes')
+})
+
+test('C2: a docs-only change after the last verification skips the gate, code still gates', () => {
+  const gates = resolveGates({})
+  const prefix = [
+    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+    resultWithText(1, 'verify-1', 'exit code: 0'),
+  ]
+  const docs = [
+    ...prefix,
+    call(2, 'write', { file_path: 'AGENTS.md' }, 'write-1'),
+    result(2, 'write-1', false),
+    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+  ]
+  assert.equal(evaluateVerifyGate(docs, 2, gates), null, 'C2: AGENTS.md is documentation')
+
+  const code = [
+    ...docs.slice(0, 2),
+    call(2, 'write', { file_path: 'server/src/x.ts' }, 'write-1'),
+    result(2, 'write-1', false),
+    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+  ]
+  const state = evaluateVerifyGate(code, 2, gates)
+  assert.notEqual(state, null, 'C2: a code write still gates')
+  assert.equal(state.docOnly, false)
+  const text = renderVerifyGate(gates.verify.text, state)
+  assert.match(text, /server\/src\/x\.ts/, 'C5: the text names the dirty file')
+  assert.match(text, /代码改动/, 'C5: the text names the change kind')
+
+  // C2：「从未跑过」分支同样适用——只有文档时静默。
+  const never = [
+    call(1, 'write', { file_path: 'AGENTS.md' }, 'write-1'),
+    result(1, 'write-1', false),
+    call(1, 'present', { file_path: 'report.md' }, 'present-1'),
+  ]
+  assert.equal(evaluateVerifyGate(never, 1, gates), null,
+    'C2: the never-verified branch exempts documentation too')
+})
+
+test('C2 boundary: a write without a path is not documentation and still gates', () => {
+  const gates = resolveGates({})
+  const events = [
+    call(1, 'write', {}, 'write-1'),
+    result(1, 'write-1', false),
+    call(1, 'present', { file_path: 'report.md' }, 'present-1'),
+  ]
+
+  const state = evaluateVerifyGate(events, 1, gates)
+  assert.notEqual(state, null, 'C2: a path-less write cannot be proven documentation')
+  assert.equal(state.docOnly, false)
+  assert.deepEqual(state.files, ['<shell>'], 'C2: an unlocatable dirty entry is <shell>')
+})
+
+test('C3: restoring the working tree to HEAD is not a dirty change', () => {
+  assert.equal(isRestoreCommand('git checkout -- a.ts'), true)
+  assert.equal(isRestoreCommand('git -C "G:\\repo" checkout -- a.ts b.ts'), true, 'git -C is skipped')
+  assert.equal(isRestoreCommand('git restore x'), true)
+  assert.equal(isRestoreCommand('git restore src/a.ts docs/b.md'), true)
+
+  assert.equal(isRestoreCommand('git checkout main'), false)
+  assert.equal(isRestoreCommand('git checkout -b y'), false)
+  assert.equal(isRestoreCommand('git restore --source=HEAD~1 a.ts'), false)
+  assert.equal(isRestoreCommand('git restore -s HEAD~1 a.ts'), false, 'the -s shorthand switches the tree')
+  assert.equal(isRestoreCommand('git checkout --'), false, 'no path means nothing was restored')
+  assert.equal(isRestoreCommand('git checkout -q -- a.ts'), false, 'an unmodelled option stays dirty')
+  assert.equal(isRestoreCommand('git checkout -- a.ts; Remove-Item b.ts'), false,
+    'a chained mutation is not a restore')
+  assert.equal(isRestoreCommand('git status --short'), false)
+  assert.equal(isRestoreCommand(''), false)
+  assert.equal(isRestoreCommand(undefined), false)
+
+  // 0.10.0 C3a：还原段 + 中性只读段（上游真实误报场景）不再按脏处理。
+  assert.equal(isRestoreCommand('git checkout -- a.ts; git status --porcelain'), true,
+    'C3a: a restore followed by a status self-check is still a restore')
+  assert.equal(isRestoreCommand('git -C repo restore src/a.ts && git diff --stat'), true,
+    'C3a: git -C restore plus a read-only diff is still a restore')
+  assert.equal(isRestoreCommand('git checkout -- a.ts; git log --oneline -3'), true,
+    'C3a: a read-only log segment is neutral')
+  assert.equal(isRestoreCommand('git checkout -- a.ts > out.txt'), false,
+    'C3a: a redirect may write to disk')
+  assert.equal(isRestoreCommand('git checkout -- a.ts; git add -A'), false,
+    'C3a: a non-neutral segment keeps the whole command dirty')
+  assert.equal(isRestoreCommand('git status'), false,
+    'C3a: read-only segments alone never make a restore')
+  assert.equal(isRestoreCommand('git checkout -- a.ts; git status; git diff --stat'), true,
+    'C3a: several neutral segments after a restore stay neutral')
+
+  const gates = resolveGates({})
+  const events = [
+    call(1, 'write', { file_path: 'src/a.ts' }, 'write-1'),
+    result(1, 'write-1', false),
+    call(2, 'pwsh', { command: 'git checkout -- src/a.ts' }, 'restore-1'),
+    result(2, 'restore-1', false),
+    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+  ]
+  const state = evaluateVerifyGate(events, 2, gates)
+  assert.notEqual(state, null, 'the earlier code write still gates')
+  assert.equal(state.changes, 1, 'C3: the restore adds no dirty change')
+  assert.equal(state.files.includes('<shell>'), false, 'C3: the restore is not listed as a shell change')
+
+  // C3a 端到端：`checkout -- …; status` 作为 pwsh 事件也不得算脏。
+  const afterVerify = [
+    call(1, 'write', { file_path: 'src/a.ts' }, 'write-2'),
+    result(1, 'write-2', false),
+    call(1, 'pwsh', { command: 'npm test' }, 'verify-2'),
+    resultWithText(1, 'verify-2', 'exit code: 0'),
+    call(2, 'pwsh', { command: 'git checkout -- src/a.ts; git status --porcelain' }, 'restore-2'),
+    result(2, 'restore-2', false),
+  ]
+  const c3a = analyzeVerification(afterVerify, gates.verify)
+  assert.equal(c3a.changes, 0, 'C3a: the restore-plus-status call adds no dirty change')
+  assert.equal(c3a.files.includes('<shell>'), false, 'C3a: it is not listed as a shell change')
+  assert.equal(c3a.dirty, false, 'C3a: a successful verification is still the latest state')
+})
+
+test('C4: a docs-only write after the review swaps in the textDocOnly guidance', () => {
+  const gates = resolveGates({})
+  const state = { pending: true, warned: false, since: 0 }
+  const events = [
+    call(2, 'write', { file_path: 'README.md' }, 'write-1'),
+    call(2, 'edit', { file_path: 'dispatch/ledger/x.md' }, 'write-2'),
+  ]
+  const review = evaluateReviewGate(events, gates, state)
+  assert.notEqual(review, null)
+  assert.equal(review.docOnly, true, 'C4: markdown plus a control-plane ledger is documentation')
+  assert.deepEqual(review.files, ['README.md'], 'the control-plane write is not listed')
+  const text = renderReviewGate(gates.review.textDocOnly, review)
+  assert.match(text, /不必重开代码评审/, 'C4: the doc-only text is chosen')
+  assert.match(text, /README\.md/, 'C5: the doc-only text names the file')
+
+  events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-3'))
+  const mixed = evaluateReviewGate(events, gates, state)
+  assert.equal(mixed.docOnly, false, 'C4: a mixed batch is not doc-only')
+  assert.match(renderReviewGate(gates.review.text, mixed), /src\/a\.ts/,
+    'C4/C5: the original text keeps the {files} placeholder filled')
+})
+
+test('C4: the plugin picks the doc-only review text and logs docOnly', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-review-doc-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const events = []
+    const h = harness()
+    plugin.apply(h.ctx, {
+      log, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+    })
+
+    const parent = h.main('session-review-doc', events)
+    h.created(parent)
+    h.created(h.child('review-doc', 'session-review-doc', '只读评审：diff'))
+    h.ended({ childId: 'review-doc', stopReason: 'completed' })
+    events.push(call(2, 'write', { file_path: 'docs/agent/notes.md' }, 'write-1'), result(2, 'write-1', false))
+    h.turnStopping(parent, 2)
+
+    assert.equal(parent.messages.length, 1)
+    assert.match(parent.messages[0].text, /不必重开代码评审/)
+    assert.match(parent.messages[0].text, /docs\/agent\/notes\.md/)
+    const row = readRows(log).find(entry => entry.kind === 'gate')
+    assert.equal(row.gate, 'review')
+    assert.equal(row.docOnly, true, 'C4: the decision log carries docOnly')
+    assert.deepEqual(row.files, ['docs/agent/notes.md'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('C5: the gate text caps files at three, counts the rest and names the kind', () => {
+  const gates = resolveGates({})
+  const info = {
+    changes: 5,
+    lastVerify: null,
+    dirty: true,
+    docOnly: false,
+    files: ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts', 'src/e.ts'],
+  }
+  const text = renderVerifyGate(gates.verify.text, info)
+  assert.match(text, /src\/a\.ts, src\/b\.ts, src\/c\.ts 等 5 个/, 'C5: three paths plus the total')
+  assert.doesNotMatch(text, /src\/d\.ts/, 'C5: only three paths are shown')
+  assert.match(text, /代码改动/)
+
+  assert.equal(renderVerifyGate('{files}（{kind}）', { changes: 1, lastVerify: null, files: ['<shell>'] }),
+    '<shell>（未知）', 'C5: a shell-only change is unknown, not code')
+  assert.equal(renderVerifyGate('{files}', { changes: 0, lastVerify: null, files: [] }), '工作区',
+    'C5: no path falls back to 工作区')
+  assert.equal(renderVerifyGate('{changes}/{lastVerify}', { changes: 2, lastVerify: 'npm test' }), '2/npm test',
+    'C5: the old placeholders still render')
+  assert.equal(renderReviewGate('{files}', { files: [] }), '工作区')
+})
+
+test('0.10.0 §4-6: the new gate settings are validated and the old config still loads', () => {
+  assert.throws(() => resolveGates({ verify: { docPatterns: [] } }),
+    /dispatch-protocol: gates\.verify\.docPatterns/)
+  assert.throws(() => resolveGates({ verify: { docPatterns: ['ok', 42] } }),
+    /dispatch-protocol: gates\.verify\.docPatterns/)
+  assert.throws(() => resolveGates({ review: { textDocOnly: 42 } }),
+    /dispatch-protocol: gates\.review\.textDocOnly/)
+  assert.throws(() => resolveGates({ review: { textDocOnly: '  ' } }),
+    /dispatch-protocol: gates\.review\.textDocOnly/)
+
+  const gates = resolveGates({})
+  assert.deepEqual(gates.verify.docPatterns,
+    ['.md', '.mdx', 'docs/', 'dispatch/', 'LICENSE', '.gitignore', '.gitattributes'])
+  assert.deepEqual(gates.review.docPatterns, gates.verify.docPatterns, 'review reuses the same doc list')
+  assert.match(gates.review.textDocOnly, /不必重开代码评审/)
+  assert.match(gates.verify.text, /\{files\}/)
+  assert.match(gates.verify.text, /\{kind\}/)
+
+  // 旧配置（没有新键）仍加载，旧自定义文案不被新占位破坏。
+  const legacy = resolveGates({
+    verify: { text: '旧文案 {changes}/{lastVerify}' },
+    review: { text: '旧文案 {files}' },
+  })
+  assert.equal(renderVerifyGate(legacy.verify.text, { changes: 1, lastVerify: null }), '旧文案 1/从未验证')
+  assert.equal(renderReviewGate(legacy.review.text, { files: ['a.md'] }), '旧文案 a.md')
 })
 
 // ---------------------------------------------------------------------------

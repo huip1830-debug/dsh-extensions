@@ -30,6 +30,23 @@ export const DEFAULT_WAIT_TEXT = '[dispatch-protocol] 本回合 {count} 次状�
 export const DEFAULT_VERIFY_COMMANDS = ['npm test', 'npm run build', 'dotnet test', 'jest', 'tsc', 'prisma migrate deploy', 'node test']
 
 /**
+ * 文档类改动片段（0.10.0 C2，大小写不敏感子串，复用 `matchesPath`）。
+ *
+ * 纯文档改动没有可验证的代码行为：上游 session-32cd3319 里 3 次 VerifyGate
+ * 全部由 `.md` / `AGENTS.md` 写入触发，代价是三端 build+test。这里只豁免
+ * 「整批脏改动全是文档或控制面」的情形，混入任何代码路径照旧提醒。
+ */
+export const DEFAULT_DOC_PATTERNS = ['.md', '.mdx', 'docs/', 'dispatch/', 'LICENSE', '.gitignore', '.gitattributes']
+
+/**
+ * 无法定位路径的脏条目占位（0.10.0 C2）。
+ *
+ * `pwsh` 变更拿不到可靠文件名；`write`/`edit` 缺 `file_path` 时同理。占位一律
+ * 算非文档——「不知道改了什么」不能当成「只是文档」。
+ */
+const SHELL_PATH = '<shell>'
+
+/**
  * 收口动作里的 commit/push 识别（字符串形式，加载期编译）。
  *
  * 与观测档位的 shell 变更判定不同，这里专门匹配 git commit / push——它们是
@@ -38,8 +55,14 @@ export const DEFAULT_VERIFY_COMMANDS = ['npm test', 'npm run build', 'dotnet tes
  */
 export const DEFAULT_VERIFY_COMMIT_PATTERN = '\\bgit\\s+(?:-C\\s+(?:"[^"]*"|\'[^\']*\'|\\S+)\\s+)?(commit|push)\\b'
 
-/** VerifyGate 默认文案；`{changes}` 为脏改动数，`{lastVerify}` 为最近一次成功验证命令。 */
-export const DEFAULT_VERIFY_TEXT = '[dispatch-protocol] 本回合准备 present/commit，但当前 diff 在最后一次成功集成命令之后又有改动（或从未跑过）。先跑一次集成命令并留存退出码，再收口。'
+/**
+ * VerifyGate 默认文案（0.10.0 C5 点名文件）。
+ *
+ * `{files}` 为脏路径（最多展示 3 个，多余追加「等 N 个」），`{kind}` 为
+ * `代码`|`未知`；0.9.x 的 `{changes}`/`{lastVerify}` 保留兼容，旧自定义文案
+ * 不会因新占位缺失而抛错。
+ */
+export const DEFAULT_VERIFY_TEXT = '[dispatch-protocol] 本回合准备 present/commit，但 {files}（{kind}改动）在最后一次成功集成命令之后又有改动（或从未跑过）。先跑一次集成命令并留存退出码，再收口。'
 
 /** ContractGate：写入路径命中这些片段的文件算「契约文件」（大小写不敏感子串）。 */
 export const DEFAULT_CONTRACT_PATTERNS = ['contract']
@@ -52,6 +75,15 @@ export const DEFAULT_REVIEW_LABEL_PREFIXES = ['只读评审', '只读复审']
 
 /** ReviewGate 默认文案；`{files}` 为评审后 dirty 期间命中的去重路径（最多 3 个）。 */
 export const DEFAULT_REVIEW_TEXT = '[dispatch-protocol] 本批在只读评审之后又改动了工作区（{files}）。评审已失效：重开受影响切片再收口。'
+
+/**
+ * ReviewGate 文档/控制面改动的文案（0.10.0 C4）。
+ *
+ * 评审之后再写文档或控制面，不会让已评审的代码切片失效；原文案要求「重开受
+ * 影响切片」，上游证据里主控只能为一个文档切片再派一次评审（10.4 min /
+ * 2.37M token）。这里改问「机器校验 + 最小复核」，但每个评审波次仍只提醒一次。
+ */
+export const DEFAULT_REVIEW_TEXT_DOC_ONLY = '[dispatch-protocol] 只读评审之后又改了文档/控制面（{files}）。这类改动不使代码切片失效：机器校验（路径/链接/括号/术语）即可，不必重开代码评审；若改的正是刚评审的那份文档，最小复核该文档即可。'
 
 /** HandoffGate：连续空回合达到该数量才提醒（默认 1）。 */
 export const DEFAULT_HANDOFF_EMPTY_TURNS = 1
@@ -133,6 +165,9 @@ export function resolveGates(source = {}) {
     commitPattern,
     commitRegExp,
     controlPlanePatterns,
+    // 0.10.0 C2：文档类改动不触发 VerifyGate。随 verify 段解析，review 段复用
+    // 同一份列表（与 controlPlanePatterns 一样「一份配置，两处判定」）。
+    docPatterns: readStringList(verifySource.docPatterns, DEFAULT_DOC_PATTERNS, 'verify.docPatterns'),
     text: readText(verifySource.text, DEFAULT_VERIFY_TEXT, 'verify.text'),
   }
 
@@ -150,7 +185,10 @@ export function resolveGates(source = {}) {
     enabled: reviewSource.enabled !== false,
     labelPrefixes: readStringList(reviewSource.labelPrefixes, DEFAULT_REVIEW_LABEL_PREFIXES, 'review.labelPrefixes'),
     controlPlanePatterns,
+    docPatterns: verify.docPatterns,
     text: readText(reviewSource.text, DEFAULT_REVIEW_TEXT, 'review.text'),
+    // 0.10.0 C4：文档/控制面改动走另一套文案，明确「不必重开代码评审」。
+    textDocOnly: readText(reviewSource.textDocOnly, DEFAULT_REVIEW_TEXT_DOC_ONLY, 'review.textDocOnly'),
   }
 
   const handoffSource = config.handoff ?? {}
@@ -206,13 +244,13 @@ function readPath(raw) {
 }
 
 /**
- * 路径是否命中配置片段（大小写不敏感子串）。
+ * 路径是否命中配置片段（大小写不敏感子串，0.10.0 起反斜杠先归一）。
  * @param path - 调用参数里的文件路径。
  * @param patterns - 解析后的片段列表。
  */
 export function matchesPath(path, patterns) {
   if (typeof path !== 'string' || path === '') return false
-  const lower = path.toLowerCase()
+  const lower = path.replaceAll('\\', '/').toLowerCase()
   return patterns.some(fragment => lower.includes(fragment.toLowerCase()))
 }
 
@@ -225,6 +263,109 @@ export function matchesVerifyCommand(command, commands) {
   if (typeof command !== 'string' || command === '') return false
   const lower = command.toLowerCase()
   return commands.some(fragment => lower.includes(fragment.toLowerCase()))
+}
+
+/** 按引号切分一个 shell 片段（只用于 `git ...` 还原判定）。 */
+function tokenizeShell(segment) {
+  return segment.match(/"[^"]*"|'[^']*'|\S+/g) ?? []
+}
+
+/** 去掉一层引号。 */
+function unquote(token) {
+  return token.replace(/^["']|["']$/g, '')
+}
+
+/**
+ * 取一个片段的 git 动作：`{ verb, args }`；不是 git 调用返回 null。
+ *
+ * 只跳过 `-C <path>`、`-c <key=value>` 两种前置参数（与观测档位 `git -C` 的
+ * 口径一致）；其余前置参数无法可靠判定，交给调用方按脏处理。
+ */
+function readGitInvocation(segment) {
+  const tokens = tokenizeShell(segment).map(unquote)
+  let index = 0
+  while (index < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index])) index += 1
+  if (index >= tokens.length || tokens[index].toLowerCase() !== 'git') return null
+  index += 1
+  while (index < tokens.length && (tokens[index] === '-C' || tokens[index] === '-c')) index += 2
+  if (index >= tokens.length) return null
+  return { verb: tokens[index].toLowerCase(), args: tokens.slice(index + 1) }
+}
+
+/**
+ * 中性只读 git 动作（0.10.0 C3a）：与还原段出现在同一条复合命令里时，不算
+ * 「又改了工作区」。上游真实误报正是 `git checkout -- …; git status --porcelain`
+ * ——还原之后自查状态，不该被当成第二次脏改动。
+ */
+const NEUTRAL_GIT_VERBS = new Set(['status', 'diff', 'log', 'show', 'rev-parse', 'ls-files', 'remote'])
+
+/** 段内出现这些形态即有写盘可能（C3a）：还原/只读段一律按脏处理。 */
+const SHELL_WRITE_PATTERN = />|--output|Out-File|Set-Content|Add-Content|tee/i
+
+/**
+ * 一个 git 动作是否是中性只读段（C3a）。
+ *
+ * 名单外一律 false。`stash` 只认 `list` 子命令（`git stash` 裸调用等同 push）；
+ * `branch` 只认 `--list` / `-l` / 无参数（`-d`/`-D` 会删分支）。
+ */
+function isNeutralReadOnlyGit(invocation) {
+  if (NEUTRAL_GIT_VERBS.has(invocation.verb)) return true
+  if (invocation.verb === 'stash') return (invocation.args[0] ?? '').toLowerCase() === 'list'
+  if (invocation.verb === 'branch') {
+    if (invocation.args.length === 0) return true
+    const first = invocation.args[0].toLowerCase()
+    return first === '--list' || first === '-l'
+  }
+  return false
+}
+
+/**
+ * 一条命令是否只是把工作树还原到 HEAD（0.10.0 C3；C3a 放宽到复合命令）。
+ *
+ * 上游证据：`git checkout -- migration_lock.toml` 之后主控自查「这确实改动了
+ * 工作区」，可它只是把文件还原到 HEAD，并没有产生新 diff。按 `|| && ; \n |`
+ * 切段后，每段必须属于两类之一，且**至少有一段是还原段**才返回 true：
+ *
+ * - 还原段：`git [... -C <path>] checkout -- <路径…>`（`--` 必须紧跟 `checkout`，
+ *   之前出现任何 token——分支/提交/选项如 `-b`——都不是「从 HEAD 还原」）、
+ *   `git [... -C <path>] restore <路径…>`（不含 `--source`/`-s`，任何以 `-` 开头
+ *   的参数都按脏）；
+ * - 中性只读段（C3a）：`git [... -C <path>] status|diff|log|show|rev-parse|
+ *   ls-files|remote …`、`git stash list`、`git branch [--list|-l]`。真实误报的
+ *   `git checkout -- …; git status --porcelain` 由此豁免。
+ *
+ * 任何一段含 `>`/`>>`/`--output`/Out-File/Set-Content/Add-Content/tee 时整条按
+ * 脏处理（有写盘可能）。其余写法（`git checkout <branch|ref>`、`git checkout
+ * -b`、`git restore --source=…`、`git add`/`commit`/`rm`、非 git 命令段、无法
+ * 可靠解析的段）一律返回 false——保守方向，宁可多提醒一次。
+ * @param command - `pwsh` 调用里的命令文本。
+ */
+export function isRestoreCommand(command) {
+  if (typeof command !== 'string' || command.trim() === '') return false
+  // 管道/串行连接符切开：每条段都要能证明自己「不写盘」。
+  const segments = command.split(/\|\||&&|[;\n\r|]/).map(part => part.trim()).filter(Boolean)
+  if (segments.length === 0) return false
+  let restores = 0
+  for (const segment of segments) {
+    if (SHELL_WRITE_PATTERN.test(segment)) return false
+    const invocation = readGitInvocation(segment)
+    if (invocation === null) return false
+    if (invocation.verb === 'checkout') {
+      const delimiter = invocation.args.indexOf('--')
+      if (delimiter !== 0) return false
+      if (invocation.args.length - delimiter - 1 < 1) return false
+      restores += 1
+      continue
+    }
+    if (invocation.verb === 'restore') {
+      if (invocation.args.length === 0) return false
+      if (invocation.args.some(arg => arg.startsWith('-'))) return false
+      restores += 1
+      continue
+    }
+    if (!isNeutralReadOnlyGit(invocation)) return false
+  }
+  return restores > 0
 }
 
 /**
@@ -267,7 +408,9 @@ function collectResults(events) {
  *
  * 三态（契约 §4）：有失败结果 → 没改；没有结果 → 按改过算（宁可多提醒，回合
  * 被打断时不能把写入抹掉）；其余 → 改过。0.8.2 起 write/edit 先取路径，命中
- * 控制面（state/ledger/specs）的写入不算脏改动——那是主控的合法动作。
+ * 控制面（state/ledger/specs）的写入不算脏改动——那是主控的合法动作。0.10.0
+ * 起控制面扩为 `dispatch/` 整树，且 `pwsh` 里「还原到 HEAD」的命令不算脏
+ * （C1/C3）。
  * @param call - 一条 `tool/call` 事件。
  * @param results - `collectResults` 的结果。
  * @param patterns - 控制面路径片段（`gates.verify.controlPlanePatterns`）。
@@ -284,6 +427,9 @@ function touchedWorkingTree(call, results, patterns = DEFAULT_CONTROL_PLANE_PATT
   if (name !== 'pwsh') return false
   const command = readCommand(data?.arguments)
   if (command === undefined || !DEFAULT_PWSH_SHELL_PATTERN.test(command)) return false
+  // 0.10.0 C3：`git checkout -- <路径>` / `git restore <路径>` 只是把工作树
+  // 还原到 HEAD，没有产生新 diff；无法可靠判定的写法仍按脏处理。
+  if (isRestoreCommand(command)) return false
   // 复用观测档位：git commit 不是工作树内容变更，不能把「收口动作」本身
   // 算成一次新的脏改动（0.4.1 I3）。
   const message = results.get(data?.callId)
@@ -297,13 +443,19 @@ function touchedWorkingTree(call, results, patterns = DEFAULT_CONTROL_PLANE_PATT
  * 成功验证，此时按契约 §11-A「有成功写入但从未验证」才触发（零写入的纯只读
  * present 不提醒），`changes` 仍是全 session 的写入计数（默认文案不展示，但
  * 决定日志要能回答「到底改了多少」）。
+ *
+ * 0.10.0 C2：返回值加 `files`（去重脏路径，`pwsh` 等无法定位的记 `<shell>`）
+ * 与 `docOnly`（脏条目全部命中 `verify.docPatterns` 或控制面）。`docOnly` 只
+ * 描述「这一批脏改动是不是纯文档」，`changes` 语义不变。
  * @param events - `session.snapshotEvents()`。
  * @param verify - 解析后的 `gates.verify`。
- * @returns `{ lastVerify, dirty, changes }`。
+ * @returns `{ lastVerify, dirty, changes, files, docOnly }`。
  */
 export function analyzeVerification(events, verify) {
   const log = events ?? []
   const results = collectResults(log)
+  const docPatterns = verify.docPatterns ?? DEFAULT_DOC_PATTERNS
+  const controlPlanePatterns = verify.controlPlanePatterns ?? DEFAULT_CONTROL_PLANE_PATTERNS
 
   let lastIndex = -1
   let lastVerify = null
@@ -323,15 +475,34 @@ export function analyzeVerification(events, verify) {
 
   let dirty = false
   let changes = 0
+  let documentationOnly = true
+  const files = []
   for (let i = lastIndex + 1; i < log.length; i++) {
     const event = log[i]
     if (event?.type !== 'tool/call') continue
-    if (!touchedWorkingTree(event, results, verify.controlPlanePatterns ?? DEFAULT_CONTROL_PLANE_PATTERNS)) continue
+    if (!touchedWorkingTree(event, results, controlPlanePatterns)) continue
     dirty = true
     changes += 1
+    const path = dirtyPath(event)
+    if (!files.includes(path)) files.push(path)
+    if (path === SHELL_PATH) documentationOnly = false
+    else if (!matchesPath(path, docPatterns) && !isControlPlanePath(path, controlPlanePatterns)) documentationOnly = false
   }
 
-  return { lastVerify, dirty, changes }
+  return { lastVerify, dirty, changes, files, docOnly: changes > 0 && documentationOnly }
+}
+
+/**
+ * 一个脏调用的展示路径：`write`/`edit` 取参数里的 `file_path`/`path`；取不到
+ * （或 `pwsh` 变更）一律记 `<shell>`，因此绝不会被当成文档。
+ * @param call - 一条已判定为脏的 `tool/call` 事件。
+ */
+function dirtyPath(call) {
+  if (DEFAULT_WRITE_TOOLS.includes(call.data?.name)) {
+    const path = readPath(call.data?.arguments)
+    if (path !== undefined) return path
+  }
+  return SHELL_PATH
 }
 
 /**
@@ -378,10 +549,12 @@ export function evaluateWaitGate(events, turn, gates, delegationTools = []) {
  * git commit/push），且「有成功写入但从未验证」或「最近一次成功验证之后又脏
  * 了」（契约 §11-A：零写入的纯只读 present 豁免）。
  * 判定对齐的是「准备收口时的实际状态」，不是「这一回合有没有跑过命令」。
+ * 0.10.0 C2：整批脏改动都是文档/控制面（`docOnly`）时静默——纯文档改动没有
+ * 可验证的代码行为，「从未跑过」分支同样适用。
  * @param events - `session.snapshotEvents()`。
  * @param turn - 正在收尾的回合。
  * @param gates - 解析后的 `gates` 段。
- * @returns `{ changes, lastVerify, dirty }`，不该提醒时返回 null。
+ * @returns `{ changes, lastVerify, dirty, files, docOnly }`，不该提醒时返回 null。
  */
 export function evaluateVerifyGate(events, turn, gates) {
   if (!gates.verify.enabled) return null
@@ -396,6 +569,8 @@ export function evaluateVerifyGate(events, turn, gates) {
   if (!closing) return null
 
   const state = analyzeVerification(events, gates.verify)
+  // C2：纯文档/控制面改动不需要集成命令。
+  if (state.docOnly === true) return null
   // 契约 §11-A：整会话零写入、也从未验证的纯只读 present（present 一份报告/
   // 计划）没有 diff 可验，提醒只会让模型为一条空命令多花一步。
   if (state.lastVerify === null && state.changes === 0) return null
@@ -415,19 +590,37 @@ export function renderWaitGate(template, info) {
 }
 
 /**
- * 渲染 VerifyGate 文案。
+ * 渲染 VerifyGate 文案（0.10.0 C5）。
+ *
+ * 新占位 `{files}`/`{kind}` 负责点名；旧占位 `{changes}`/`{lastVerify}` 保留，
+ * 0.9.x 的自定义文案照旧渲染，不会因为模板里没有新占位而抛错。
  * @param template - `gates.verify.text`。
  * @param info - `evaluateVerifyGate` 的返回值。
  */
 export function renderVerifyGate(template, info) {
   return template
+    .replaceAll('{files}', formatPaths(info.files))
+    .replaceAll('{kind}', changeKind(info.files))
     .replaceAll('{changes}', String(info.changes))
     .replaceAll('{lastVerify}', info.lastVerify ?? '从未验证')
 }
 
-/** 把去重路径拼成文案；没有可展示路径时给出明确占位。 */
+/**
+ * 把去重路径拼成文案（C5）：最多展示 3 个，多余追加「等 N 个」（N 为去重后
+ * 的总数）；没有可展示路径时用「工作区」。
+ * @param files - 去重后的路径列表（`undefined` 按空处理）。
+ */
 function formatPaths(files) {
-  return files.length === 0 ? '未记录路径' : files.join(', ')
+  const list = Array.isArray(files) ? files.filter(file => typeof file === 'string' && file !== '') : []
+  if (list.length === 0) return '工作区'
+  const shown = list.slice(0, 3).join(', ')
+  return list.length > 3 ? `${shown} 等 ${list.length} 个` : shown
+}
+
+/** `{kind}`：能指出代码路径就是「代码」，只有 `<shell>`（或空）时是「未知」。 */
+function changeKind(files) {
+  const list = Array.isArray(files) ? files : []
+  return list.some(file => file !== SHELL_PATH) ? '代码' : '未知'
 }
 
 /**
@@ -524,10 +717,14 @@ export function renderHandoffGate(template, info) {
  * 记录父事件下标 `since`；本函数只从 `since` 往后找成功的 write/edit。只看
  * 「有评审完成 + 之后有写入」，不解析评审报告 PASS/FAIL——FAIL 后返修同样应
  * 重开，方向一致（契约 §4 已知边界）。
+ *
+ * 0.10.0 C4：返回值加 `docOnly`——评审后的脏改动全部命中 `docPatterns` 或
+ * 控制面时为 true，调用方据此换文案（文档改动不必重开代码评审）。`files` 仍是
+ * 去重路径（含 `<shell>` 占位），展示时由 `formatPaths` 截到 3 个。
  * @param events - 父代理的 `session.snapshotEvents()`。
  * @param gates - 解析后的 `gates` 段。
  * @param state - `{ pending, warned, since }`。
- * @returns `{ files }`，不该提醒时返回 null。
+ * @returns `{ files, docOnly }`，不该提醒时返回 null。
  */
 export function evaluateReviewGate(events, gates, state) {
   if (!gates.review.enabled || state === undefined) return null
@@ -535,28 +732,34 @@ export function evaluateReviewGate(events, gates, state) {
   const log = events ?? []
   const results = collectResults(log)
   const since = Number.isInteger(state.since) ? state.since : 0
+  const docPatterns = gates.review.docPatterns ?? DEFAULT_DOC_PATTERNS
+  const controlPlanePatterns = gates.review.controlPlanePatterns ?? DEFAULT_CONTROL_PLANE_PATTERNS
   const files = []
   let changes = 0
+  let documentationOnly = true
   for (let i = since; i < log.length; i++) {
     const event = log[i]
     if (event?.type !== 'tool/call') continue
     const name = event.data?.name
     if (name !== 'write' && name !== 'edit') continue
-    // 0.8.2：控制面写入（state/ledger/specs）是主控的合法动作，不会让评审失效
-    // （既不计 `changes`，也不入 `files`）。
+    // 0.8.2/0.10.0：控制面写入（dispatch/ 整树、specs）是主控的合法动作，不会
+    // 让评审失效（既不计 `changes`，也不入 `files`）。
     const path = readPath(event.data?.arguments)
-    if (isControlPlanePath(path, gates.review.controlPlanePatterns ?? DEFAULT_CONTROL_PLANE_PATTERNS)) continue
+    if (isControlPlanePath(path, controlPlanePatterns)) continue
     // 与 VerifyGate 的防御口径一致：有失败结果才算没改；没有结果按改过算。
     const message = results.get(event.data?.callId)
     if (message?.isError === true) continue
     changes += 1
-    if (path !== undefined && !files.includes(path)) files.push(path)
+    const file = path ?? SHELL_PATH
+    if (!files.includes(file)) files.push(file)
+    if (file === SHELL_PATH) documentationOnly = false
+    else if (!matchesPath(file, docPatterns) && !isControlPlanePath(file, controlPlanePatterns)) documentationOnly = false
   }
   if (changes === 0) return null
-  return { files: files.slice(0, 3) }
+  return { files, docOnly: documentationOnly }
 }
 
-/** 渲染 ReviewGate 文案。 */
+/** 渲染 ReviewGate 文案（`{files}` 最多 3 个，多余追加「等 N 个」）。 */
 export function renderReviewGate(template, info) {
   return template.replaceAll('{files}', formatPaths(info.files))
 }

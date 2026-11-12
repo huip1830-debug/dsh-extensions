@@ -157,6 +157,9 @@ function recordDecision(log, agent, payload) {
       ...(payload.observations === undefined ? {} : { observations: payload.observations }),
       ...(payload.changes === undefined ? {} : { changes: payload.changes }),
       ...(payload.lastVerify === undefined ? {} : { lastVerify: payload.lastVerify }),
+      // 0.10.0 C4：ReviewGate 记录「这批脏改动是不是纯文档/控制面」，日志里能
+      // 区分「换了文案的提醒」与「真的重开代码切片」。
+      ...(payload.docOnly === undefined ? {} : { docOnly: payload.docOnly }),
       // 0.7.0 HandoffGate：连续空回合数，供日志回答「到底空了多久」。
       ...(payload.emptyTurns === undefined ? {} : { emptyTurns: payload.emptyTurns }),
       // 0.9.0 写入守卫：`tool`/`file` 是被放行或被拦下的具体调用，`mode` 区分
@@ -493,7 +496,11 @@ function registerReminders(ctx, config) {
 
       const review = evaluateReviewGate(events, gates, reviewState.get(parentId))
       if (review !== null) {
-        const delivered = deliver(renderReviewGate(gates.review.text, review), { gate: 'review', files: review.files })
+        // 0.10.0 C4：文档/控制面改动换一套文案——不使代码切片失效，机器校验
+        // 即可；混合含代码时仍用原文案（重开受影响切片）。
+        const text = review.docOnly ? gates.review.textDocOnly : gates.review.text
+        const delivered = deliver(renderReviewGate(text, review),
+          { gate: 'review', files: review.files, docOnly: review.docOnly })
         // 同一轮评审只提醒一次；下一轮评审 created 或任一评审 completed 时重置
         // （契约 §4/§11-B/§12-B）。
         const state = reviewState.get(parentId)
