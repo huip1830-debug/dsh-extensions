@@ -162,6 +162,30 @@ export function hasReadOnlySandbox(body) {
   return body.some((line) => /sandbox:\s*read-only\b/.test(line.replace(/\s#.*$/, '')));
 }
 
+// ---- 内容比较 ---------------------------------------------------------------
+
+// 文本归一：把缓冲区按 UTF-8 解码为字符串，并把 CRLF / 孤立 CR 统一为 LF。
+// 解码失败（二进制/非 UTF-8）返回 null，由调用方退回逐字节比较。
+// 背景：仓库工作树在 core.autocrlf=true 下是 CRLF，安装副本（来自提交/pack）是 LF，
+//       按字节比较会把「仅换行符不同」误判为内容漂移（Windows 验收永远过不了）。
+export function normalizeText(buf) {
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(buf);
+    return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  } catch {
+    return null;
+  }
+}
+
+// 判定两侧内容是否一致：两侧都能解码为文本时只比归一后内容；
+// 任一侧解码失败则退回逐字节比较（保持原行为，二进制不会被放宽）。
+export function contentsEqual(bufA, bufB) {
+  const textA = normalizeText(bufA);
+  const textB = normalizeText(bufB);
+  if (textA !== null && textB !== null) return textA === textB;
+  return bufA.equals(bufB);
+}
+
 // ---- 检查项 -----------------------------------------------------------------
 
 function checkInstalledDir(installedDir) {
@@ -209,7 +233,8 @@ function checkFiles(installedDir) {
     }
     const repoBuf = fs.readFileSync(repoPath);
     const instBuf = fs.readFileSync(instPath);
-    if (!repoBuf.equals(instBuf)) {
+    if (!contentsEqual(repoBuf, instBuf)) {
+      // detail 保留原始字节数（诊断用）；判定只看归一后内容。
       mismatches.push(`${rel}: 内容不同（仓库 ${repoBuf.length} B / installed ${instBuf.length} B）`);
     }
   }
@@ -217,7 +242,7 @@ function checkFiles(installedDir) {
     for (const detail of mismatches) fail('files', detail);
     return;
   }
-  pass('files', `${relFiles.length} 个文件与 installed 逐字节一致`);
+  pass('files', `${relFiles.length} 个文件与 installed 内容一致（文本按 UTF-8 归一后比较，忽略 CRLF/LF 差异）`);
 }
 
 function checkProfileRoles(ymlPath) {
@@ -280,7 +305,7 @@ function main() {
   return results.every((r) => r.ok) ? 0 : 1;
 }
 
-// 直接运行脚本时执行核验；被 import 时只暴露上面三个行级解析助手（供反例测试复用）。
+// 直接运行脚本时执行核验；被 import 时只暴露行级解析助手里及内容归一助手（供反例测试复用）。
 const invokedAsScript =
   process.argv[1] && path.resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase();
 if (invokedAsScript) {
