@@ -286,6 +286,100 @@ export function readCommand(raw) {
 }
 
 /**
+ * 封闭形状判定（0.12.2 D2 设计反转）：这条 shell 命令是否**只**写了控制面？
+ *
+ * 三次复审证明「解析 PowerShell 以证明没写到控制面之外」不可证：每轮都能构造
+ * 新语法（逗号数组、别名、单 `&`、`cmd /c` 引号载荷）绕开解析器，而漏的方向是
+ * 闸门静默（未验证代码可提交）。这里改为**构造性证明**——只有下面三种封闭形状
+ * 能证明是记账写入，其余一律 false（→ 脏 → `<shell>` → 按代码处理）。代价是
+ * 偶尔多跑一次集成命令，收益是不可能静默。
+ *
+ * 形状 A：`(Add-Content|Set-Content|Out-File|Clear-Content) [-Path|-FilePath] <path> ["<content>"]`
+ * 形状 B：`New-Item [-ItemType <Directory|File>] [-Force] [-Path] <path>`
+ * 形状 C：`git diff <只读参数…> >|>> <path>`（`git` 其它动词一律拒绝）
+ *
+ * 整体拒绝：引号外出现 `&` `|` `$` `(` `)` `@` `,` `--%`，或出现
+ * `iex`/`invoke-expression`/`cmd` 一个词；路径不止一个、通配符、`..`、引号不
+ * 闭合、空命令。命令只按 `;` 与换行切段——管道、`&&`、单个 `&` 都不切，一律被
+ * 上一行的元字符拒绝。
+ *
+ * 纯函数：无 IO、无配置；分类复用 `classifyPath`，不另写路径判定。缺 `cwd` 时
+ * 分类必然失败 → false（保守：不知道就不豁免）。
+ * @param command - 一条 `pwsh` 命令（可以是 undefined）。
+ * @param options - `{ cwd, controlPlanePatterns }`。
+ * @returns true 仅当每一段都命中封闭形状且路径唯一、全部是控制面。
+ */
+export function controlPlaneOnlyShellWrite(command, options = {}) {
+  if (typeof command !== 'string' || command.trim() === '') return false
+  const config = options ?? {}
+  const segments = command.split(/[;\r\n]+/).map(segment => segment.trim()).filter(segment => segment !== '')
+  if (segments.length === 0) return false
+  const shapes = [
+    /^(?:add-content|set-content|out-file|clear-content)(?:\s+-(?:path|filepath))?\s+(\S+)(?:\s+"[^"]*")?$/i,
+    /^new-item(?:\s+-itemtype\s+(?:directory|file))?(?:\s+-force)?(?:\s+-path)?\s+(\S+)$/i,
+    /^git\s+diff(?:\s+(?:-p|--patch|--stat|--numstat|--shortstat|--name-only|--name-status|--summary|--check|--no-color|--word-diff|--diff-filter=\S+|-U\d+|-\d+))*\s+>>?\s+(\S+)$/i,
+  ]
+  for (const segment of segments) {
+    let quote = ''
+    for (const char of segment) {
+      if (quote !== '') {
+        if (char === quote) quote = ''
+        continue
+      }
+      if (char === '"' || char === "'") quote = char
+    }
+    if (quote !== '') return false
+    const bare = segment.replace(/"[^"]*"|'[^']*'/g, ' ')
+    if (/[&|$()@,]|--%/.test(bare)) return false
+    if (/\b(?:iex|invoke-expression|cmd)\b/i.test(bare)) return false
+    let path
+    for (const shape of shapes) {
+      const match = shape.exec(segment)
+      if (match !== null) {
+        path = match[1]
+        break
+      }
+    }
+    if (path === undefined) return false
+    if (!/^[A-Za-z0-9_.\\/:-]+$/.test(path) || path.includes('..') || /[*?]/.test(path)) return false
+    if (classifyPath(path, { cwd: config.cwd, controlPlanePatterns: config.controlPlanePatterns }) !== ARTIFACT.CONTROL) {
+      return false
+    }
+  }
+  return true
+}
+
+/**
+ * Read the working directory out of a tool call's arguments.
+ *
+ * `pwsh` 调用可以带 `workdir`（真实会话日志里大量存在，如
+ * `"workdir":"G:\\…\\server"`），写入落点由它决定；只按会话 `cwd` 分类会把
+ * `<cwd>/server/src/dispatch/ledger/x.md` 误判成控制面并静默豁免。
+ *
+ * 与 `readPath` 同风格，但多一态（调用方必须区分「没给」和「给了但不可用」）：
+ * 非空字符串 → 原样返回；`workdir`/`cwd` 都没给 → `undefined`；给了但不是非空
+ * 字符串（对象/数字/空串等）→ `null`，调用方按脏处理，不得静默豁免。
+ * @param raw - the JSON-encoded arguments string the log stores.
+ * @returns 非空字符串、`undefined`（未提供）或 `null`（提供了但不可用）。
+ */
+export function readWorkdir(raw) {
+  if (typeof raw !== 'string') return undefined
+  let args
+  try {
+    args = JSON.parse(raw)
+  } catch {
+    return undefined
+  }
+  if (args === null || typeof args !== 'object') return undefined
+  const key = Object.prototype.hasOwnProperty.call(args, 'workdir')
+    ? 'workdir'
+    : (Object.prototype.hasOwnProperty.call(args, 'cwd') ? 'cwd' : undefined)
+  if (key === undefined) return undefined
+  const workdir = args[key]
+  return typeof workdir === 'string' && workdir.trim() !== '' ? workdir : null
+}
+
+/**
  * Count one turn's file writes and delegations from the committed session log.
  *
  * `tool/call` carries its own `turn`, so a turn boundary needs no bookkeeping:

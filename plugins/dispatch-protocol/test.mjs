@@ -20,8 +20,8 @@ import { join } from 'node:path'
 import * as plugin from './plugin.mjs'
 import { resolveConfig, DEFAULT_RULES } from './lib/config.mjs'
 import {
-  ARTIFACT, callTouchesFile, classifyPath, DEFAULT_CONTROL_PLANE_PATTERNS, DEFAULT_PWSH_MUTATION_PATTERN,
-  DEFAULT_PWSH_SHELL_PATTERN, summarizeTurn,
+  ARTIFACT, callTouchesFile, classifyPath, controlPlaneOnlyShellWrite, DEFAULT_CONTROL_PLANE_PATTERNS,
+  DEFAULT_PWSH_MUTATION_PATTERN, DEFAULT_PWSH_SHELL_PATTERN, readWorkdir, summarizeTurn,
 } from './lib/tool-calls.mjs'
 import {
   DEFAULT_ALLOWLIST, DEFAULT_OVERRIDE_PATH, DEFAULT_WRITE_POLICY_MODE, resolveWritePolicy,
@@ -388,11 +388,18 @@ test('a parent that received a report but did nothing is still reminded', () => 
   assert.match(parent.messages[0].text, /child-10/)
 })
 
-test('a child that kept writing after the report is still reminded', () => {
+test('a mid-run report does not suppress the reminder once the child settles', () => {
   const h = harness()
   plugin.apply(h.ctx, quiet)
 
-  const parent = h.main('parent-3', [splice('child-11'), call(1, 'read', { file_path: 'a.ts' })])
+  // 0.12.2 D1: settle is the last visibility point, so the fixture now carries
+  // the runtime-owned settle notice. The report spliced mid-run was not the
+  // child's final state, so the parent's earlier read does not suppress it.
+  const parent = h.main('parent-3', [
+    splice('child-11'),
+    call(1, 'read', { file_path: 'a.ts' }),
+    settleNotice('child-11'),
+  ])
   const child = h.child('child-11', 'parent-3', '实现 Task 11', [
     call(1, 'send_message', { agent_id: 'parent-3' }),
     call(1, 'write', { file_path: 'a.ts' }),
@@ -403,7 +410,8 @@ test('a child that kept writing after the report is still reminded', () => {
   assert.equal(parent.messages.length, 0, 'settling only registers the checkpoint')
 
   h.turnStopping(parent, 1)
-  assert.equal(parent.messages.length, 1, 'a report followed by writes is not a settled child')
+  assert.equal(parent.messages.length, 1,
+    'the parent acted before the settle notice; the settle notice is the last visibility point')
 })
 
 test('a read-only survey child does not trigger a checkpoint', () => {
@@ -549,6 +557,76 @@ test('the checkpoint queue is keyed by the parent session id, not the agent id',
   assert.match(parent.messages[0].text, /child-40/)
 })
 
+// 0.12.2 D1 — the visibility point is a splice *or* a settle notice, and the
+// verdict is one primitive: did the parent call any tool after that point?
+
+test('D1: a settle notice followed by a parent tool call is already handled', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-settle-handled-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log, gates: { handoff: { enabled: false } } })
+
+    // A closing-message child produces a splice without the marker; the runtime-
+    // owned settle notice is the report the parent can see. The parent then acts
+    // on it.
+    const parent = h.main('parent-81', [
+      settleNotice('child-81'),
+      call(1, 'read', { file_path: 'a.ts' }, 'read-81'),
+    ])
+    h.created(h.child('child-81', 'parent-81', '实现 Task 81', [call(1, 'write', { file_path: 'a.ts' })]))
+    h.ended({ childId: 'child-81', stopReason: 'completed' })
+
+    h.turnStopping(parent, 1)
+    assert.equal(parent.messages.length, 0, 'the settle notice was read and acted on')
+    const row = readRows(log).find(entry => entry.kind === 'checkpoint')
+    assert.equal(row.decision, 'suppressed')
+    assert.equal(row.reason, 'handled')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('D1: a settle notice with no parent action still delivers the checkpoint', () => {
+  const h = harness()
+  plugin.apply(h.ctx, { log: false, gates: { handoff: { enabled: false } } })
+
+  const parent = h.main('parent-82', [settleNotice('child-82')])
+  h.created(h.child('child-82', 'parent-82', '实现 Task 82', [call(1, 'write', { file_path: 'a.ts' })]))
+  h.ended({ childId: 'child-82', stopReason: 'completed' })
+
+  h.turnStopping(parent, 1)
+  assert.equal(parent.messages.length, 1, 'no parent action after the settle notice: deliver once')
+  assert.match(parent.messages[0].text, /child-82/)
+})
+
+test('D1: a send_message report with no settle notice still counts as handled', () => {
+  // The D1 test above has a settle notice; a closing-message child can also
+  // report only through `send_message` (an `agent/inbox/spliced` record) with no
+  // settle notice at all. The verdict is still "report visible, then parent acted".
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-splice-handled-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log, gates: { handoff: { enabled: false } } })
+
+    const parent = h.main('parent-83', [
+      splice('child-83'),
+      call(1, 'read', { file_path: 'a.ts' }, 'read-83'),
+    ])
+    h.created(h.child('child-83', 'parent-83', '实现 Task 83', [call(1, 'write', { file_path: 'a.ts' })]))
+    h.ended({ childId: 'child-83', stopReason: 'completed' })
+
+    h.turnStopping(parent, 1)
+    assert.equal(parent.messages.length, 0, 'the splice report was acted on; no settle notice is required')
+    const row = readRows(log).find(entry => entry.kind === 'checkpoint')
+    assert.equal(row.decision, 'suppressed')
+    assert.equal(row.reason, 'handled')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 // ---------------------------------------------------------------------------
 // 0.4.0 — shared file-touch detection (pwsh mutations count)
 
@@ -622,6 +700,178 @@ test('a child whose pwsh work was read-only stays a read-only survey', () => {
   h.ended({ childId: 'child-53', stopReason: 'completed' })
 
   assert.equal(parent.messages.length, 0, 'no diff to read, no command to re-run — silence')
+})
+
+// ---------------------------------------------------------------------------
+// 0.12.2 D2（设计反转）— 封闭形状：只有能证明是记账写入时才豁免
+
+const SHELL_CWD = 'G:\\repo'
+
+test('D2-1: a ledger append is a control-plane write and its content is never classified', () => {
+  // The corpus case: the ledger body routinely names source files. Content is
+  // outside the closed shape, so it can never become a classified target.
+  assert.equal(controlPlaneOnlyShellWrite(
+    'Add-Content dispatch\\ledger\\x.md "- 改了 server/src/a.ts"', { cwd: SHELL_CWD }), true)
+})
+
+test('D2-2: -Path and -FilePath name the single target', () => {
+  assert.equal(controlPlaneOnlyShellWrite(
+    'Set-Content -Path dispatch\\ledger\\x.md "y"', { cwd: SHELL_CWD }), true)
+  assert.equal(controlPlaneOnlyShellWrite(
+    'Out-File -FilePath dispatch\\review\\x.log "y"', { cwd: SHELL_CWD }), true)
+})
+
+test('D2-3: New-Item with -ItemType and -Force is a control-plane shape', () => {
+  assert.equal(controlPlaneOnlyShellWrite(
+    'New-Item -ItemType Directory -Force dispatch/review', { cwd: SHELL_CWD }), true)
+})
+
+test('D2-4: git diff with a redirect to a control-plane path is a control-plane shape', () => {
+  assert.equal(controlPlaneOnlyShellWrite(
+    'git diff --stat > dispatch/review/x.diff', { cwd: SHELL_CWD }), true)
+})
+
+test('D2-5: no closed shape matches a comma-array command → false', () => {
+  // Review L1: either spacing form used to smuggle the code element through.
+  assert.equal(controlPlaneOnlyShellWrite(
+    'Remove-Item dispatch\\a.md,server\\src\\a.ts', { cwd: SHELL_CWD }), false)
+  assert.equal(controlPlaneOnlyShellWrite(
+    'Remove-Item dispatch\\a.md , server\\src\\a.ts', { cwd: SHELL_CWD }), false)
+})
+
+test('D2-6: aliases and Copy-Item are outside the closed shapes', () => {
+  // Review L2: the pattern sees these verbs, the shape list must not.
+  for (const command of [
+    'ac server\\src\\a.ts "x"',
+    'del server\\src\\a.ts',
+    'copy a b',
+    'ni dispatch\\x',
+  ]) assert.equal(controlPlaneOnlyShellWrite(command, { cwd: SHELL_CWD }), false, command)
+})
+
+test('D2-7: no closed shape matches a single-& command → false', () => {
+  // Review L3: only `;`/newline split; any bare `&` rejects the command.
+  assert.equal(controlPlaneOnlyShellWrite(
+    'Set-Content server\\src\\a.ts "x" & Copy-Item -Path dispatch\\x.md dispatch\\y.md',
+    { cwd: SHELL_CWD }), false)
+})
+
+test('D2-8: no closed shape matches an iex/cmd quoted payload → false', () => {
+  // Review L4: `iex`/`cmd /c` with a quoted script must never be classified by
+  // the redirect beside it.
+  assert.equal(controlPlaneOnlyShellWrite(
+    'iex "Remove-Item server/src/a.ts" > dispatch/run.log', { cwd: SHELL_CWD }), false)
+  assert.equal(controlPlaneOnlyShellWrite(
+    'cmd /c "copy a b" > dispatch/calls.log', { cwd: SHELL_CWD }), false)
+})
+
+test('D2-9: -Destination and Tee-Object are not control-plane shapes', () => {
+  assert.equal(controlPlaneOnlyShellWrite(
+    'Copy-Item -Path dispatch\\p.txt -Destination server\\src\\a.ts', { cwd: SHELL_CWD }), false)
+  assert.equal(controlPlaneOnlyShellWrite('Tee-Object dispatch\\x.log', { cwd: SHELL_CWD }), false)
+})
+
+test('D2-10a: the gate is silent when only a shape-A ledger append follows the verification', () => {
+  const gates = resolveGates({})
+  const events = [
+    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+    resultWithText(1, 'verify-1', 'exit code: 0'),
+    call(2, 'pwsh', { command: 'Add-Content dispatch\\ledger\\x.md "y"' }, 'ledger-1'),
+    result(2, 'ledger-1', false),
+    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+  ]
+  assert.equal(evaluateVerifyGate(events, 2, gates, SHELL_CWD), null,
+    'the ledger body names no code path and the target is the control plane')
+  assert.equal(analyzeVerification(events, gates.verify, SHELL_CWD).changes, 0)
+})
+
+test('D2-10b: the gate delivers for an alias write with <shell> and 未知', () => {
+  const gates = resolveGates({})
+  const events = [
+    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+    resultWithText(1, 'verify-1', 'exit code: 0'),
+    call(2, 'pwsh', { command: 'del server\\src\\a.ts' }, 'write-1'),
+    result(2, 'write-1', false),
+    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+  ]
+  const state = evaluateVerifyGate(events, 2, gates, SHELL_CWD)
+  assert.notEqual(state, null, 'an alias write matches the pattern and is not a closed shape')
+  assert.deepEqual(state.files, ['<shell>'])
+  assert.match(renderVerifyGate(gates.verify.text, state), /<shell>（未知改动）/)
+})
+
+test('D2-11: no closed shape matches a git commit → false', () => {
+  assert.equal(controlPlaneOnlyShellWrite('git commit -m "x"', { cwd: SHELL_CWD }), false)
+})
+
+test('D2-12: no closed shape matches a read-only command → false', () => {
+  assert.equal(controlPlaneOnlyShellWrite('echo hi', { cwd: SHELL_CWD }), false)
+})
+
+// ---------------------------------------------------------------------------
+// 0.12.2 复审 — 调用点修复：`pwsh` 的 `workdir` 决定落点，不能只按会话 cwd 判控制面
+
+test('readWorkdir: absolute and relative pass through, missing is undefined, unusable is null', () => {
+  const args = value => JSON.stringify(value)
+  assert.equal(readWorkdir(args({ command: 'x', workdir: 'G:\\repo\\server\\src' })), 'G:\\repo\\server\\src',
+    'an absolute workdir is returned as written')
+  assert.equal(readWorkdir(args({ command: 'x', workdir: 'server/src' })), 'server/src',
+    'a relative workdir is returned as written; the caller resolves it against the session cwd')
+  assert.equal(readWorkdir(args({ command: 'x' })), undefined, 'no workdir and no cwd key: nothing to resolve')
+  assert.equal(readWorkdir('not-json'), undefined)
+  assert.equal(readWorkdir(args({ command: 'x', cwd: 'G:\\repo\\server' })), 'G:\\repo\\server',
+    'cwd is the fallback key when workdir is absent')
+  assert.equal(readWorkdir(args({ command: 'x', workdir: {} })), null,
+    'an object workdir must not silently fall back to the session cwd')
+  assert.equal(readWorkdir(args({ command: 'x', workdir: 5 })), null)
+  assert.equal(readWorkdir(args({ command: 'x', workdir: '' })), null)
+})
+
+test('0.12.2 review: a ledger append under any explicit workdir is dirty', () => {
+  const gates = resolveGates({})
+  const events = [
+    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+    resultWithText(1, 'verify-1', 'exit code: 0'),
+    call(2, 'pwsh', {
+      command: 'Add-Content dispatch\\ledger\\x.md "y"',
+      workdir: `${SHELL_CWD}\\server\\src`,
+    }, 'ledger-1'),
+    result(2, 'ledger-1', false),
+  ]
+  const state = analyzeVerification(events, gates.verify, SHELL_CWD)
+  assert.equal(state.dirty, true, 'the target really lands in <cwd>/server/src/dispatch/ledger')
+  assert.ok(state.files.includes('<shell>'))
+
+  // 简化后：任何显式 `workdir`（含等于会话 cwd 的）都判脏，不存在 ==cwd 豁免。
+  const sameCwd = [
+    call(1, 'pwsh', { command: 'npm test' }, 'verify-2'),
+    resultWithText(1, 'verify-2', 'exit code: 0'),
+    call(2, 'pwsh', {
+      command: 'Add-Content dispatch\\ledger\\x.md "y"',
+      workdir: SHELL_CWD,
+    }, 'ledger-2'),
+    result(2, 'ledger-2', false),
+  ]
+  const sameCwdState = analyzeVerification(sameCwd, gates.verify, SHELL_CWD)
+  assert.equal(sameCwdState.dirty, true,
+    'an explicit workdir equal to the session cwd is still dirty: the landing point cannot be proven')
+  assert.ok(sameCwdState.files.includes('<shell>'))
+})
+
+test('0.12.2 review: a New-Item under a code workdir is dirty', () => {
+  const gates = resolveGates({})
+  const events = [
+    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+    resultWithText(1, 'verify-1', 'exit code: 0'),
+    call(2, 'pwsh', {
+      command: 'New-Item -ItemType Directory -Force dispatch/review',
+      workdir: `${SHELL_CWD}\\server\\src`,
+    }, 'mkdir-1'),
+    result(2, 'mkdir-1', false),
+  ]
+  const state = analyzeVerification(events, gates.verify, SHELL_CWD)
+  assert.equal(state.dirty, true)
+  assert.deepEqual(state.files, ['<shell>'])
 })
 
 // ---------------------------------------------------------------------------
@@ -2650,6 +2900,23 @@ function splice(childId, target = 'next-step') {
   return {
     type: 'agent/inbox/spliced',
     data: { target, inserted: [{ role: 'user', content: [{ type: 'text', text: `Agent ${childId} sent a message: 完成` }] }] },
+  }
+}
+
+/**
+ * One `user/message` settle notice (D1): the runtime-owned report a parent sees
+ * when a child settles. Closing-message children produce this and no splice.
+ */
+function settleNotice(childId) {
+  const source = {
+    kind: 'subagent-settled', form: 'notice', summary: '子代理已完成', stopReason: 'completed', senderSessionId: childId,
+  }
+  return {
+    type: 'user/message',
+    data: {
+      message: { role: 'user', content: [{ type: 'text', text: '子代理已完成' }] },
+      source,
+    },
   }
 }
 

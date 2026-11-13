@@ -56,14 +56,14 @@
 | HandoffGate | 本回合为空（无本回合 `tool/call`、无非空 text），且往前连续空回合数 ≥ `gates.handoff.emptyTurns` | 「先写 `dispatch/state/<需求>.md` 再开新会话」提醒，占位 `{emptyTurns}` | `kind:"gate", gate:"handoff", emptyTurns:<n>` |
 
 - **让位顺序**：checkpoint → Wait → Verify → Contract → Review → Handoff，固定顺序、不依赖订阅顺序；checkpoint 投递后闸门让位，同一收尾的后续机制不再发第二条（`plugin.mjs:592-619`）。
-- **`{action}` 三句固定、不可配置**：verify 一句（先跑集成命令并留存退出码再收口）、review 代码改动一句（重开受影响切片）、review 文档改动一句（跑 `docs-check` + 交「断言 → 代码位置」表，不必重开代码评审）；`docOnly` 为真时用第三句（`lib/gates.mjs:602-604`、`806-808`）。
-- **验证成功口径**：`pwsh` 命中 `gates.verify.commands`、有对应 `tool/result`、`isError !== true`、结果文本无 `exit code: N` 或 `N === 0`；失败或没有结果的验证不算验证（`lib/gates.mjs:385-388`、`454-474`）。
-- **纯只读 present 不提醒**：整会话零写入、也从未验证时没有 diff 可验（`lib/gates.mjs:578-581`）。
-- **脏判定**：最近一次成功验证之后有成功 write/edit，或命中 `DEFAULT_PWSH_SHELL_PATTERN` 的 `pwsh`；没有对应结果的调用按脏处理；`git checkout -- <路径>` / `git restore <路径>` 这类还原不算脏（`lib/gates.mjs:416-435`、`339-365`）。
+- **`{action}` 三句固定、不可配置**：verify 一句（先跑集成命令并留存退出码再收口）、review 代码改动一句（重开受影响切片）、review 文档改动一句（跑 `docs-check` + 交「断言 → 代码位置」表，不必重开代码评审）；`docOnly` 为真时用第三句（`lib/gates.mjs:659-661`、`863-865`）。
+- **验证成功口径**：`pwsh` 命中 `gates.verify.commands`、有对应 `tool/result`、`isError !== true`、结果文本无 `exit code: N` 或 `N === 0`；失败或没有结果的验证不算验证（`lib/gates.mjs:388-391`、`522-529`）。
+- **纯只读 present 不提醒**：整会话零写入、也从未验证时没有 diff 可验（`lib/gates.mjs:635-637`）。
+- **脏判定**：最近一次成功验证之后有成功 write/edit，或命中 `DEFAULT_PWSH_SHELL_PATTERN` 的 `pwsh`；`pwsh` 命中变更模式时，只有形状 A/B/C 的记账写入（`Add-Content`/`Set-Content`/`Out-File`/`Clear-Content` 具名路径、`New-Item` 建目录/文件、`git diff > <路径>`）且目标全在控制面才不脏，其余一律算 `<shell>`（未知=代码）。没有对应结果的调用按脏处理；`git checkout -- <路径>` / `git restore <路径>` 这类还原不算脏（`lib/gates.mjs:461-490`、`342-368`）；显式传 `workdir` 的 `pwsh` 调用一律按脏（落点不由会话 cwd 决定，还原命令也不例外）。
 - **控制面豁免**：VerifyGate 与 ReviewGate 跳过 `gates.controlPlanePatterns`（默认 `dispatch/`、`docs/superpowers/specs/`，与 `writePolicy.allowlist` 同值），控制面写入不计脏、不使评审失效；分类走唯一 `classifyPath`（cwd 锚定 + 段级前缀），`src/**/dispatch/**` 按代码处理（`lib/tool-calls.mjs:189-205`）。
-- **ContractGate 只看收尾时刻**：活跃子代理在 `agent/created` 登记、`subagent/end` 标 `ended`，写入之后、收尾之前结束的子代理不触发（`plugin.mjs:440-446`、`lib/gates.mjs:670-683`）。
-- **ReviewGate 只看「评审完成 + 之后有写入」**：label 以 `gates.review.labelPrefixes` 开头（默认 `只读评审`/`只读复审`），不解析评审报告 PASS/FAIL，每个基线只提醒一次（`lib/gates.mjs:763-794`、`plugin.mjs:636-680`）。
-- **HandoffGate 是 best-effort**：空回合 = 无本回合 `tool/call` 且无非空 text；宿主在空流/中断回合不再触发 `agent/turn-stopping` 时无法提醒（`lib/gates.mjs:698-738`）。
+- **ContractGate 只看收尾时刻**：活跃子代理在 `agent/created` 登记、`subagent/end` 标 `ended`，写入之后、收尾之前结束的子代理不触发（`plugin.mjs:440-446`、`lib/gates.mjs:727-740`）。
+- **ReviewGate 只看「评审完成 + 之后有写入」**：label 以 `gates.review.labelPrefixes` 开头（默认 `只读评审`/`只读复审`），不解析评审报告 PASS/FAIL，每个基线只提醒一次（`lib/gates.mjs:820-851`、`plugin.mjs:636-680`）。
+- **HandoffGate 是 best-effort**：空回合 = 无本回合 `tool/call` 且无非空 text；宿主在空流/中断回合不再触发 `agent/turn-stopping` 时无法提醒（`lib/gates.mjs:755-795`）。
 
 ### 完成检查点与回合观测
 
@@ -73,7 +73,7 @@
 
 - 子代理 `subagent/end` 且 `stopReason === 'completed'` 才登记「待验收」（每个子代理一次，失败/中止不登记）；判定挪到父代理的 `agent/turn-stopping`，此时父代理整回合的动作已在日志里。
 - 判定：父代理已按汇报动过手 → 静默（`reason: 'handled'`）；子代理整个会话零写入 → 静默（`reason: 'read-only'`）；其余投一条 `steer`，同回合多个 pending 合并成波次消息（`checkpoint.waveText`，`{count}`/`{labels}`）（`plugin.mjs:369-433`）。
-- 「已验收」的三个条件：父代理日志有 `agent/inbox/spliced` 且文本含 `Agent {childId} sent a message`、那次汇报之后父代理有任意一次 `tool/call`、子代理最后一次 `send_message` 之后没再 `write`/`edit`（`plugin.mjs:720-743`）。
+- 「已验收」的判定：父代理在子代理报告可见之后已动过手 → 静默（`reason: 'handled'`）；报告可见点取最后一条——`send_message` 的 `agent/inbox/spliced`（文本含 `Agent {childId} sent a message`），或 `user/message` 且 `data.source.kind === 'subagent-settled'`、`data.source.senderSessionId === {childId}`；没有可见性证据时保守投递（`plugin.mjs:721-744`）。
 - 只读判定用 `callTouchesFile`：`write`/`edit` **尝试即算**，`pwsh` 命中变更动词也算；判定抛错按执行类处理（`plugin.mjs:93-99`、`lib/tool-calls.mjs:265-271`）。
 - 父代理没有 hook 作用域时（如嵌套子代理作父）回退为 settle 时 `followup`，判定顺序不变，`turn` 记 `null`（`plugin.mjs:704-716`）。
 
@@ -81,7 +81,7 @@
 
 - 根代理回合只要有写入、`pwsh` 变更或派发（任一非零），收尾时往 `<cwd>/dispatch/runs/<sessionId>.jsonl` 追加一行：`time`/`session`/`turn`/`writes`/`files`/`shellWrites`/`failedWrites`/`delegations`；默认目录 `dispatch/runs`（`observation.dir`，`config.mjs:161`）。
 - 同一 `(session, turn)` 只保留首行：`steer` 会让同一回合再跑一步，首行才是自然的回合末快照（`plugin.mjs:547`）。
-- 口径：控制面路径的写入不计入；`write`/`edit` 以失败结果为准排除（没有结果照算，回合被打断时不能把写入抹掉）；`pwsh` 命中变更动词才算 `shellWrites`，`git commit` 不计（`lib/tool-calls.mjs:307-366`）。
+- 口径：控制面路径的写入不计入；`write`/`edit` 以失败结果为准排除（没有结果照算，回合被打断时不能把写入抹掉）；`pwsh` 命中变更动词才算 `shellWrites`，`git commit` 不计（`lib/tool-calls.mjs:420-426`）。
 - **观测行不参与判定**：没有任何机制回读它，写盘失败静默吞掉——观测不是门禁（`plugin.mjs:530-532`、`577-579`）。
 
 **决定日志**（`config.mjs:185-189`、`plugin.mjs:139-176`）
@@ -91,7 +91,7 @@
 
 ### 交接
 
-模型失稳（连续空回合、`/compact` 之后丢了上下文）时不要在旧会话里硬撑：先写 `dispatch/state/<需求>.md`，再开新会话接力。HandoffGate 的提醒文案指向本节（`lib/gates.mjs:90`），模板保持最小：
+模型失稳（连续空回合、`/compact` 之后丢了上下文）时不要在旧会话里硬撑：先写 `dispatch/state/<需求>.md`，再开新会话接力。HandoffGate 的提醒文案指向本节（`lib/gates.mjs:93`），模板保持最小：
 
 ```text
 需求：<slug>
@@ -163,7 +163,7 @@
 
 表内 26 个 `gates.*` / `writePolicy.*` 键就是 `resolveGates({})` / `resolveWritePolicy({})` 的叶子键减去 4 个镜像/编译字段；`enabled`/`order`/`rules`/`footer`/`checkpoint.*`/`observation.*`/`log` 是 `resolveConfig` 的顶层键。
 
-**占位符语义**（`lib/gates.mjs:602-626`）：`{files}` 脏路径（去重，最多 3 个，多余追加「等 N 个」，为空时用「工作区」）；`{kind}` 为 `代码` 或 `未知`（`<shell>` 占位算未知）；`{action}` 是闸门固定给出的一句结论——verify 一句「先跑集成命令」，review 按 `docOnly` 给两句之一（代码：重开切片；文档：跑 docs-check + 交断言表）；`{changes}` 脏改动计数、`{lastVerify}` 最近一次成功验证命令（缺失记为「从未验证」）是兼容占位；模板里未知占位原样保留、不抛错。
+**占位符语义**（`lib/gates.mjs:673-683`、`702-713`）：`{files}` 脏路径（去重，最多 3 个，多余追加「等 N 个」，为空时用「工作区」）；`{kind}` 为 `代码` 或 `未知`（`<shell>` 占位算未知）；`{action}` 是闸门固定给出的一句结论——verify 一句「先跑集成命令」，review 按 `docOnly` 给两句之一（代码：重开切片；文档：跑 docs-check + 交断言表）；`{changes}` 脏改动计数、`{lastVerify}` 最近一次成功验证命令（缺失记为「从未验证」）是兼容占位；模板里未知占位原样保留、不抛错。
 
 非法配置在插件加载时直接报错，不会静默降级：`order` 非有限数字、`rules` 为空/非数组、`footer` 或 `checkpoint.*` 非字符串、`log` 既非非空路径也非 `false`、`observation.dir` 非非空字符串也非 `false`、`nudge` 段出现、`writePolicy.mode` 不是 `enforce`/`shadow`、`writePolicy.allowlist`/`tools`/`delegationTools` 为空数组或含空白串、`writePolicy.overridePath` 空白、`gates.wait.threshold` 与 `gates.handoff.emptyTurns` 非正整数、`gates.*.text` 空白、`gates.verify.commitPattern` 无法编译、各字符串列表为空或含非字符串、`gates.contract`/`review`/`handoff` 非对象。
 
@@ -183,7 +183,7 @@
 
 | 命令 | 期望 |
 |---|---|
-| `node plugins/dispatch-protocol/test.mjs` | 123 pass（`pass=123 fail=0`），exit 0 |
+| `node plugins/dispatch-protocol/test.mjs` | 140 pass（`pass=140 fail=0`），exit 0 |
 | `node plugins/dispatch-protocol/scripts/docs-check.mjs` | 无参扫仓库根，`docs-check: files=<N> fail=0`，exit 0 |
 | `node plugins/dispatch-protocol/scripts/docs-check.mjs --self-test` | `self-test: pass=<N> fail=0`，exit 0 |
 
@@ -206,6 +206,7 @@
 | `0.9.1` | 台账按需求分文件：`dispatch/state/<需求>.md` + `dispatch/ledger/<需求>.md`；`DEFAULT_CONTROL_PLANE_PATTERNS` 增加 `dispatch/state/`；HandoffGate 文案与「交接」模板改新路径；新增「多会话」。 |
 | `0.12.0` | 文档收口：新增 `scripts/docs-check.mjs`（DOC001–DOC005 + `--self-test`）；配置键集合改为运行时从解析器推导（26 个输入键，4 个镜像/编译字段排除）；`gates.review.textDocOnly` 删除、闸门收成一句 `{action}`；控制面判定改为 `classifyPath`（cwd 锚定 + 段级前缀，`src/**/dispatch/**` 不再豁免）；规则 1/4 改为「断言表 + 有界评审」。中间版本 0.10.0（文档/还原豁免、`{files}`/`{kind}` 点名）与 0.11.0（分类器收敛、文案收敛）的内容一并并入本版。 |
 | `0.12.1` | 纪律正文补四处缺口：规则 1 允许仓库没有 `scripts/docs-check.mjs`（记一行台账、不新建脚本）；只回 `ok` 记「ok 视为接受推荐项」、不得写「用户已确认」；勘察结论须含「现存调用方」，无调用方的实现标「预防性实现」；规则 3 补多包仓库「按端各一条、每端只跑一次」。正文 3611 → 3716 字符，条款数仍为 6。 |
+| `0.12.2` | 闸门噪声两修。D1：检查点去重收敛成一个原语「子代理报告对父代理可见之后，父代理有没有动过手」——settle 事件与 `send_message` 两条上报路径都认，不再只认 inbox 标记。D2（第三次复审后的设计反转）：删除「解析 PowerShell 求写入目标」的多目标解析器（`readShellWriteTargets`、动词/开关表、逗号合并、残段复检全部删除，无并列实现），改为封闭形状豁免——`controlPlaneOnlyShellWrite` 只在整条命令每段都能构造性证明是记账写入（形状 A/B/C：`Add-Content`/`Set-Content`/`Out-File`/`Clear-Content` 具名路径、`New-Item` 建目录/文件、`git diff > <路径>`）且路径唯一、全在控制面时返回 true，其余一律 false → 脏 → `<shell>`（未知=代码）；`gates.mjs` 的脏路径随之退回单路径（`write`/`edit` 取参数路径，`pwsh` 与取不到路径一律 `<shell>`），`{files}` 里的 shell 条目重新显示为 `<shell>`。代价是偶尔多跑一次集成命令，收益是漏验方向不可能静默。 |
 
 0.10.0–0.11.0 为未发布的中间提交，内容并入 0.12.0。
 

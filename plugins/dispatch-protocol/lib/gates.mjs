@@ -14,7 +14,8 @@
 // 不阻断任何工具调用。判定与投递失败一律吞掉——闸门是提醒，不是门禁。
 
 import {
-  ARTIFACT, classifyPath, DEFAULT_CONTROL_PLANE_PATTERNS, DEFAULT_PWSH_SHELL_PATTERN, DEFAULT_WRITE_TOOLS,
+  ARTIFACT, classifyPath, controlPlaneOnlyShellWrite, DEFAULT_CONTROL_PLANE_PATTERNS,
+  DEFAULT_PWSH_SHELL_PATTERN, DEFAULT_WRITE_TOOLS, readWorkdir,
 } from './tool-calls.mjs'
 
 /** await 闸门的默认查询工具：全是「只读状态」类工具，不产生新证据。 */
@@ -410,6 +411,16 @@ function collectResults(events) {
  * 起控制面扩为 `dispatch/` 整树，且 `pwsh` 里「还原到 HEAD」的命令不算脏
  * （C1/C3）。0.11.0：控制面判定收敛到 `classifyPath`（D1/D3），`cwd` 用于把
  * 绝对路径相对化；省略 `cwd` 时控制面判定失败 → 写入按脏处理（保守）。
+ *
+ * D2（0.12.2 设计反转）：`pwsh` 只在 `controlPlaneOnlyShellWrite` 能构造性证明
+ * 「整条命令的每一段都是控制面记账写入」时返回 false；其余一律按脏改动处理，
+ * 展示为 `<shell>`。这一条让 `Add-Content dispatch\ledger\x.md "…"` 与
+ * `write dispatch/ledger/x.md` 落在同一侧，且不可能静默漏验。
+ *
+ * 0.12.2 简化：落点只信任「未提供 `workdir`」——任何显式 `workdir` 一律按脏。
+ * 显式 workdir 时落点不再由会话 cwd 决定，无法构造性证明仍在控制面下；把
+ * `workdir` 与 cwd 做字符串/小写归一比较只会引入新的静默豁免（大小写敏感文件
+ * 系统上 `/repo/Server` 与 `/repo/server` 会被判同一目录），所以不做这类比较。
  * @param call - 一条 `tool/call` 事件。
  * @param results - `collectResults` 的结果。
  * @param patterns - 控制面路径片段（`gates.verify.controlPlanePatterns`）。
@@ -427,9 +438,19 @@ function touchedWorkingTree(call, results, patterns = DEFAULT_CONTROL_PLANE_PATT
   if (name !== 'pwsh') return false
   const command = readCommand(data?.arguments)
   if (command === undefined || !DEFAULT_PWSH_SHELL_PATTERN.test(command)) return false
+  // 0.12.2 简化：`pwsh` 可以带 `workdir`，落点由它决定；任何显式 `workdir`
+  // （含恰好等于会话 cwd 的值，以及对象/数字/空串这类非法值）都无法构造性证明
+  // 仍在控制面下，一律按脏处理。显式 workdir 时不做还原豁免——`git checkout -- <路径>`
+  // 也按脏。只有未提供 `workdir` 时才沿用会话 cwd 继续往下判定。
+  const workdir = readWorkdir(data?.arguments)
+  if (workdir !== undefined) return true
+  // 未提供 `workdir`：以下是会话 cwd 下的判定。
   // 0.10.0 C3：`git checkout -- <路径>` / `git restore <路径>` 只是把工作树
   // 还原到 HEAD，没有产生新 diff；无法可靠判定的写法仍按脏处理。
   if (isRestoreCommand(command)) return false
+  // D2（设计反转）：只有封闭形状能证明这是控制面记账写入，才不是工作树内容
+  // 变更。解析不出/形状不符 → `<shell>`（本义是「拿不到路径」），按代码算。
+  if (controlPlaneOnlyShellWrite(command, { cwd, controlPlanePatterns: patterns })) return false
   // 复用观测档位：git commit 不是工作树内容变更，不能把「收口动作」本身
   // 算成一次新的脏改动（0.4.1 I3）。
   const message = results.get(data?.callId)
@@ -497,9 +518,11 @@ export function analyzeVerification(events, verify, cwd) {
 }
 
 /**
- * 一个脏调用的展示路径：`write`/`edit` 取参数里的 `file_path`/`path`；取不到
- * （或 `pwsh` 变更）一律记 `<shell>`，因此绝不会被当成文档。
+ * 一个脏调用的展示路径：`write`/`edit` 取参数里的 `file_path`/`path`；`pwsh`
+ * 与取不到路径的 `write`/`edit` 一律记 `<shell>`（「拿不到路径」，绝不会被当成
+ * 文档）。
  * @param call - 一条已判定为脏的 `tool/call` 事件。
+ * @returns 一个展示路径；兜底是 `'<shell>'`。
  */
 function dirtyPath(call) {
   if (DEFAULT_WRITE_TOOLS.includes(call.data?.name)) {

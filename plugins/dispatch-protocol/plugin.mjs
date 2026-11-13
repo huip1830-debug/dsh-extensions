@@ -370,7 +370,7 @@ function registerReminders(ctx, config) {
     // A child that never attempted a write is a read-only survey: there is no
     // diff to read and no exit code to check, so the checkpoint would be noise.
     if (ranReadOnly(record.agent)) return 'read-only'
-    if (parentAlreadyHandled(parent, record.agent, childId)) return 'handled'
+    if (parentAlreadyHandled(parent, childId)) return 'handled'
     return 'delivered'
   }
 
@@ -718,25 +718,26 @@ function registerReminders(ctx, config) {
 }
 
 /** 判定：父代理是否已经按该子代理的汇报动过手。 */
-function parentAlreadyHandled(parent, child, childId) {
+function parentAlreadyHandled(parent, childId) {
   try {
     const parentEvents = parent?.session?.snapshotEvents?.() ?? []
+    // 报告可见点（D1）：`send_message` 的 splice 与 settle notice 都是「子代理的
+    // 汇报对父代理可见」的事件；取最后一条——settle 必然晚于任何此类写入。
     const marker = `Agent ${childId} sent a message`
     let reportAt = -1
     for (let i = 0; i < parentEvents.length; i++) {
       const event = parentEvents[i]
-      if (event?.type !== 'agent/inbox/spliced') continue
-      if (!splicedTexts(event).some(text => text.includes(marker))) continue
-      reportAt = i
+      if (event?.type === 'agent/inbox/spliced') {
+        if (splicedTexts(event).some(text => text.includes(marker))) reportAt = i
+        continue
+      }
+      const source = event?.data?.source
+      if (event?.type === 'user/message' && source?.kind === 'subagent-settled'
+        && source.senderSessionId === childId) reportAt = i
     }
+    // 没有可见性证据时保守投递（早退不产生「已处理」的假阴性）。
     if (reportAt < 0) return false
-    if (!hasToolCallAfter(parentEvents, reportAt)) return false
-
-    const childEvents = child?.session?.snapshotEvents?.() ?? []
-    const sendAt = lastIndexWhere(childEvents, e => e?.type === 'tool/call' && e.data?.name === 'send_message')
-    if (sendAt < 0) return true
-    const wroteAfter = hasToolCallAfter(childEvents, sendAt, ['write', 'edit'])
-    return !wroteAfter
+    return hasToolCallAfter(parentEvents, reportAt)
   } catch {
     return false
   }
@@ -748,17 +749,9 @@ function splicedTexts(event) {
   return inserted.flatMap(item => (item?.content ?? []).map(block => block?.text ?? ''))
 }
 
-function hasToolCallAfter(events, index, names) {
+function hasToolCallAfter(events, index) {
   for (let i = index + 1; i < events.length; i++) {
-    const event = events[i]
-    if (event?.type !== 'tool/call') continue
-    if (!names) return true
-    if (names.includes(event.data?.name)) return true
+    if (events[i]?.type === 'tool/call') return true
   }
   return false
-}
-
-function lastIndexWhere(events, predicate) {
-  for (let i = events.length - 1; i >= 0; i--) if (predicate(events[i])) return i
-  return -1
 }
