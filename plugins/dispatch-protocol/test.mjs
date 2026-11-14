@@ -153,6 +153,20 @@ test('0.12.0: rule 4 carries the injection surface and one bounded review', () =
     '0.12.0 D5: the old "必要时" wording is replaced, not appended')
 })
 
+// 0.12.3 — 规则 1 的「表空即收口」曾吞掉规则 4 的注入面强制非空：注入面文档可以
+// 凭一句无验证的「本批无机制断言」零评审收口。例外必须落在规则 1 正文里，所以断言
+// 打在渲染后的注入文本上。
+test('0.12.3: rule 1 exempts the injection surface from empty-table closure', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+  const text = h.sections[0].text
+
+  assert.match(text, /注入面除外：断言表强制非空、不得空表收口/,
+    '0.12.3: AGENTS.md and docs/agent/* cannot close on an empty assertion table')
+  assert.match(text, /表空即收口且台账写「本批无机制断言」（AGENTS\.md 与 docs\/agent\/\* 注入面除外：断言表强制非空、不得空表收口）/,
+    '0.12.3: the exception is attached to the empty-table clause instead of replacing it for ordinary documents')
+})
+
 test('2026-11-12: discipline text gaps', () => {
   const h = harness()
   plugin.apply(h.ctx, {})

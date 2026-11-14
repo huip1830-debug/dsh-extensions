@@ -177,13 +177,13 @@
 - **DOC003** 表格列数：同一表格块内每行列数与块首行一致，忽略行内代码里的竖线与转义竖线。
 - **DOC004** 相对链接：行内 `](path)` 形态的相对目标必须存在；跳过 `http(s)://`、`mailto:` 与 `#` 锚点，先按文档所在目录、再按 root 解析。
 - **DOC005** 配置表键名：表格行首的 `gates.*` / `writePolicy.*` 必须逐字命中输入键集合；集合由本脚本运行时从 `resolveGates({})` / `resolveWritePolicy({})` 的叶子键推导，再减去 4 个镜像/编译字段（`gates.verify.commitRegExp`、`gates.verify.controlPlanePatterns`、`gates.review.controlPlanePatterns`、`gates.review.docPatterns`）→ 26 个输入键（`scripts/docs-check.mjs:50-75`）。
-- **与断言表的分工**：机器只判语法、链接、表格与键名，判不了「这句话与它引用的那行代码是否一致」。所以文档批必须交「断言 → 代码位置」表：表空（纯措辞/格式/排版）→ docs-check 绿即收口；表非空 → 派 1 次有界只读评审（范围仅本批 md 的 diff + 表中代码锚点，输出逐条 `PASS|FAIL` + 未入表断言清单），修完只复跑 docs-check、不再复审；`AGENTS.md` 与 `docs/agent/*` 属注入面，断言表强制非空。
+- **与断言表的分工**：机器只判语法、链接、表格与键名，判不了「这句话与它引用的那行代码是否一致」。所以文档批必须交「断言 → 代码位置」表：表空（纯措辞/格式/排版）→ docs-check 绿即收口；表非空 → 派 1 次有界只读评审（范围仅本批 md 的 diff + 表中代码锚点，输出逐条 `PASS|FAIL` + 未入表断言清单），修完只复跑 docs-check、不再复审；`AGENTS.md` 与 `docs/agent/*` 属注入面，断言表强制非空，表空收口不适用于注入面（规则 1 的「表空即收口」已写明该例外）。
 
 ## 验证
 
 | 命令 | 期望 |
 |---|---|
-| `node plugins/dispatch-protocol/test.mjs` | 140 pass（`pass=140 fail=0`），exit 0 |
+| `node plugins/dispatch-protocol/test.mjs` | 145 pass（`pass=145 fail=0`），exit 0 |
 | `node plugins/dispatch-protocol/scripts/docs-check.mjs` | 无参扫仓库根，`docs-check: files=<N> fail=0`，exit 0 |
 | `node plugins/dispatch-protocol/scripts/docs-check.mjs --self-test` | `self-test: pass=<N> fail=0`，exit 0 |
 
@@ -207,6 +207,7 @@
 | `0.12.0` | 文档收口：新增 `scripts/docs-check.mjs`（DOC001–DOC005 + `--self-test`）；配置键集合改为运行时从解析器推导（26 个输入键，4 个镜像/编译字段排除）；`gates.review.textDocOnly` 删除、闸门收成一句 `{action}`；控制面判定改为 `classifyPath`（cwd 锚定 + 段级前缀，`src/**/dispatch/**` 不再豁免）；规则 1/4 改为「断言表 + 有界评审」。中间版本 0.10.0（文档/还原豁免、`{files}`/`{kind}` 点名）与 0.11.0（分类器收敛、文案收敛）的内容一并并入本版。 |
 | `0.12.1` | 纪律正文补四处缺口：规则 1 允许仓库没有 `scripts/docs-check.mjs`（记一行台账、不新建脚本）；只回 `ok` 记「ok 视为接受推荐项」、不得写「用户已确认」；勘察结论须含「现存调用方」，无调用方的实现标「预防性实现」；规则 3 补多包仓库「按端各一条、每端只跑一次」。正文 3611 → 3716 字符，条款数仍为 6。 |
 | `0.12.2` | 闸门噪声两修。D1：检查点去重收敛成一个原语「子代理报告对父代理可见之后，父代理有没有动过手」——settle 事件与 `send_message` 两条上报路径都认，不再只认 inbox 标记。D2（第三次复审后的设计反转）：删除「解析 PowerShell 求写入目标」的多目标解析器（`readShellWriteTargets`、动词/开关表、逗号合并、残段复检全部删除，无并列实现），改为封闭形状豁免——`controlPlaneOnlyShellWrite` 只在整条命令每段都能构造性证明是记账写入（形状 A/B/C：`Add-Content`/`Set-Content`/`Out-File`/`Clear-Content` 具名路径、`New-Item` 建目录/文件、`git diff > <路径>`）且路径唯一、全在控制面时返回 true，其余一律 false → 脏 → `<shell>`（未知=代码）；`gates.mjs` 的脏路径随之退回单路径（`write`/`edit` 取参数路径，`pwsh` 与取不到路径一律 `<shell>`），`{files}` 里的 shell 条目重新显示为 `<shell>`。代价是偶尔多跑一次集成命令，收益是漏验方向不可能静默。 |
+| `0.12.3` | 规则 1「表空即收口」补注入面例外：`AGENTS.md` 与 `docs/agent/*` 不得空表收口——此前规则 1 的空表收口吞掉了规则 4 的「注入面断言表强制非空」，注入面文档可凭一句无验证的「本批无机制断言」零评审收口。规则 1 正文 1259 → 1306 字符，条款数仍为 6。 |
 
 0.10.0–0.11.0 为未发布的中间提交，内容并入 0.12.0。
 
