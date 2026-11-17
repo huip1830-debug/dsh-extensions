@@ -54,7 +54,7 @@ import { randomUUID } from 'node:crypto'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { resolveConfig } from './lib/config.mjs'
-import { readProjectMode } from './lib/project.mjs'
+import { PROJECT_MODES, readProjectMode, writeProjectMode } from './lib/project.mjs'
 import { callTouchesFile, summarizeTurn } from './lib/tool-calls.mjs'
 import { evaluateWritePolicy, renderDenyText } from './lib/write-policy.mjs'
 import {
@@ -287,6 +287,85 @@ function makeGuard(config) {
   }
 }
 
+/** `/dispatch` 的用法行：参数不在三档时原样返回（spec §3.1 第 3 步）。 */
+const COMMAND_USAGE = '用法：/dispatch [off|shadow|full]（无参=查询）'
+
+/**
+ * 注册宿主命令 `/dispatch`（0.14.0，spec `2026-11-17-dispatch-ui-design.md` §3.1）。
+ *
+ * 命令是「文件唯一真相」的第二个写入口：无参读 `readProjectMode`，带参写
+ * `writeProjectMode`，和 UI 控件读写同一个标记文件。不写决定日志——日志只记
+ * 守卫/闸门/检查点的判定，命令是用户显式动作，不需要记账。
+ *
+ * 注册用可选服务注入 `ctx.inject(['commands'], …)`，而不是插件顶层的 `inject`
+ * 数组：`commands` 是可选能力，放进顶层会让 headless/ACP 宿主因为缺服务而整个
+ * 插件不加载。没有 `inject`（测试/老宿主）或注入不回调用时静默跳过，`apply`
+ * 不得因此抛错。
+ *
+ * 命令执行面全程 try/catch：handler 的任何异常都变成 `{ kind: 'error' }`，命令
+ * 执行失败不能影响宿主回合。
+ * @param ctx - the plugin context.
+ * @param config - the resolved plugin config (`projectSwitch` is read here).
+ */
+function registerCommand(ctx, config) {
+  if (typeof ctx?.inject !== 'function') return
+  const handler = ({ agent, rawInput } = {}) => {
+    try {
+      const session = agent?.session
+      const cwd = session?.cwd ?? session?.header?.cwd
+      if (typeof cwd !== 'string' || cwd.trim() === '') {
+        return { kind: 'error', text: '无法确定会话工作目录' }
+      }
+      const settings = config.projectSwitch
+      // 只有 undefined（宿主没给参）与字符串算参数形态：数组/对象/数字不是
+      // 「无参查询」，按用法错误处理，否则一次畸形调用会被静默当成查询。
+      if (rawInput !== undefined && typeof rawInput !== 'string') {
+        return { kind: 'error', text: COMMAND_USAGE }
+      }
+      const argument = typeof rawInput === 'string' ? rawInput.trim().toLowerCase() : ''
+      if (argument === '') {
+        return { kind: 'success', text: `当前项目档位：${readProjectMode(cwd, settings)}` }
+      }
+      if (!PROJECT_MODES.includes(argument)) return { kind: 'error', text: COMMAND_USAGE }
+
+      const written = writeProjectMode(cwd, settings, argument)
+      if (!written.ok) {
+        const detail = written.error === undefined ? '' : `（${written.error}）`
+        return { kind: 'error', text: `保存失败：${written.reason}${detail}` }
+      }
+      // `enabled: false` 时文件照写（文件是唯一真相），但要提示「当前不生效」，
+      // 否则用户会以为切换失败。
+      const suffix = settings.enabled === false ? '；注意：项目开关已关闭，本文件当前不生效' : ''
+      return { kind: 'success', text: `已切换为 ${written.mode}（${written.file}）${suffix}` }
+    } catch (error) {
+      const detail = error?.message === undefined ? '' : `（${error.message}）`
+      return { kind: 'error', text: `保存失败：write-failed${detail}` }
+    }
+  }
+
+  try {
+    ctx.inject(['commands'], (cctx) => {
+      try {
+        const register = () => cctx.commands.register({
+          name: 'dispatch',
+          description: '查看/切换当前项目的派发纪律档位',
+          input: { hint: '[off|shadow|full]' },
+          handler,
+        })
+        // 与 DSH settings README 的写法一致：disposer 交给子上下文的 effect，
+        // 插件卸载时命令随之注销。
+        if (typeof cctx.effect === 'function') return cctx.effect(register)
+        return register()
+      } catch {
+        // 子上下文没有 commands 服务：命令能力静默缺席，其余机制照常。
+        return undefined
+      }
+    })
+  } catch {
+    // 宿主拒绝可选注入（服务缺失）：静默跳过，绝不影响插件加载。
+  }
+}
+
 export function apply(ctx, rawConfig) {
   const config = resolveConfig(rawConfig)
 
@@ -313,6 +392,9 @@ export function apply(ctx, rawConfig) {
     },
     interpolate: false,
   }))
+
+  // 0.14.0 `/dispatch` 宿主命令：无参查询、带参写标记文件（spec §3.1）。
+  registerCommand(ctx, config)
 
   // 0.9.0 写入守卫：唯一能真正阻止一次写入的地方。`ctx.effect` 持有 disposer，
   // 插件卸载时守卫一并消失；`inject` 里的 `'tools'` 保证 `ctx.tools` 存在。

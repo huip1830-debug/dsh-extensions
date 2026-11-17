@@ -21,8 +21,9 @@
 // 读一次模式，缓存把重复读取压成一次 stat。缓存键含绝对路径，不会跨 cwd 串味；
 // stat 失败或读取失败不缓存（下一次调用仍会重试）。
 
-import { readFileSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { randomBytes } from 'node:crypto'
+import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { normalizePath, toCwdRelative } from './write-policy.mjs'
 
 /** 项目级开关的默认配置段；`config.mjs` 只校验与转发，默认值只有这一个入口。 */
@@ -113,5 +114,62 @@ export function readProjectMode(cwd, projectSwitch) {
     return mode
   } catch {
     return 'full'
+  }
+}
+
+/**
+ * 写项目标记文件（spec `2026-11-17-dispatch-ui-design.md` §3.1 第 4 步）。
+ *
+ * 命令层与 UI 都改这一个文件，所以写入必须和读取共用同一套路径归一化：
+ * 复用模块内的 `resolveMarkerFile`，`normalizePath` / `toCwdRelative` 仍只有
+ * `write-policy.mjs` 一份实现。原子写（同目录 `<file>.tmp-<pid>-<rand>` + `rename`）
+ * 保证读侧永远看不到半截 JSON——`readProjectMode` 把坏文件当 `'full'`，一次
+ * 写到一半的切换会静默恢复全文规则，比写失败更难排查。
+ *
+ * `projectSwitch.enabled === false` 时**照写**：文件是唯一真相，开关只是
+ * 「当前不生效」；是否提示由命令层决定，本函数不改变写入语义。
+ *
+ * 永不抛错：返回值即契约。
+ * - 成功：`{ ok: true, file: '<cwd 相对 posix 路径>', mode }`
+ * - 失败：`{ ok: false, reason: 'invalid-cwd' | 'invalid-path' | 'write-failed', error? }`
+ *   非法档位同样按 `invalid-path` 返回（契约只给这三个 reason；命令层已先挡
+ *   非法档位，这里只是防御）。
+ * @param cwd - 会话工作目录（`session.cwd ?? session.header.cwd`）。
+ * @param projectSwitch - 已解析的 `projectSwitch` 段；缺省用默认值。
+ * @param mode - `'full' | 'shadow' | 'off'`。
+ * @returns 写入结果，见上。
+ */
+export function writeProjectMode(cwd, projectSwitch, mode) {
+  const settings = projectSwitch ?? DEFAULT_PROJECT_SWITCH
+  try {
+    if (!PROJECT_MODES.includes(mode)) return { ok: false, reason: 'invalid-path' }
+    if (typeof cwd !== 'string' || cwd.trim() === '') return { ok: false, reason: 'invalid-cwd' }
+    // cwd 本身归一化失败（如 '.'）与「没给 cwd」同属 invalid-cwd；路径逃出 cwd
+    // 才是 invalid-path，两者在日志/提示里必须可区分。
+    if (normalizePath(cwd) === undefined) return { ok: false, reason: 'invalid-cwd' }
+    const file = resolveMarkerFile(cwd, settings.path ?? DEFAULT_PROJECT_SWITCH.path)
+    if (file === undefined) return { ok: false, reason: 'invalid-path' }
+    const relative = toCwdRelative(file, cwd)
+    if (relative === undefined || relative === '') return { ok: false, reason: 'invalid-path' }
+
+    // 随机后缀：同一进程里两个并发写入（两个会话同时切档）不会撞同一个临时名，
+    // 否则后一个 rename 会带走前一个正在写的内容。
+    const temporary = `${file}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`
+    try {
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(temporary, `${JSON.stringify({ mode })}\n`)
+      renameSync(temporary, file)
+    } catch (error) {
+      // rename 失败时临时文件可能已经存在：清掉，不留 `.tmp-<pid>-<rand>` 垃圾。
+      try {
+        unlinkSync(temporary)
+      } catch {
+        // 临时文件从未创建（mkdir/write 就失败了）。
+      }
+      return { ok: false, reason: 'write-failed', error: error?.message ?? String(error) }
+    }
+    return { ok: true, file: relative, mode }
+  } catch (error) {
+    return { ok: false, reason: 'write-failed', error: error?.message ?? String(error) }
   }
 }

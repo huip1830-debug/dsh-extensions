@@ -2,5 +2,17 @@
   "meta": {
     "title": "派发纪律",
     "description": "把派发纪律常驻注入系统提示词 + 子代理完成检查点 + 工具边界写入守卫：主控对执行面的 write/edit 在控制面名单外且无 dispatch/override.json 时被当场拒绝（回合继续）。"
+  },
+  "ui": {
+    "title": "派发纪律",
+    "modeOff": "关闭",
+    "modeShadow": "只记",
+    "modeFull": "全部",
+    "modeUnknown": "未知",
+    "unknownHint": "读不到标记文件：{detail}",
+    "writeFailed": "切换失败：{detail}",
+    "unsupported": "当前宿主没有客户端命令执行面",
+    "switchTo": "切换为「{label}」",
+    "unreadable": "未知原因"
   }
 }

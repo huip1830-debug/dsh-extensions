@@ -1,6 +1,6 @@
 {
   "name": "dispatch-protocol",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "private": true,
   "type": "module",
   "description": "DSH profile plugin: inject always-on delegation discipline into the system prompt, independent of which skills the model loads",
@@ -8,12 +8,36 @@
   "main": "./plugin.mjs",
   "exports": {
     ".": "./plugin.mjs",
+    "./client": "./client.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },
+  "files": [
+    "plugin.mjs",
+    "client.js",
+    "cordis.patch.yml",
+    "lib/",
+    "locale/",
+    "scripts/",
+    "README.md"
+  ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-files",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-commands",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
     }
   }
 }

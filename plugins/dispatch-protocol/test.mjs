@@ -12,14 +12,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import * as plugin from './plugin.mjs'
 import { resolveConfig, DEFAULT_RULES } from './lib/config.mjs'
-import { DEFAULT_PROJECT_SWITCH, PROJECT_MODES, readProjectMode } from './lib/project.mjs'
+import { DEFAULT_PROJECT_SWITCH, PROJECT_MODES, readProjectMode, writeProjectMode } from './lib/project.mjs'
 import {
   ARTIFACT, callTouchesFile, classifyPath, controlPlaneOnlyShellWrite, DEFAULT_CONTROL_PLANE_PATTERNS,
   DEFAULT_PWSH_MUTATION_PATTERN, DEFAULT_PWSH_SHELL_PATTERN, readWorkdir, summarizeTurn,
@@ -3099,6 +3099,321 @@ test('0.13.0: the prompt section text is a per-cwd function', () => {
 })
 
 // ---------------------------------------------------------------------------
+// 0.14.0 — `/dispatch` 宿主命令（spec `2026-11-17-dispatch-ui-design.md` §3.1/§5）
+//
+// 命令与 UI 读写同一个标记文件，所以断言打在文件内容上（读回 JSON）而不是
+// `readProjectMode`：后者按 `(路径, mtime)` 记忆化，同一目录连续改写不保证
+// mtime 变化。
+
+test('0.14.0: apply registers the /dispatch command with the frozen shape', () => {
+  // §5：命令名/描述/hint 是契约面，出错会直接改变用户看到的 `/` 菜单。
+  const h = harness()
+  plugin.apply(h.ctx, quiet)
+
+  assert.equal(h.commands.length, 1, 'exactly one command is registered')
+  const [command] = h.commands
+  assert.equal(command.name, 'dispatch')
+  assert.equal(command.description, '查看/切换当前项目的派发纪律档位')
+  assert.deepEqual(command.input, { hint: '[off|shadow|full]' })
+  assert.equal(typeof command.handler, 'function')
+})
+
+test('0.14.0: writeProjectMode creates parent dirs and writes the marker', () => {
+  // §5：新建父目录 + 内容正确 + 返回值是 cwd 相对 posix 路径。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-write-mode-'))
+  try {
+    // cwd 本身不存在：父目录必须递归创建（`mkdirSync recursive`）。
+    const cwd = join(dir, 'nested', 'project')
+    const result = writeProjectMode(cwd, DEFAULT_PROJECT_SWITCH, 'shadow')
+
+    assert.deepEqual(result, { ok: true, file: 'dispatch/protocol.json', mode: 'shadow' })
+    assert.equal(readFileSync(join(cwd, 'dispatch', 'protocol.json'), 'utf8'), '{"mode":"shadow"}\n')
+    assert.deepEqual(JSON.parse(readFileSync(join(cwd, 'dispatch', 'protocol.json'), 'utf8')), { mode: 'shadow' })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.14.0: writeProjectMode atomically overwrites an existing marker', () => {
+  // §5：覆盖已有文件；rename 一步替换，成功后不留 `.tmp-<pid>`。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-write-overwrite-'))
+  try {
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    writeProjectMarker(cwd, '{"mode":"off"}\n')
+
+    const result = writeProjectMode(cwd, DEFAULT_PROJECT_SWITCH, 'full')
+
+    assert.equal(result.ok, true)
+    assert.equal(result.file, 'dispatch/protocol.json')
+    assert.equal(readFileSync(join(cwd, 'dispatch', 'protocol.json'), 'utf8'), '{"mode":"full"}\n')
+    assert.deepEqual(readdirSync(join(cwd, 'dispatch')).filter(name => name.includes('.tmp-')), [],
+      'no temp file survives a successful write')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.14.0: writeProjectMode rejects a bad mode, cwd or escaping path without writing', () => {
+  // §5：非法 mode / 非法 cwd / 逃出 cwd 返回失败且不写。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-write-invalid-'))
+  try {
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+
+    const cases = [
+      ['unknown mode', writeProjectMode(cwd, DEFAULT_PROJECT_SWITCH, 'loud')],
+      ['blank cwd', writeProjectMode('', DEFAULT_PROJECT_SWITCH, 'off')],
+      ['missing cwd', writeProjectMode(undefined, DEFAULT_PROJECT_SWITCH, 'off')],
+      ['relative escape', writeProjectMode(cwd, { enabled: true, path: '../outside.json' }, 'off')],
+      ['absolute escape', writeProjectMode(cwd, { enabled: true, path: join(dir, 'outside.json') }, 'off')],
+    ]
+    for (const [label, result] of cases) {
+      assert.equal(result.ok, false, label)
+      assert.ok(['invalid-cwd', 'invalid-path', 'write-failed'].includes(result.reason),
+        `${label}: reason ${result.reason} is one of the frozen three`)
+    }
+    assert.equal(existsSync(join(cwd, 'dispatch', 'protocol.json')), false, 'no marker is written on any failure')
+    assert.equal(existsSync(join(dir, 'outside.json')), false, 'a path escaping the cwd is never written')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.14.0: writeProjectMode reports write-failed and cleans the temp file', () => {
+  // §5 的 `write-failed` 分支：目标位置被目录占住，rename 必然失败。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-write-failed-'))
+  try {
+    const cwd = join(dir, 'project')
+    mkdirSync(join(cwd, 'dispatch', 'protocol.json'), { recursive: true })
+
+    const result = writeProjectMode(cwd, DEFAULT_PROJECT_SWITCH, 'off')
+
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'write-failed')
+    assert.equal(typeof result.error, 'string', 'the underlying error text is reported')
+    assert.deepEqual(readdirSync(join(cwd, 'dispatch')).filter(name => name.includes('.tmp-')), [],
+      'the temp file is removed after a failed rename')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.14.0: the /dispatch command writes all three modes and reports the relative path', () => {
+  // §5：三档各写一次并返回 success 文本；大小写与空白由 handler 归一化。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-command-write-'))
+  try {
+    const h = harness()
+    plugin.apply(h.ctx, quiet)
+
+    for (const mode of PROJECT_MODES) {
+      const cwd = join(dir, mode)
+      mkdirSync(cwd, { recursive: true })
+      const agent = h.main(`agent-${mode}`, [], {}, `session-${mode}`, cwd)
+      const result = runCommand(h, `  ${mode.toUpperCase()}  `, agent)
+      assert.deepEqual(result, { kind: 'success', text: `已切换为 ${mode}（dispatch/protocol.json）` }, mode)
+      assert.equal(readFileSync(join(cwd, 'dispatch', 'protocol.json'), 'utf8'), `{"mode":"${mode}"}\n`, mode)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.14.0: the /dispatch command queries the current mode with no argument', () => {
+  // §5：无参查询；`session.header.cwd` 是 cwd 的回落。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-command-query-'))
+  try {
+    const h = harness()
+    plugin.apply(h.ctx, quiet)
+
+    const bare = join(dir, 'bare')
+    mkdirSync(bare, { recursive: true })
+    const bareAgent = h.main('agent-bare', [], {}, 'session-bare', bare)
+    assert.deepEqual(runCommand(h, '', bareAgent), { kind: 'success', text: '当前项目档位：full' },
+      'no marker file means full')
+    assert.deepEqual(runCommand(h, undefined, bareAgent), { kind: 'success', text: '当前项目档位：full' })
+
+    const off = join(dir, 'off')
+    mkdirSync(off, { recursive: true })
+    writeProjectMarker(off, '{"mode":"off"}')
+    assert.deepEqual(runCommand(h, '   ', h.main('agent-off', [], {}, 'session-off', off)),
+      { kind: 'success', text: '当前项目档位：off' })
+
+    const header = join(dir, 'header')
+    mkdirSync(header, { recursive: true })
+    writeProjectMarker(header, '{"mode":"shadow"}')
+    assert.deepEqual(runCommand(h, '', { session: { header: { cwd: header } } }),
+      { kind: 'success', text: '当前项目档位：shadow' })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.14.0: the /dispatch command rejects an unknown argument and a missing cwd', () => {
+  // §5：非法参数、cwd 缺失都是 error，且都不写文件。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-command-errors-'))
+  try {
+    const h = harness()
+    plugin.apply(h.ctx, quiet)
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    const agent = h.main('agent-errors', [], {}, 'session-errors', cwd)
+
+    assert.deepEqual(runCommand(h, 'loud', agent),
+      { kind: 'error', text: '用法：/dispatch [off|shadow|full]（无参=查询）' })
+    assert.equal(existsSync(join(cwd, 'dispatch')), false, 'an unknown argument writes nothing')
+
+    assert.deepEqual(runCommand(h, 'off', { session: {} }),
+      { kind: 'error', text: '无法确定会话工作目录' })
+    assert.deepEqual(runCommand(h, 'off', undefined),
+      { kind: 'error', text: '无法确定会话工作目录' }, 'a handler without an agent cannot resolve a cwd')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.14.0: a non-string rawInput is a usage error, not a no-arg query', () => {
+  // §5：只有 undefined（宿主没给参）与字符串是参数形态。数组/对象/数字若被当成
+  // 「无参查询」，一次畸形调用会静默显示档位而不是报用法。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-command-raw-input-'))
+  try {
+    const h = harness()
+    plugin.apply(h.ctx, quiet)
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    const agent = h.main('agent-raw-input', [], {}, 'session-raw-input', cwd)
+
+    for (const rawInput of [[], ['off'], {}, { mode: 'off' }, 42, null]) {
+      assert.deepEqual(runCommand(h, rawInput, agent),
+        { kind: 'error', text: '用法：/dispatch [off|shadow|full]（无参=查询）' }, `rawInput=${JSON.stringify(rawInput)}`)
+    }
+    assert.equal(existsSync(join(cwd, 'dispatch')), false, 'a non-string argument writes nothing')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.14.0: a failed command write surfaces 保存失败 with the reason', () => {
+  // §3.1 第 4-5 步的失败面：命令层把 writeProjectMode 的 reason 原样带出。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-command-write-failed-'))
+  try {
+    const h = harness()
+    plugin.apply(h.ctx, quiet)
+    const cwd = join(dir, 'project')
+    mkdirSync(join(cwd, 'dispatch', 'protocol.json'), { recursive: true })
+
+    const result = runCommand(h, 'off', h.main('agent-write-failed', [], {}, 'session-write-failed', cwd))
+
+    assert.equal(result.kind, 'error')
+    assert.match(result.text, /^保存失败：write-failed/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.14.0: apply survives a host without the commands service', () => {
+  // §5：`commands` 服务缺失（ctx 无 `inject` 或 `inject` 不回调）时 `apply` 不抛，
+  // 其余机制照常注册。
+  const noInject = harness({ inject: false })
+  assert.doesNotThrow(() => plugin.apply(noInject.ctx, quiet))
+  assert.equal(noInject.commands.length, 0)
+  assert.equal(noInject.sections.length, 1, 'the prompt section still registers')
+
+  const noCallback = harness({ injectCallsBack: false })
+  assert.doesNotThrow(() => plugin.apply(noCallback.ctx, quiet))
+  assert.equal(noCallback.commands.length, 0)
+  assert.equal(noCallback.guards.length, 1, 'the write guard still registers')
+})
+
+test('0.14.0: with projectSwitch.enabled false the command still writes and warns', () => {
+  // §3.1 第 5 步：开关关闭时文件照写，文本追加「当前不生效」。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-command-switch-off-'))
+  try {
+    const h = harness()
+    plugin.apply(h.ctx, { log: false, projectSwitch: { enabled: false } })
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    const agent = h.main('agent-switch-off', [], {}, 'session-switch-off', cwd)
+
+    const result = runCommand(h, 'off', agent)
+
+    assert.equal(result.kind, 'success')
+    assert.equal(result.text, '已切换为 off（dispatch/protocol.json）；注意：项目开关已关闭，本文件当前不生效')
+    assert.equal(readFileSync(join(cwd, 'dispatch', 'protocol.json'), 'utf8'), '{"mode":"off"}\n',
+      'the file is the single truth even when the switch is disabled')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.14.0: the /dispatch handler turns any exception into an error result', () => {
+  // §3.1：handler 内的异常不得让命令执行抛错。
+  const h = harness()
+  plugin.apply(h.ctx, quiet)
+
+  const exploded = {
+    get session() {
+      throw new Error('boom')
+    },
+  }
+  const result = runCommand(h, 'off', exploded)
+
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /保存失败/)
+})
+
+test('0.14.0: client.js modeOfText matches the host reader case by case', () => {
+  // §3.2：控件自带一份解析器，必须与宿主 `readProjectMode` 逐例同口径——两处
+  // 漂移会让控件显示的档位与真正生效的档位不同，而 docs-check 判不出来。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-client-parity-'))
+  const previousWindow = globalThis.window
+  let captured
+  try {
+    globalThis.window = { __ModuleLoader__: { load(registration) { captured = registration } } }
+    // `client.js` 是手写的惰性 CJS 注册脚本：顶层只碰 `window`，`document` 与
+    // `react` 都在 factory 内或 `typeof` 守卫之后，所以 `new Function` 足够。
+    new Function(readFileSync(new URL('./client.js', import.meta.url), 'utf8'))()
+
+    assert.equal(captured?.id, 'dispatch-protocol', 'the bundle registers under the npm package name')
+    const react = { createElement: () => null }
+    const exports = captured.factory((id) => {
+      if (id === 'react') return react
+      throw new Error(`client.js required an unexpected module: ${id}`)
+    })
+    const { modeOfText, MARKER_PATH } = exports.pure
+
+    // 已知限制（README「已知坑」）：控件固定读默认路径，丢弃 projectSwitch.path。
+    assert.equal(MARKER_PATH, DEFAULT_PROJECT_SWITCH.path, 'the dock reads the default marker path only')
+
+    const config = resolveConfig({}).projectSwitch
+    const cases = [
+      ['missing', undefined],
+      ['bad-json', '{oops'],
+      ['array', '[]'],
+      ['null', 'null'],
+      ['empty-object', '{}'],
+      ['enabled-false', '{"enabled":false}'],
+      ['mode-off', '{"mode":"off"}'],
+      ['mode-shadow', '{"mode":"shadow"}'],
+      ['enabled-true-full', '{"enabled":true,"mode":"full"}'],
+      ['unknown-mode', '{"mode":"loud"}'],
+    ]
+    for (const [name, body] of cases) {
+      const cwd = join(dir, name)
+      mkdirSync(cwd, { recursive: true })
+      if (body !== undefined) writeProjectMarker(cwd, body)
+      assert.equal(modeOfText(body), readProjectMode(cwd, config),
+        `client.js modeOfText and readProjectMode disagree on ${name}`)
+    }
+  } finally {
+    // 桩只活在这个用例里：其它用例依赖真实的宿主环境。
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
 function call(turn, name, args, id) {
   return { type: 'tool/call', data: { turn, step: 1, callId: id ?? `call-${turn}-${name}`, name, arguments: JSON.stringify(args ?? {}) } }
 }
@@ -3167,13 +3482,28 @@ function settleNotice(childId) {
   }
 }
 
+/**
+ * 0.14.0: invoke the registered `/dispatch` command's handler.
+ * @param h - the harness that applied the plugin.
+ * @param rawInput - the raw argument string the host passes to the handler.
+ * @param agent - the agent scope the command runs in (may be undefined).
+ * @returns the handler result `{ kind, text }`.
+ */
+function runCommand(h, rawInput, agent) {
+  const definition = h.commands[0]
+  assert.equal(definition?.name, 'dispatch', 'the /dispatch command must be registered')
+  return definition.handler({ agent, rawInput })
+}
+
 /** Build a fake host context: prompt registry, tools guard, agents registry, event bus. */
-function harness() {
+function harness(options = {}) {
   const sections = []
   /** 0.13.0: the registered sections as-is (`text` may be a function). */
   const rawSections = []
   /** Registered `ctx.tools.guard(fn)` functions, in registration order. */
   const guards = []
+  /** 0.14.0: definitions registered through `ctx.inject(['commands'], …)`. */
+  const commands = []
   const events = new Map()
   const agents = new Map()
   const agentHooks = new Map()
@@ -3212,6 +3542,28 @@ function harness() {
     },
   }
 
+  // 0.14.0 optional-service injection: the plugin registers `/dispatch` through
+  // `ctx.inject(['commands'], …)`. The default harness exposes it and calls back
+  // with a child context whose `commands.register` records the definition. Two
+  // host shapes are testable: `inject: false` (no inject at all) and
+  // `injectCallsBack: false` (service missing, so the callback never runs).
+  if (options.inject !== false) {
+    ctx.inject = (services, callback) => {
+      if (options.injectCallsBack === false) return undefined
+      return callback({
+        commands: {
+          register(definition) {
+            commands.push(definition)
+            return () => {}
+          },
+        },
+        effect(run) {
+          return run()
+        },
+      })
+    }
+  }
+
   /** Record one delivered message, flattening content blocks to `text`. */
   const record = (messages) => (message) => {
     const text = typeof message?.text === 'string'
@@ -3225,6 +3577,8 @@ function harness() {
     sections,
     rawSections,
     guards,
+    /** 0.14.0: definitions registered through the optional `commands` service. */
+    commands,
     /**
      * Replay one tool call through every registered guard. The host rejects a
      * call on the first non-empty string; `undefined` means the call proceeds.

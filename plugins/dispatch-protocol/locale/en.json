@@ -2,5 +2,17 @@
   "meta": {
     "title": "Dispatch Protocol",
     "description": "Inject always-on delegation discipline into the system prompt, checkpoint each completed child agent, and guard the tool boundary: a root agent's write/edit outside the control-plane allowlist is rejected unless dispatch/override.json carries a reason written in this session."
+  },
+  "ui": {
+    "title": "Dispatch discipline",
+    "modeOff": "Off",
+    "modeShadow": "Shadow",
+    "modeFull": "Full",
+    "modeUnknown": "Unknown",
+    "unknownHint": "Cannot read the marker file: {detail}",
+    "writeFailed": "Switch failed: {detail}",
+    "unsupported": "This host has no client command surface",
+    "switchTo": "Switch to \"{label}\"",
+    "unreadable": "unknown reason"
   }
 }

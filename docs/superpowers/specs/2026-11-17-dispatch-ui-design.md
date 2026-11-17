@@ -41,7 +41,8 @@
 
 - 落点：`conversation.composer.dock`；组件**不依赖 owner props**（未证实），会话 id 自取（`ctx.uiSession` / `ctx.uiWorkspace.selection` / `ctx.sessions.list` 中现取当前会话，具体取法以实现时实测到的可用面为准）。
 - 显示：`派发纪律` + 当前档位（off/shadow/full/未知）+ 三个窄按钮；窄屏只显示当前档位按钮。
-- 读：`remote.workspaceFiles.read(sessionId, '<projectSwitch.path>')`；`not-found` → `full`；其它错误 → `未知` + title 提示。
+- 读：`remote.workspaceFiles.read(sessionId, 'dispatch/protocol.json')`（默认路径；见下方已知限制）；`not-found` → `full`；其它错误 → `未知` + title 提示。
+  - **已知限制（2026-11-17 复审追加）**：客户端拿不到 profile 的插件配置，因此控件固定读默认路径 `dispatch/protocol.json`；把 `projectSwitch.path` 配成别的文件名时，`/dispatch` 照常写自定义文件，但控件显示会停在 `full`。该限制必须写进 README「已知坑」，自定义 path 用户以 `/dispatch` 为准。
 - 刷新：监听 `command/executed` 与窗口 focus 重读；会话切换重读。
 - 写：点击按钮执行宿主命令 `/dispatch <mode>`。**实现时二选一，实测决定，不得两套并存**：
   - 首选：客户端命令执行面（`command.execute` 的公开入口）；
@@ -52,7 +53,7 @@
 ### 3.3 兼容
 
 - 默认零行为变化；`enabled:false`、无 `commands` 服务、无 client 运行时都照常。
-- 文件仍是唯一真相：UI、命令、手改文件三者等价；无标记 = `full`。
+- 文件仍是唯一真相：UI、命令、手改文件三者等价；无标记 = `full`。（**默认 `projectSwitch.path` 下**等价；自定义 path 时控件只读默认文件，见 §3.2 已知限制，命令仍等价。）
 
 ## 4. 白名单
 
