@@ -150,8 +150,8 @@ window.__ModuleLoader__.load({
     function readModeOf(ctx, sessionId) {
       return (async () => {
         try {
-          const remote = ctx.get('remote')
-          const files = remote?.workspaceFiles ?? ctx.get('remote.workspaceFiles')
+          // Declared above in `inject`: resolved statically, not via `ctx.get`.
+          const files = ctx.remote.workspaceFiles
           if (files === undefined || files === null || typeof files.read !== 'function') {
             return { mode: undefined, detail: 'no-remote' }
           }
@@ -179,8 +179,8 @@ window.__ModuleLoader__.load({
     function switchModeOf(ctx, sessionId, mode) {
       return (async () => {
         try {
-          const remote = ctx.get('remote')
-          const commands = remote?.commands ?? ctx.get('remote.commands')
+          // Same rule as the read path: the dotted face is a declared injection.
+          const commands = ctx.remote.commands
           if (commands === undefined || commands === null || typeof commands.execute !== 'function') {
             return { ok: false, reason: 'unsupported' }
           }
@@ -318,18 +318,18 @@ window.__ModuleLoader__.load({
 
     // --- plugin -------------------------------------------------------------
 
-    /** Required services: the slot registry and the dictionary registry. */
-    const inject = ['slots', 'locale']
-
     /**
-     * Mount the composer-dock control while both required services exist.
-     * Remote faces are resolved per call, so an older Host without
-     * `remote.workspaceFiles` or `remote.commands` still renders the dock
-     * (unknown state) instead of deactivating the plugin.
-     * @param ctx - the browser plugin context.
+     * Required services: slots, locale, and the Remote namespace with its two
+     * faces (`remote.commands`, `remote.workspaceFiles` are child services, so
+     * each needs its own entry; `ctx.remote.*` without one throws) — `inject`
+     * resolves before `apply`, so the guard only covers a wiring gap.
      */
+    const inject = ['slots', 'locale', 'remote', 'remote.commands', 'remote.workspaceFiles']
+
     function apply(ctx) {
-      const missing = inject.filter((name) => ctx.get(name) === undefined)
+      const remote = ctx.remote
+      const present = { slots: ctx.slots, locale: ctx.locale, remote, 'remote.commands': remote?.commands, 'remote.workspaceFiles': remote?.workspaceFiles }
+      const missing = Object.keys(present).filter((name) => present[name] === undefined || present[name] === null)
       if (missing.length > 0) {
         console.warn('dispatch-protocol: missing services ' + missing.join(', ') + '; the dock stays inactive')
         return

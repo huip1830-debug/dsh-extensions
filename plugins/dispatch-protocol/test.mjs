@@ -3413,6 +3413,33 @@ test('0.14.0: client.js modeOfText matches the host reader case by case', () => 
   }
 })
 
+test('0.14.0: client.js declares the Remote namespace and both faces in inject', () => {
+  // 线上缺陷回归：`remote.commands` / `remote.workspaceFiles` 是 Remote 下的独立
+  // 子服务，只写 `remote` 不够——点按钮时读 `ctx.remote.commands` 会抛
+  // `cannot get property "remote.commands" without inject`，写路径把异常冒成
+  // 「切换失败」。读路径的异常被吞成「未知」，所以离线能抓住清单漂移的只有这条
+  // 断言（被删掉的 `ctx.get(name)` 探测在运行期反而不报错，抓不住）。
+  const previousWindow = globalThis.window
+  let captured
+  try {
+    globalThis.window = { __ModuleLoader__: { load(registration) { captured = registration } } }
+    new Function(readFileSync(new URL('./client.js', import.meta.url), 'utf8'))()
+    const exports = captured.factory((id) => {
+      if (id === 'react') return { createElement: () => null }
+      throw new Error(`client.js required an unexpected module: ${id}`)
+    })
+
+    assert.ok(Array.isArray(exports.inject), 'client.js exports an inject list')
+    for (const name of ['slots', 'locale', 'remote', 'remote.commands', 'remote.workspaceFiles']) {
+      assert.ok(exports.inject.includes(name), `client.js must declare the "${name}" injection`)
+    }
+  } finally {
+    // 桩只活在这个用例里：其它用例依赖真实的宿主环境。
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  }
+})
+
 // ---------------------------------------------------------------------------
 function call(turn, name, args, id) {
   return { type: 'tool/call', data: { turn, step: 1, callId: id ?? `call-${turn}-${name}`, name, arguments: JSON.stringify(args ?? {}) } }

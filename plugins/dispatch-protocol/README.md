@@ -164,10 +164,10 @@
 
 - `remote.workspaceFiles.read(sessionId, 'dispatch/protocol.json', {})`，路径按**工作区根相对**解析。**控件拿不到 profile 配置**：这个路径是硬编码的默认值（`client.js:49`），改了 `projectSwitch.path` 的项目控件仍读默认文件，可能停在 `full`——这类项目以 `/dispatch` 为准（见「已知坑」）。
 - 错误码 `workspace-file/not-found` → 显示 `full`（没有标记就是全文规则）。
-- 其它错误（无 Remote 面、越界、非文本、RPC 失败）→ 显示 `未知`，鼠标悬停的 title 给出错误码与消息。
+- 其它错误（越界、非文本、RPC 失败）→ 显示 `未知`，鼠标悬停的 title 给出错误码与消息。
 - 文件能读到但 JSON 坏 → 与宿主读取器同口径回落 `full`（`client.js:125-137`、`lib/project.mjs:72-78`）。
 
-写口径（首选面，`client.js:179-205`）：点按钮走 `remote.commands.execute(sessionId, '/dispatch <mode>', [])`，也就是 `/` 菜单敲命令走的那条 admission 路径（`dsh-client-ui-commands` 的 `src/client/service.ts:420-435`）；成功与否看返回的 `{ ok, value: { result } }`，`result.kind === 'error'` 时把宿主文案放进 `切换失败：…` 提示。没有客户端命令执行面的老宿主显示「当前宿主没有客户端命令执行面」，不做第二套写入。
+写口径（首选面，`client.js:179-205`）：点按钮走 `remote.commands.execute(sessionId, '/dispatch <mode>', [])`，也就是 `/` 菜单敲命令走的那条 admission 路径（`dsh-client-ui-commands` 的 `src/client/service.ts:420-435`）；成功与否看返回的 `{ ok, value: { result } }`，`result.kind === 'error'` 时把宿主文案放进 `切换失败：…` 提示。`remote`、`remote.commands`、`remote.workspaceFiles` 都写在 `inject` 里（`client.js:327`）——它们是独立的子服务，少一个宿主就不加载本插件（控件整块不出现，而不是「显示未知/不支持」），所以注入是必需项，不做第二套写入。
 
 刷新时机（`client.js:237-264`）：挂载时、会话切换时、`command/executed` 事件（浏览器本地确认，`service.ts:437-452`）、窗口 `focus` / `pageshow`、标签页 `visibilitychange` 各重读一次；组件卸载时移除全部监听。**页面刷新才拿得到新控件**：客户端产物没有热更，装完插件必须刷新；没跑 UI 的宿主（headless / SDK）不受影响，用 `/dispatch` 即可。
 
@@ -236,7 +236,7 @@
 
 | 命令 | 期望 |
 |---|---|
-| `node plugins/dispatch-protocol/test.mjs` | 167 pass（`pass=167 fail=0`），exit 0 |
+| `node plugins/dispatch-protocol/test.mjs` | 168 pass（`pass=168 fail=0`），exit 0 |
 | `node plugins/dispatch-protocol/scripts/docs-check.mjs` | 无参扫仓库根，`docs-check: files=<N> fail=0`，exit 0 |
 | `node plugins/dispatch-protocol/scripts/docs-check.mjs --self-test` | `self-test: pass=<N> fail=0`，exit 0 |
 
@@ -262,6 +262,7 @@
 | `0.12.2` | 闸门噪声两修。D1：检查点去重收敛成一个原语「子代理报告对父代理可见之后，父代理有没有动过手」——settle 事件与 `send_message` 两条上报路径都认，不再只认 inbox 标记。D2（第三次复审后的设计反转）：删除「解析 PowerShell 求写入目标」的多目标解析器（`readShellWriteTargets`、动词/开关表、逗号合并、残段复检全部删除，无并列实现），改为封闭形状豁免——`controlPlaneOnlyShellWrite` 只在整条命令每段都能构造性证明是记账写入（形状 A/B/C：`Add-Content`/`Set-Content`/`Out-File`/`Clear-Content` 具名路径、`New-Item` 建目录/文件、`git diff > <路径>`）且路径唯一、全在控制面时返回 true，其余一律 false → 脏 → `<shell>`（未知=代码）；`gates.mjs` 的脏路径随之退回单路径（`write`/`edit` 取参数路径，`pwsh` 与取不到路径一律 `<shell>`），`{files}` 里的 shell 条目重新显示为 `<shell>`。代价是偶尔多跑一次集成命令，收益是漏验方向不可能静默。 |
 | `0.12.3` | 规则 1「表空即收口」补注入面例外：`AGENTS.md` 与 `docs/agent/*` 不得空表收口——此前规则 1 的空表收口吞掉了规则 4 的「注入面断言表强制非空」，注入面文档可凭一句无验证的「本批无机制断言」零评审收口。规则 1 正文 1259 → 1306 字符，条款数仍为 6。 |
 | `0.13.0` | 项目级开关：新增顶层 `projectSwitch`（默认 `{enabled:true, path:'dispatch/protocol.json'}`），按会话 cwd 读标记文件分三档——`full` 行为不变、`shadow` 规则与提醒照旧但写入只记不拦、`off` 规则段/写入守卫/检查点/五闸门/观测行全部静默（判定与 fail-open 见 `lib/project.mjs:91-118`）。实时读文件、按 `(路径, mtime)` 记忆化，每个 `off` 项目留一条 `kind:"project"` 决定日志。无标记文件时与 `0.12.3` 逐字节一致：规则正文、`gates.*`/`writePolicy.*` 默认值与校验全未改，配置段只是新增。 |
+| `0.14.1` | 客户端注入缺陷修复：`client.js` 此前未声明 Remote 命名空间注入，点 dock 按钮报 `cannot get property "remote.commands" without inject`；现在 `inject` 含 `slots`/`locale`/`remote`/`remote.commands`/`remote.workspaceFiles`（与官方 Goal 控件同款），注入是前置条件——缺面时控件整块不出现；`test.mjs` 补回归断言（168 pass：`client.js` 的 `inject` 必须含这五个名字）。 |
 | `0.14.0` | 会话区控件 + `/dispatch` 命令：宿主命令 `/dispatch [off\|shadow\|full]`（无参查询，写标记文件走 `writeProjectMode` 的原子写）；浏览器半区新增 `client.js`，在 `conversation.composer.dock` 显示当前档位与三态按钮，读走 `remote.workspaceFiles.read`、写走 `remote.commands.execute`（与 `/` 菜单同一条 admission 路径），`command/executed` / 窗口 focus / 会话切换后重读。`package.json` 加 `dsh.client`（`platform: 'web'` + inject 清单）与 `./client` 导出，`locale/zh.json` / `locale/en.json` 加 `ui` 词条。宿主行为零变化：无 client 运行时、`enabled:false`、无 `commands` 服务都照旧。 |
 
 0.10.0–0.11.0 为未发布的中间提交，内容并入 0.12.0。
