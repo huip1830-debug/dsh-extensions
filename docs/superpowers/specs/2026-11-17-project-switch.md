@@ -42,14 +42,15 @@
 ```js
 projectSwitch: {
   enabled: true,               // false 时整个项目开关关闭（等价 0.12.3）
-  path: 'dispatch/protocol.json'  // 标记文件，cwd 相对（也允许相对祖先？不——只相对会话 cwd）
+  path: 'dispatch/protocol.json'  // 标记文件，只相对会话 cwd
 }
 ```
 
 - 校验（加载期抛错，前缀 `dispatch-protocol: projectSwitch`）：
-  - `projectSwitch` 非 plain object → `dispatch-protocol: projectSwitch must be an object`
+  - `projectSwitch` 非 plain object（含 `null`、数组）→ `dispatch-protocol: projectSwitch must be an object`
   - `enabled` 非 boolean → `dispatch-protocol: projectSwitch.enabled must be a boolean`
   - `path` 非非空字符串 → `dispatch-protocol: projectSwitch.path must be a non-empty string`
+  - 子字段写 `null` 与省略同义：`??` 取默认值，不抛错（与 `order`/`log`/`checkpoint.*` 等既有段落同款口径，0.13.0 复审确认）。
 - `resolveConfig` 返回值新增 `projectSwitch`；默认值由 `lib/project.mjs` 导出 `DEFAULT_PROJECT_SWITCH`，`config.mjs` 只做校验与转发（沿用「默认值只有一个入口」的既有契约）。
 
 ### 3.2 模式解析（`lib/project.mjs`，纯判定模块）
