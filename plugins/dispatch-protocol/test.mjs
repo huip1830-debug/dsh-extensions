@@ -19,6 +19,7 @@ import { join } from 'node:path'
 
 import * as plugin from './plugin.mjs'
 import { resolveConfig, DEFAULT_RULES } from './lib/config.mjs'
+import { DEFAULT_PROJECT_SWITCH, PROJECT_MODES, readProjectMode } from './lib/project.mjs'
 import {
   ARTIFACT, callTouchesFile, classifyPath, controlPlaneOnlyShellWrite, DEFAULT_CONTROL_PLANE_PATTERNS,
   DEFAULT_PWSH_MUTATION_PATTERN, DEFAULT_PWSH_SHELL_PATTERN, readWorkdir, summarizeTurn,
@@ -2872,6 +2873,232 @@ test('D4-4: a custom template may place {action}; old and unknown placeholders s
 })
 
 // ---------------------------------------------------------------------------
+// 0.13.0 — 项目级开关（spec `2026-11-17-project-switch.md` §5）
+//
+// 每个用例用独立 cwd：开关按 `(绝对路径, mtimeMs)` 记忆化，同一目录里改写标记
+// 文件不保证 mtime 变化，独立目录才测得到「每个 cwd 各自解析」。
+
+test('0.13.0: projectSwitch defaults and rejects silent breakage', () => {
+  // §5-1
+  const config = resolveConfig({})
+  assert.deepEqual(config.projectSwitch, { enabled: true, path: 'dispatch/protocol.json' })
+  assert.deepEqual(DEFAULT_PROJECT_SWITCH, { enabled: true, path: 'dispatch/protocol.json' },
+    'the single default lives in lib/project.mjs')
+  assert.deepEqual(PROJECT_MODES, ['full', 'shadow', 'off'])
+
+  assert.throws(() => resolveConfig({ projectSwitch: 42 }),
+    { message: 'dispatch-protocol: projectSwitch must be an object' })
+  assert.throws(() => resolveConfig({ projectSwitch: { enabled: 'yes' } }),
+    { message: 'dispatch-protocol: projectSwitch.enabled must be a boolean' })
+  assert.throws(() => resolveConfig({ projectSwitch: { path: '' } }),
+    { message: 'dispatch-protocol: projectSwitch.path must be a non-empty string' })
+})
+
+test('0.13.0: readProjectMode reads the marker file and fails open', () => {
+  // §5-2
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-project-mode-'))
+  try {
+    const config = resolveConfig({}).projectSwitch
+    const project = (name, body) => {
+      const cwd = join(dir, name)
+      mkdirSync(cwd, { recursive: true })
+      if (body !== undefined) writeProjectMarker(cwd, body)
+      return cwd
+    }
+
+    assert.equal(readProjectMode(project('missing'), config), 'full', 'no marker file → full')
+    assert.equal(readProjectMode(project('enabled-off', '{"enabled":false}'), config), 'off')
+    assert.equal(readProjectMode(project('mode-off', '{"mode":"off"}'), config), 'off')
+    assert.equal(readProjectMode(project('mode-shadow', '{"mode":"shadow"}'), config), 'shadow')
+    assert.equal(readProjectMode(project('mode-full', '{"mode":"full"}'), config), 'full')
+    assert.equal(readProjectMode(project('bad-json', '{oops'), config), 'full',
+      'a broken file is a missing convenience, not an error')
+    assert.equal(readProjectMode(project('array', '[]'), config), 'full')
+    assert.equal(readProjectMode(project('switch-disabled', '{"mode":"off"}'),
+      { enabled: false, path: 'dispatch/protocol.json' }), 'full',
+    'projectSwitch.enabled === false wins over any marker content')
+    assert.equal(readProjectMode('', config), 'full', 'an empty cwd fails open')
+    assert.equal(readProjectMode(undefined, config), 'full')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.13.0: a project off mode lets the root write through and logs one project decision', () => {
+  // §5-3
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-project-guard-off-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    writeProjectMarker(cwd, '{"mode":"off"}')
+
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const root = h.main('session-project-off', [], {}, 'session-project-off', cwd)
+
+    assert.equal(h.guard({ agent: root, name: 'write', arguments: { file_path: 'server/src/x.ts' } }), undefined,
+      'off mode never blocks a root write')
+    assert.equal(h.guard({ agent: root, name: 'edit', arguments: { file_path: 'src/y.ts' } }), undefined)
+
+    const rows = readRows(log)
+    const projectRows = rows.filter(row => row.kind === 'project')
+    assert.equal(projectRows.length, 1, 'exactly one project decision per (session, cwd)')
+    assert.equal(projectRows[0].decision, 'suppressed')
+    assert.equal(projectRows[0].reason, 'project-off')
+    assert.equal(projectRows[0].session, 'session-project-off')
+    assert.equal(rows.filter(row => row.kind === 'write-policy').length, 0,
+      'off mode does not also run the write-policy judgement')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.13.0: a project shadow mode logs project-shadow and never blocks', () => {
+  // §5-4
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-project-guard-shadow-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    writeProjectMarker(cwd, '{"mode":"shadow"}')
+
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const root = h.main('session-project-shadow', [], {}, 'session-project-shadow', cwd)
+
+    assert.equal(h.guard({ agent: root, name: 'write', arguments: { file_path: 'server/src/x.ts' } }), undefined,
+      'shadow mode never returns the rejection string')
+
+    const rows = readRows(log)
+    assert.equal(rows.length, 1, 'one row for the shadowed denial')
+    assert.equal(rows[0].kind, 'write-policy')
+    assert.equal(rows[0].decision, 'allowed')
+    assert.equal(rows[0].reason, 'project-shadow')
+    assert.equal(rows[0].mode, 'shadow')
+    assert.equal(rows[0].file, 'server/src/x.ts')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.13.0: a project off mode silences the state gates', () => {
+  // §5-5
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-project-gate-'))
+  try {
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    writeProjectMarker(cwd, '{"mode":"off"}')
+
+    const h = harness()
+    plugin.apply(h.ctx, { log: false })
+    const parent = h.main('session-project-gate', [
+      call(1, 'list_agents', {}, 'poll-1'),
+      call(1, 'list_agents', {}, 'poll-2'),
+      call(1, 'list_agents', {}, 'poll-3'),
+      call(1, 'list_agents', {}, 'poll-4'),
+      call(1, 'list_agents', {}, 'poll-5'),
+      call(1, 'list_agents', {}, 'poll-6'),
+    ], {}, 'session-project-gate', cwd)
+    h.created(parent)
+    h.turnStopping(parent, 1)
+
+    assert.equal(parent.messages.length, 0, 'off mode delivers no wait gate')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.13.0: a project off mode suppresses the checkpoint and keeps one row per child', () => {
+  // §5-6
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-project-checkpoint-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    writeProjectMarker(cwd, '{"mode":"off"}')
+
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const parent = h.main('parent-project-cp', [], {}, 'parent-project-cp', cwd)
+    h.created(parent)
+    h.created(h.child('child-project-cp', 'parent-project-cp', '实现 Task',
+      [call(1, 'write', { file_path: 'a.ts' })]))
+    h.ended({ childId: 'child-project-cp', stopReason: 'completed' })
+    h.turnStopping(parent, 1)
+
+    assert.equal(parent.messages.length, 0, 'off mode does not deliver the checkpoint')
+
+    const rows = readRows(log).filter(row => row.kind === 'checkpoint')
+    assert.equal(rows.length, 1, 'one suppressed row per settled child')
+    assert.equal(rows[0].decision, 'suppressed')
+    assert.equal(rows[0].reason, 'project-off')
+    assert.equal(rows[0].childId, 'child-project-cp')
+    assert.equal(rows[0].label, '实现 Task')
+    assert.equal(rows[0].turn, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.13.0: a project off mode writes no observation row and creates no runs dir', () => {
+  // §5-7
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-project-observe-'))
+  try {
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    writeProjectMarker(cwd, '{"mode":"off"}')
+
+    const h = harness()
+    plugin.apply(h.ctx, { log: false })
+    const parent = h.main('parent-project-observe',
+      [call(1, 'edit', { file_path: 'a.ts' })], {}, 'session-project-observe', cwd)
+    h.created(parent)
+    h.turnStopping(parent, 1)
+
+    assert.equal(existsSync(join(cwd, 'dispatch', 'runs')), false,
+      'off mode does not even create the observation directory')
+    assert.equal(parent.messages.length, 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.13.0: the prompt section text is a per-cwd function', () => {
+  // §5-8
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-project-prompt-'))
+  try {
+    const fullCwd = join(dir, 'full')
+    mkdirSync(fullCwd, { recursive: true })
+    const shadowCwd = join(dir, 'shadow')
+    mkdirSync(shadowCwd, { recursive: true })
+    writeProjectMarker(shadowCwd, '{"mode":"shadow"}')
+    const offCwd = join(dir, 'off')
+    mkdirSync(offCwd, { recursive: true })
+    writeProjectMarker(offCwd, '{"mode":"off"}')
+
+    const h = harness()
+    plugin.apply(h.ctx, {})
+    const config = resolveConfig({})
+
+    assert.equal(typeof h.sections[0].text, 'string', 'the harness still exposes an evaluated string')
+    const section = h.rawSections[0]
+    assert.equal(typeof section.text, 'function', 'off is decided per assemble, not at load time')
+    assert.equal(section.text({ agent: { session: { cwd: fullCwd } } }), config.text,
+      'full keeps the rules')
+    assert.equal(section.text({ agent: { session: { cwd: shadowCwd } } }), config.text,
+      'shadow keeps the rules and only changes the write guard')
+    assert.equal(section.text({ agent: { session: { cwd: offCwd } } }), '',
+      'off drops the section text so the prompt layer discards it')
+    assert.equal(section.text({ agent: { session: { header: { cwd: offCwd } } } }), '',
+      'the session header cwd is the fallback')
+    assert.equal(section.text({}), config.text, 'a context without a session falls back to the rules')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
 function call(turn, name, args, id) {
   return { type: 'tool/call', data: { turn, step: 1, callId: id ?? `call-${turn}-${name}`, name, arguments: JSON.stringify(args ?? {}) } }
 }
@@ -2890,6 +3117,12 @@ function resultWithText(turn, callId, text, isError = false) {
     type: 'tool/result',
     data: { turn, step: 1, message: { isError, toolCallId: callId, content: [{ type: 'text', text }] } },
   }
+}
+
+/** 0.13.0: write `<cwd>/dispatch/protocol.json` (the project-switch marker). */
+function writeProjectMarker(cwd, body) {
+  mkdirSync(join(cwd, 'dispatch'), { recursive: true })
+  writeFileSync(join(cwd, 'dispatch', 'protocol.json'), body)
 }
 
 /** Read a decision log as parsed rows (0.6.0 gate assertions). */
@@ -2937,6 +3170,8 @@ function settleNotice(childId) {
 /** Build a fake host context: prompt registry, tools guard, agents registry, event bus. */
 function harness() {
   const sections = []
+  /** 0.13.0: the registered sections as-is (`text` may be a function). */
+  const rawSections = []
   /** Registered `ctx.tools.guard(fn)` functions, in registration order. */
   const guards = []
   const events = new Map()
@@ -2946,7 +3181,15 @@ function harness() {
   const ctx = {
     systemPrompt: {
       section(section) {
-        sections.push(section)
+        rawSections.push(section)
+        // 0.13.0: project switch turns `text` into `(context) => string`. The
+        // default context has no session cwd, so the section evaluates to
+        // `config.text` — every pre-0.13.0 `h.sections[i].text` assertion keeps
+        // reading a string. New cases call `h.rawSections[i].text({ agent })`.
+        sections.push({
+          ...section,
+          text: typeof section.text === 'function' ? section.text({}) : section.text,
+        })
         return () => {}
       },
     },
@@ -2980,6 +3223,7 @@ function harness() {
   return {
     ctx,
     sections,
+    rawSections,
     guards,
     /**
      * Replay one tool call through every registered guard. The host rejects a

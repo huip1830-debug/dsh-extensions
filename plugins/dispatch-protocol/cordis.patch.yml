@@ -21,6 +21,9 @@
         checkpoint:
           enabled: true       # remind the parent when a child completes (judged at the parent's next turn-stopping)
           # text: ''          # overrides DEFAULT_CHECKPOINT; supports {childId} and {label}
+        # projectSwitch:        # 0.13.0 per-project switch: {"mode":"off"|"shadow"} in a marker file downgrades one project only
+        #   enabled: true       # master switch; false restores 0.12.3 behavior (the marker file is never read)
+        #   path: 'dispatch/protocol.json'   # marker file, session-cwd relative; missing/bad file falls back to full (fail-open)
         # gates:                # 0.6.0/0.7.0 event gates: Wait + Verify + Contract + Review + Handoff
         #   enabled: true       # master switch for all five gates; judged at the root agent's turn-stopping
         #   wait:

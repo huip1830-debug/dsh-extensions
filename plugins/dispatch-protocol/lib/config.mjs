@@ -49,6 +49,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveWritePolicy } from './write-policy.mjs'
 import { resolveGates } from './gates.mjs'
+import { DEFAULT_PROJECT_SWITCH } from './project.mjs'
 
 // 0.6.0/0.7.0 状态闸门的默认值统一从 config.mjs 导出（契约 §7）：默认值只有
 // 这一个入口，实现与加载期校验放在 lib/gates.mjs，避免「文档里的默认值」和
@@ -66,6 +67,12 @@ export {
   DEFAULT_ALLOWLIST, DEFAULT_OVERRIDE_PATH, DEFAULT_WRITE_POLICY_MODE,
   evaluateWritePolicy, isAllowedPath, readOverride, renderDenyText, resolveWritePolicy,
 } from './write-policy.mjs'
+
+// 0.13.0 项目级开关：默认值与模式常量同样只有一个入口（实现与判定在
+// `lib/project.mjs`），`resolveConfig` 只做加载期校验与转发。
+export {
+  DEFAULT_PROJECT_SWITCH, PROJECT_MODES, readProjectMode,
+} from './project.mjs'
 
 /** 决策日志默认路径（checkpoint + 写入守卫 + 状态闸门共用一份）。 */
 export const DEFAULT_LOG = join(tmpdir(), 'dispatch-protocol-decisions.jsonl')
@@ -197,5 +204,24 @@ export function resolveConfig(config = {}) {
   // 在日志里无法区分。即使 gates.enabled 为 false 也照样校验。
   const gates = resolveGates(source.gates)
 
-  return { enabled: source.enabled !== false, order, rules, footer, text, checkpoint, observation, writePolicy, log, gates }
+  // 0.13.0 项目级开关（spec §3.1）：`path` 拼错或 `enabled` 写成字符串若静默
+  // 降级，会表现为「标记文件放了但不生效」，与「项目本来就没标记」在行为上
+  // 无法区分。默认值来自 `lib/project.mjs`，这里只校验与转发。
+  const projectSwitchSource = source.projectSwitch === undefined
+    ? DEFAULT_PROJECT_SWITCH
+    : source.projectSwitch
+  if (typeof projectSwitchSource !== 'object' || projectSwitchSource === null || Array.isArray(projectSwitchSource)) {
+    throw new Error('dispatch-protocol: projectSwitch must be an object')
+  }
+  const projectSwitchEnabled = projectSwitchSource.enabled ?? DEFAULT_PROJECT_SWITCH.enabled
+  if (typeof projectSwitchEnabled !== 'boolean') {
+    throw new Error('dispatch-protocol: projectSwitch.enabled must be a boolean')
+  }
+  const projectSwitchPath = projectSwitchSource.path ?? DEFAULT_PROJECT_SWITCH.path
+  if (typeof projectSwitchPath !== 'string' || projectSwitchPath.trim() === '') {
+    throw new Error('dispatch-protocol: projectSwitch.path must be a non-empty string')
+  }
+  const projectSwitch = { enabled: projectSwitchEnabled, path: projectSwitchPath }
+
+  return { enabled: source.enabled !== false, order, rules, footer, text, checkpoint, observation, writePolicy, log, gates, projectSwitch }
 }

@@ -79,7 +79,7 @@ export function resolveWritePolicy(source = {}) {
  * @param value - 原始路径。
  * @returns 归一化后的正斜杠路径，或 undefined（非字符串/空串）。
  */
-function normalizePath(value) {
+export function normalizePath(value) {
   if (typeof value !== 'string') return undefined
   const slashed = value.replaceAll('\\', '/').trim()
   if (slashed === '') return undefined
@@ -99,7 +99,7 @@ function isAbsolutePath(value) {
  * @param cwd - 会话工作目录（`session.cwd ?? session.header.cwd`）。
  * @returns cwd 相对路径；cwd 外或参数非法时返回 undefined。
  */
-function toCwdRelative(file, cwd) {
+export function toCwdRelative(file, cwd) {
   const normalizedFile = normalizePath(file)
   if (normalizedFile === undefined) return undefined
   if (!isAbsolutePath(normalizedFile)) return normalizedFile

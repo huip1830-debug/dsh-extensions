@@ -54,6 +54,7 @@ import { randomUUID } from 'node:crypto'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { resolveConfig } from './lib/config.mjs'
+import { readProjectMode } from './lib/project.mjs'
 import { callTouchesFile, summarizeTurn } from './lib/tool-calls.mjs'
 import { evaluateWritePolicy, renderDenyText } from './lib/write-policy.mjs'
 import {
@@ -218,6 +219,9 @@ function readSessionStart(session) {
  */
 function makeGuard(config) {
   const policy = config.writePolicy
+  // 0.13.0 项目级开关：`off` 的决定日志每 `(session, cwd)` 只记一条（spec §3.4），
+  // 否则一次会话里每次写入都会多一行噪音。
+  const reported = new Set()
   return (exec) => {
     try {
       const agent = exec?.agent
@@ -231,6 +235,20 @@ function makeGuard(config) {
       if (file === undefined) return undefined
 
       const cwd = session?.cwd ?? session?.header?.cwd
+      // 0.13.0 项目级开关（spec §3.3）：`off` 直接放行（只留一条决定日志），
+      // `shadow` 让判定照跑但不返回拒绝串。模式判定 fail-open，读不到标记文件
+      // 的项目与 0.12.3 逐字节一致。
+      const projectMode = readProjectMode(cwd, config.projectSwitch)
+      if (projectMode === 'off') {
+        const key = `${session?.id ?? ''}\0${cwd ?? ''}`
+        if (!reported.has(key)) {
+          reported.add(key)
+          recordDecision(config.log, agent, {
+            kind: 'project', decision: 'suppressed', reason: 'project-off',
+          })
+        }
+        return undefined
+      }
       const result = evaluateWritePolicy({
         file, cwd, tool, config: policy, sessionStart: readSessionStart(session),
       })
@@ -240,6 +258,14 @@ function makeGuard(config) {
         if (result.reason === 'allowlist') return undefined
         recordDecision(config.log, agent, {
           kind: 'write-policy', decision: 'allowed', reason: result.reason, tool, file,
+        })
+        return undefined
+      }
+
+      // 项目 shadow：拒绝改为一条 `project-shadow` 记录，永不返回拒绝串。
+      if (projectMode === 'shadow') {
+        recordDecision(config.log, agent, {
+          kind: 'write-policy', decision: 'allowed', reason: 'project-shadow', tool, file, mode: 'shadow',
         })
         return undefined
       }
@@ -269,10 +295,22 @@ export function apply(ctx, rawConfig) {
   // 发）。关闭即什么都不注册：无 section、无写入守卫、无 checkpoint/观测/闸门。
   if (!config.enabled) return
 
+  // 0.13.0 项目级开关（spec §3.3）：`text` 从定值改成函数，每次 assemble 按会话
+  // cwd 求值。`off` 时返回空串——系统提示词渲染层会丢弃 `text.length === 0` 的
+  // 段，规则随之消失。拿不到 context 或判定抛错时一律回落 `config.text`：提示词
+  // 组装失败会让整个请求失败，项目开关只是便利功能，不能有这种代价。
   ctx.effect(() => ctx.systemPrompt.section({
     name: 'dispatch-protocol',
     order: config.order,
-    text: config.text,
+    text: (context) => {
+      try {
+        const session = context?.agent?.session
+        const cwd = session?.cwd ?? session?.header?.cwd
+        return readProjectMode(cwd, config.projectSwitch) === 'off' ? '' : config.text
+      } catch {
+        return config.text
+      }
+    },
     interpolate: false,
   }))
 
@@ -395,6 +433,18 @@ function registerReminders(ctx, config) {
     const entries = [...queue]
     pending.delete(parentId)
     if (parent === undefined) return result
+    // 0.13.0 项目级开关（spec §3.3）：`off` 的项目不投递检查点，但每个 child 仍
+    // 留一条 suppressed 决定——「没触发」与「触发后被静默」必须可区分。`empty`
+    // 保持既有语义：队列非空（上方已置 false）。
+    const parentCwd = parent?.session?.cwd ?? parent?.session?.header?.cwd
+    if (readProjectMode(parentCwd, config.projectSwitch) === 'off') {
+      for (const [childId, record] of entries) {
+        recordDecision(decisionLog, parent, {
+          turn, kind: 'checkpoint', decision: 'suppressed', reason: 'project-off', childId, label: record.label,
+        })
+      }
+      return result
+    }
     const deliverable = []
     for (const [childId, record] of entries) {
       try {
@@ -473,6 +523,9 @@ function registerReminders(ctx, config) {
       // 0.11.0 D2：闸门用的 cwd 与写入守卫同源（`session.cwd ?? header.cwd`）；
       // 分类器靠它把绝对路径相对化，取不到时按保守口径把写入当代码。
       const cwd = target?.session?.cwd ?? target?.session?.header?.cwd
+      // 0.13.0 项目级开关（spec §3.3）：`off` 的项目不投递任何状态闸门。判定放
+      // 在 cwd 之后、任何 `deliver` 之前，本回合继续走观测与收尾。
+      if (readProjectMode(cwd, config.projectSwitch) === 'off') return false
       /** 投递一条闸门消息：steer + 决定日志 + 本回合去重。 */
       const deliver = (text, payload) => {
         steerText(target, text)
@@ -550,6 +603,8 @@ function registerReminders(ctx, config) {
     try {
       const cwd = target?.session?.cwd ?? target?.session?.header?.cwd
       if (typeof cwd !== 'string' || cwd === '') return
+      // 0.13.0 项目级开关（spec §3.3）：`off` 的项目不写 jsonl、也不建目录。
+      if (readProjectMode(cwd, config.projectSwitch) === 'off') return
       const events = target?.session?.snapshotEvents?.() ?? []
       // 口径来自写入守卫：写入工具、派发工具、控制面名单都只有这一份真相
       // （0.9.0；此前复用的是 nudge 段）。
