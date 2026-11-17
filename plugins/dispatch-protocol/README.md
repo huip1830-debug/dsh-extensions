@@ -265,6 +265,7 @@
 | `0.14.0` | 会话区控件 + `/dispatch` 命令：宿主命令 `/dispatch [off\|shadow\|full]`（无参查询，写标记文件走 `writeProjectMode` 的原子写）；浏览器半区新增 `client.js`，在 `conversation.composer.dock` 显示当前档位与三态按钮，读走 `remote.workspaceFiles.read`、写走 `remote.commands.execute`（与 `/` 菜单同一条 admission 路径），`command/executed` / 窗口 focus / 会话切换后重读。`package.json` 加 `dsh.client`（`platform: 'web'` + inject 清单）与 `./client` 导出，`locale/zh.json` / `locale/en.json` 加 `ui` 词条。宿主行为零变化：无 client 运行时、`enabled:false`、无 `commands` 服务都照旧。 |
 | `0.14.1` | 客户端注入缺陷修复：`client.js` 此前未声明 Remote 命名空间注入，点 dock 按钮报 `cannot get property "remote.commands" without inject`；现在 `inject` 含 `slots`/`locale`/`remote`/`remote.commands`/`remote.workspaceFiles`（与官方 Goal 控件同款），注入是前置条件——缺面时控件整块不出现；`test.mjs` 补回归断言（168 pass：`client.js` 的 `inject` 必须含这五个名字）。 |
 | `0.14.2` | `package.json` 的 `files` 白名单补回 `test.mjs`——0.14.0 引入 `files` 时漏了它，导致 `scripts/verify-install.mjs` 的 `files` 项在每次发布后永久报「installed 缺失」（该脚本按仓库插件目录全部文件与 installed 逐项比对）。 |
+| `0.14.3` | dock 选中态改用「标签主色 + 透明度」着色（`color-mix` 叠在 `--dsw-alias-label-primary` 上，14% / hover 20% + 1px `inset` 描边），原先用 `--dsw-alias-brand-primary`，该别名在浅/深主题下解析成白色底色、配 `--dsw-alias-label-inverse` 回落 `#fff` → 白底白字；不支持 `color-mix` 的浏览器回退到 `--dsw-alias-bg-layer-3`（缺失则 `--dsw-alias-interactive-bg-hover`）+ `--dsw-alias-label-primary`。 |
 
 0.10.0–0.11.0 为未发布的中间提交，内容并入 0.12.0。
 

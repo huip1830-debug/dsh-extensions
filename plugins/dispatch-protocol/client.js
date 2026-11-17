@@ -91,8 +91,9 @@ window.__ModuleLoader__.load({
       '.ddp-mode{border:0;background:0 0;padding:1px 8px;border-radius:999px;cursor:pointer;font-family:inherit;font-size:11px;color:var(--dsw-alias-label-tertiary);line-height:1.6}',
       '.ddp-mode:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}',
       '.ddp-mode:disabled{cursor:default;opacity:.55}',
-      '.ddp-modeCurrent{background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-inverse,#fff)}',
-      '.ddp-modeCurrent:hover{background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-inverse,#fff)}',
+      '.ddp-modeCurrent{background:var(--dsw-alias-bg-layer-3,var(--dsw-alias-interactive-bg-hover));color:var(--dsw-alias-label-primary);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--dsw-alias-label-primary) 22%,transparent)}',
+      '.ddp-modeCurrent{background:color-mix(in srgb,var(--dsw-alias-label-primary) 14%,transparent)}',
+      '.ddp-modeCurrent:hover{background:color-mix(in srgb,var(--dsw-alias-label-primary) 20%,transparent);color:var(--dsw-alias-label-primary)}',
       '.ddp-notice{color:var(--dsw-alias-state-warn-label)}',
       // Narrow screens keep only the current mode on screen (spec §3.2).
       '@media (max-width:640px){.ddp-mode{display:none}.ddp-modeCurrent{display:inline-block}}',
