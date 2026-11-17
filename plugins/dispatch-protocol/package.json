@@ -1,6 +1,6 @@
 {
   "name": "dispatch-protocol",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "private": true,
   "type": "module",
   "description": "DSH profile plugin: inject always-on delegation discipline into the system prompt, independent of which skills the model loads",
@@ -15,6 +15,7 @@
   "files": [
     "plugin.mjs",
     "client.js",
+    "test.mjs",
     "cordis.patch.yml",
     "lib/",
     "locale/",
