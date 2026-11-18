@@ -94,8 +94,33 @@ window.__ModuleLoader__.load({
     // themed through the --dsw-alias-* custom properties. The dock is an
     // ambient row above the composer card (0.15.1 `input.dock`), so it stays a
     // single line of chips.
+    //
+    // 0.17.1 width contract: the slot outlet is `display:contents`
+    // (dsh-client-ui-renderer/src/client/skeleton/scoped-slots.tsx:306-312), so
+    // our root becomes a direct flex child of the host's `.composerStack`, which
+    // spans the whole conversation column. The host centers only the composer
+    // card (`.GRgSLq_card{max-width:var(--dsh-composer-card-max-width)}` inside
+    // `.GRgSLq_root{padding:0 var(--dsh-composer-side-clearance);
+    // align-items:center}`) — an unconstrained dock row therefore sticks to the
+    // column's left edge, far left of the card (0.17.0 shipped exactly that).
+    //
+    // So the root reproduces the host's own two-level geometry instead of a
+    // single calc: `.ddp-frame` mirrors `.GRgSLq_root` (same side clearance,
+    // column + centered items) and `.ddp-dock` mirrors `.GRgSLq_card`
+    // (`width:100%` capped by the card max-width). A one-element
+    // `width:calc(100% - 2×clearance)` happens to match in the normal variant,
+    // but NOT in the embedded one (the right-sidebar subagent Conversation):
+    // there `--dsh-composer-card-max-width` is itself a percentage
+    // (`min(calc(100% - 16px), 952px)`), so it resolves against whichever
+    // element uses it — the card resolves it against the padded root, our root
+    // resolves it against the column, and the row ends up 8px wide per side.
+    // With the mirrored frame both resolve against the same content box, and
+    // every window width (including the 680/920px clamp boundaries, the hero
+    // stack's `min(card + 2×clearance, 100%)` width, and the ≤640px media
+    // query) keeps the row exactly on the card's edges.
     const CSS = [
-      '.ddp-dock{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:2px 4px;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}',
+      '.ddp-frame{box-sizing:border-box;padding:0 var(--dsh-composer-side-clearance,16px);display:flex;flex-direction:column;align-items:center}',
+      '.ddp-dock{box-sizing:border-box;width:100%;max-width:var(--dsh-composer-card-max-width,952px);display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:2px var(--dsh-composer-dock-inset,8px);font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}',
       '.ddp-label{color:var(--dsw-alias-label-secondary);font-weight:600}',
       '.ddp-value{color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums}',
       '.ddp-valueUnknown{color:var(--dsw-alias-label-tertiary)}',
@@ -322,14 +347,17 @@ window.__ModuleLoader__.load({
         }, candidate)
       })
 
-      return h('div', { className: 'ddp-dock', role: 'group', 'aria-label': t('title') },
-        h('span', { className: 'ddp-label' }, t('title')),
-        h('span', {
-          className: known ? 'ddp-value' : 'ddp-value ddp-valueUnknown',
-          title: valueTitle,
-        }, valueText),
-        h('span', { className: 'ddp-modes' }, buttons),
-        notice === undefined ? null : h('span', { className: 'ddp-notice', role: 'status' }, notice))
+      // `.ddp-frame` mirrors the host composer root (side padding + centered
+      // items); `.ddp-dock` mirrors the card (100%, capped by the card width).
+      return h('div', { className: 'ddp-frame' },
+        h('div', { className: 'ddp-dock', role: 'group', 'aria-label': t('title') },
+          h('span', { className: 'ddp-label' }, t('title')),
+          h('span', {
+            className: known ? 'ddp-value' : 'ddp-value ddp-valueUnknown',
+            title: valueTitle,
+          }, valueText),
+          h('span', { className: 'ddp-modes' }, buttons),
+          notice === undefined ? null : h('span', { className: 'ddp-notice', role: 'status' }, notice)))
     }
 
     // --- plugin -------------------------------------------------------------

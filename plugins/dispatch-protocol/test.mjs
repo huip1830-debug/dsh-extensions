@@ -2045,6 +2045,95 @@ test('0.15.1: the dock registers on conversation.input.dock (blank Sessions rend
   }
 })
 
+test('0.17.1: the dock row mirrors the composer card width in every layout variant', () => {
+  // 线上缺陷回归：`conversation.input.dock` 的 outlet 是 `display:contents`
+  // （dsh-client-ui-renderer 的 ANCHOR_STYLE），控件直接成为宿主 `.composerStack`
+  // 的 flex 子项；而这个栈占满整条会话列（输入框卡片只是其中一行）。宿主只给
+  // 卡片自己 `max-width:var(--dsh-composer-card-max-width)` + 居中，控件不自己
+  // 带上同样的宽度约束，整行就贴在会话列最左边（距离卡片上百像素），看起来
+  // 「没有和输入框对齐」。官方 QueueDock / TodoPanel 都各自带这段 CSS。
+  //
+  // 修复不是一行 calc，而是照抄宿主的两级几何：`.ddp-frame` ≈ `.GRgSLq_root`
+  // （侧留白 + 居中），`.ddp-dock` ≈ `.GRgSLq_card`（100% + 卡片宽度上限）。
+  // 因为嵌入形态（右侧栏子代理会话）里 `--dsh-composer-card-max-width` 本身是
+  // 百分比，单行 calc 会按「用的元素」解析、每边差 8px；镜像两级容器后两边解析
+  // 基准一致，窗口任意宽度都对得上。
+  const previousWindow = globalThis.window
+  const previousDocument = globalThis.document
+  let captured
+  const styles = []
+  try {
+    globalThis.window = { __ModuleLoader__: { load(registration) { captured = registration } } }
+    globalThis.document = {
+      querySelector: () => null,
+      createElement: () => {
+        const tag = { dataset: {}, textContent: '' }
+        styles.push(tag)
+        return tag
+      },
+      head: { appendChild() {} },
+    }
+    new Function(readFileSync(new URL('./client.js', import.meta.url), 'utf8'))()
+    const react = {
+      createElement: (type, props, ...children) => ({ type, props: { ...(props ?? {}), children } }),
+      useState: (initial) => [initial, () => {}],
+      useEffect: () => {},
+      useRef: (initial) => ({ current: initial }),
+    }
+    const exports = captured.factory((id) => {
+      if (id === 'react') return react
+      throw new Error(`client.js required an unexpected module: ${id}`)
+    })
+
+    const plain = styles.map((tag) => tag.textContent).join('\n')
+    const frame = /\.ddp-frame\{([^}]*)\}/.exec(plain)?.[1]
+    const dock = /\.ddp-dock\{([^}]*)\}/.exec(plain)?.[1]
+    assert.ok(frame !== undefined, 'the dock ships a .ddp-frame rule (mirrors the composer root)')
+    assert.ok(dock !== undefined, 'the dock ships a .ddp-dock rule (mirrors the composer card)')
+    // 与宿主 `.GRgSLq_root` 同款：侧留白 + 列向居中，卡片宽度百分比才有同一基准。
+    assert.match(frame, /padding:0 var\(--dsh-composer-side-clearance/,
+      'the frame uses the same side clearance as the composer root')
+    assert.match(frame, /align-items:center/, 'the frame centers the card-width row')
+    // 与宿主 `.GRgSLq_card` 同款：先 100%（含窄屏），再由卡片上限收窄。
+    assert.match(dock, /width:100%/, 'the row takes the whole available width first')
+    assert.match(dock, /max-width:var\(--dsh-composer-card-max-width/,
+      'then caps itself to the host composer card width')
+    assert.match(dock, /box-sizing:border-box/, 'padding must not widen the capped row')
+
+    // 结构契约：宽度 CSS 只有在 frame 包住 dock 时才有意义；少一层 wrapper 就退回
+    // 贴左（0.17.0 的缺陷）。这里用桩 React 渲染一次组件，检查元素树。
+    let component
+    const fakeCtx = {
+      slots: {
+        inject(name, callback) { callback(); return () => {} },
+        register(definition, render) { component = render; return () => {} },
+      },
+      locale: { register() { return () => {} } },
+      remote: { workspaceFiles: { read() {} }, commands: { execute() {} } },
+      effect(fn) { fn(); return () => {} },
+      on() { return () => {} },
+    }
+    exports.apply(fakeCtx)
+    const tree = component({
+      t: (key) => key,
+      sessionId: 'sess-1',
+      readMode: () => Promise.resolve({ mode: 'auto' }),
+      switchMode: () => Promise.resolve({ ok: true }),
+      subscribe: () => undefined,
+    })
+    assert.equal(tree?.type, 'div')
+    assert.equal(tree?.props?.className, 'ddp-frame', 'the component root is the frame')
+    const inner = tree?.props?.children?.[0]
+    assert.equal(inner?.props?.className, 'ddp-dock', 'the card-width row lives inside the frame')
+  } finally {
+    // 桩只活在这个用例里：其它用例依赖真实的宿主环境。
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+    if (previousDocument === undefined) delete globalThis.document
+    else globalThis.document = previousDocument
+  }
+})
+
 // ---------------------------------------------------------------------------
 // 0.15.0 项目策略文件：`readProjectPolicy`（spec `2026-11-17-project-policy-
 // design.md` §2.1/§2.2）+ `business` 规则预设（§2.4）。用例全部只碰临时目录。
