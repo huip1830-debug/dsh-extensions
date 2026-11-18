@@ -44,6 +44,12 @@
 // multi-session paragraph (list `dispatch/state/` first, ask the user when the
 // same requirement already has a live file, legacy `dispatch/state.md` is
 // read-only). Only rule 1 text changed; rule 2-6 stay as they were.
+//
+// 0.15.0: a project policy file may pick a rule preset. The `business` preset's
+// six skeleton rules and closing paragraph are frozen verbatim here
+// (`BUSINESS_RULES` / `BUSINESS_FOOTER`) and selected by `resolveRulesPreset`;
+// `resolveConfig`'s own return object is unchanged (the profile's rules/footer
+// still render `text`), so a project without a policy file is byte-identical.
 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -111,6 +117,41 @@ export const DEFAULT_RULES = [
  * by artifact (control / document / code / unknown), not by activity.
  */
 export const DEFAULT_FOOTER = '白名单与循环批：主控的权限按「产出物归属」判定，不按「是否判断密集」判定（分界见第 1 条）。交付通道按风险缩放，不搞全有或全无：控制面主控直写；轻批（判据见第 6 条）子代理直做、免独立评审；其余为全批（spec 冻结 + 独立评审 + 集成）。循环型工作（结果未知、需 ≥3 轮「跑→看→改」）派成循环批：目标判定 + 环境（凭据/端口/库/账号）+ 每轮证据（命令/退出码/错误原文）+ 预算（轮数与墙钟）+ 停止条件 + 契约分叉上报；分叉用 NEEDS_DECISION 三行（现象/选项/建议）回主控，主控只回决策、不接管循环。真实环境的外部未知先派只读 spike 实测出「实测契约表」，再冻结、再实现，不得先实现后验证。预算对称：子代理单批 15 分钟/30 次编辑；主控单回合 15 分钟/20 步，触顶即停、不产生第二个未派发的写批次，剩余工作转成循环批或下一批。多文件机械活（同模式批量改写、大范围检索、跑长命令）默认派给子代理；同需求的多个轻批合并为一个子代理，修改清单取并集、内部串行。拆批时先勘察后实现、按互斥文件切分、可多批陆续派发，不许整包留给自己。缺计划类 skill 时，先写「每条 = 一个决策点或一批派发」的任务清单，再据此决定派发。只读类子代理（评审/复审/勘察）的 label 一律以「只读」或「勘察」开头——角色表按此前缀收窄沙箱与路由，执行类批次的 label 不得以这两个词开头。'
+
+// 0.15.0 `business` 预设（spec `2026-11-17-project-policy-design.md` §2.4，逐字
+// 冻结）：给「不跑 dispatch 纪律仓库」的普通业务项目用的六条骨架，删掉本仓库专属
+// 的 docs-check / spec 路径 / 断言表细节，固定 token 约砍一半。正文只在这里，
+// 不得散落到 `plugin.mjs`；`rules: "business"` 的项目由调用方选它替换
+// `config.rules` / `config.footer`。
+
+/** The six skeleton rules of the `business` preset; §2.4 verbatim, no numbering. */
+export const BUSINESS_RULES = [
+  '主控只做控制面：问用户、写需求/契约/台账、派发、裁决子代理证据、跑唯一一条集成命令、提交。执行面一律派发：src/**、tests/**、scripts/** 的写入、真实环境排错、构建与失败测试修复、文档正文、测试、评审与评审修复。用户显式要求主控亲做，或已闭合批次上的单文件 ≤10 行收尾修复，可以先写 dispatch/override.json 再动手。开工先勘察：派发前把「文件:行号 + 结论 + 现存调用方」写进派发；写不出这份现状就先派只读勘察。',
+  '派发必须自包含：现状、允许修改/读取（逐条文件名）、唯一一条覆盖本批的窄验证命令、预算（墙钟与步数）、输出格式。同模式机械改动用一次多 hunk 或脚本完成。清单外信息或现状不符时停报 NEEDS_CONTEXT。派发即冻结：白名单外的契约面（schema/类型/接口/路由）在批运行期间只读。',
+  '验收只付一次：子代理跑本模块窄验证并归因；集成命令由派发方在相关批全部结束后跑一次并留存退出码。同一条命令只跑一次；多包仓库按端各一条。派发后不守着：一批最多一次主动检查（预算过半时），其余时间结束回合等完成事件。',
+  '评审只审变更集：输入是需求、冻结契约、本批白名单并集的 diff、派发方复跑的集成结果（退出码与输出）。逐条给 PASS|FAIL + 文件:行号；不采信实现者自述；可给建议但不得改文件。需求本身是全局不变量（「彻底统一」「所有调用方」）时加一栏全仓检索核查。一个变更集一个包，全部实现批落地且跑过集成后终评一次，禁止每批一评。',
+  '提交权归派发方：子代理不得 commit / push / reset / clean，除非派发中显式授权；派发前记录目标文件的既有未提交改动，不得覆盖、不得计入成果。',
+  '并行只读、互斥并行写：只读子问题互不依赖时同一条消息并行发出；实施批次白名单按文件/模块互斥，同文件串行；契约在派发前定死；不得并发跑共享产物（dist、缓存、端口）的全量构建。开工先判级：单文件 ≤20 行或同模式机械改写 ≤5 文件且 ≤8 分钟＝轻批，子代理直做、免独立评审；其余为全批（契约冻结 + 独立评审 + 集成）。',
+]
+
+/** The closing paragraph of the `business` preset; §2.4 verbatim. */
+export const BUSINESS_FOOTER = '交付通道按风险缩放：控制面主控直写；轻批免独立评审；其余全批。结果未知、需 ≥3 轮「跑→看→改」的活派成循环批：目标判定 + 环境 + 每轮证据（命令/退出码/错误原文）+ 预算 + 停止条件；外部未知先派只读 spike 测出契约再冻结。预算对称：子代理单批 15 分钟/30 次编辑；主控单回合 15 分钟/20 步，触顶即停。结论以项目自己的 CI 为准：纪律只保证过程，typecheck/test/lint 才是结果闸门。'
+
+/**
+ * Pick the rule preset for a project policy's `rules` value (0.15.0 §2.3).
+ *
+ * Pure: reads no disk and never throws. `business` → the frozen §2.4 preset;
+ * anything else (including `undefined`) → the caller's resolved config, so a
+ * profile that never mentions presets keeps 0.14.3's text byte for byte.
+ * @param name - `policy.rules` from the project policy file (may be undefined).
+ * @param config - the resolved config (`resolveConfig(...)` output).
+ * @returns `{ rules, footer }` to render the prompt section with.
+ */
+export function resolveRulesPreset(name, config) {
+  if (name === 'business') return { rules: BUSINESS_RULES, footer: BUSINESS_FOOTER }
+  const source = config ?? {}
+  return { rules: source.rules ?? DEFAULT_RULES, footer: source.footer ?? DEFAULT_FOOTER }
+}
 
 /** The checkpoint reminder sent to the parent when a child completes. */
 export const DEFAULT_CHECKPOINT = '[dispatch-protocol] 子代理 {childId}（{label}）已完成。标记完成前：读它的 diff，核对它报告的退出码，并在全批结束后跑一次集成命令；结果记入台账。'

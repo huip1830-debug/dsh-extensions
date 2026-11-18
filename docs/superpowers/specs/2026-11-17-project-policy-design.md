@@ -8,7 +8,7 @@
 ## 1. 目标
 
 1. `dispatch/protocol.json` 从「一个 mode」扩成「项目策略文件」：模式 + 白名单 + 闸门模式 + 规则预设，缺省回落到 profile 配置。
-2. 新增 `rules: "business"` 预设：~1.5K 字符的六条骨架（删掉本仓库专属的 docs-check / spec 路径 / 断言表细节），固定 token 约砍一半。
+2. 新增 `rules: "business"` 预设：实测 **900 字符**（六条骨架，删掉本仓库专属的 docs-check / spec 路径 / 断言表细节；派发前估计「约 1.5K」偏高，以实测为准），固定 token 约降到 1/4（对比 3.8K 正文）。
 3. 新增 `/dispatch init`：扫项目（包管理器、test/typecheck 命令、文档目录、契约目录、是否 DSH 插件）并写出贴合的 `dispatch/protocol.json`。
 4. 全部实时读文件，**不改 profile、不重启**。
 
@@ -57,13 +57,13 @@ export function readProjectPolicy(cwd, projectSwitch)
 | 五闸门 | `verify.commands` / `contract.patterns` / `docs.patterns` / `controlPlanePatterns` 逐字段覆盖 | 各自原值 |
 | 提示词段 | `rules === 'business'` 时用 `BUSINESS_RULES` + `BUSINESS_FOOTER`；否则用 `config.rules`/`config.footer` | 原值 |
 | `off` | 行为不变（不注入、不拦、静默、观测不写） | — |
-| `/dispatch`（查询/切换） | 文案与行为不变；**新增子命令** `init` | — |
+| `/dispatch`（查询/切换） | 文案与行为不变；**新增子命令** `init`。**切换 mode 时必须保留文件里其它策略字段**（只替换 `mode`/`enabled`，不得整文件重写；文件不存在或坏 JSON 时仍只写 `{"mode":"…"}\n`） | — |
 
 - 闸门覆盖的构造：`effectiveGates = applyPolicyToGates(gates, policy)`（纯函数，返回新对象，不改原配置对象）；`evaluateGates` 内一次性算好。
 - 提示词段：`text` 是函数（0.14 已有），在函数内读策略并选择预设；异常回落 `config.text`。
 - 预设正文**冻结在 `lib/config.mjs`**（`BUSINESS_RULES`、`BUSINESS_FOOTER` 导出），不得散落在 plugin.mjs。
 
-### 2.4 `business` 预设正文（逐字冻结，约 1.5K 字符）
+### 2.4 `business` 预设正文（逐字冻结，实测 900 字符）
 
 ```text
 1. 主控只做控制面：问用户、写需求/契约/台账、派发、裁决子代理证据、跑唯一一条集成命令、提交。执行面一律派发：src/**、tests/**、scripts/** 的写入、真实环境排错、构建与失败测试修复、文档正文、测试、评审与评审修复。用户显式要求主控亲做，或已闭合批次上的单文件 ≤10 行收尾修复，可以先写 dispatch/override.json 再动手。开工先勘察：派发前把「文件:行号 + 结论 + 现存调用方」写进派发；写不出这份现状就先派只读勘察。
@@ -92,6 +92,7 @@ export function readProjectPolicy(cwd, projectSwitch)
    - 预设：`package.json` 含 `dsh.bundle` 或 `dsh.client` → `rules: "plugin"`；否则 `"business"`。
 2. 写 `dispatch/protocol.json`：`{ mode: "full", rules: 预设, allowlist, controlPlanePatterns: allowlist, verify: { commands }, contract: { patterns }, docs: { patterns } }`；已存在则不覆盖，返回错误文案说明现状（要求先删或先看）。
 3. 返回文案：一行摘要（写了哪个文件、识别到的 preset / 命令数 / 契约面数）+ 提示「随时 `/dispatch off|shadow|full` 切档」。
+4. **可发现性（2026-11-17 批 B 裁决追加）**：命令 `input.hint` 与用法串更新为 `[off|shadow|full|init]`；0.14 的「命令形状冻结」断言（`input` 严格等于旧 hint）随本版更新——这是**有意的契约演进**，不是回归，需在测试里改为断言新 hint 且含 `init`。
 
 ## 3. 兼容与安全
 

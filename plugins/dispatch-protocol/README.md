@@ -2,18 +2,48 @@
 
 > 部署状态不在本文档硬编码：desktop 的实际版本以 profile 安装为准（`dsh plugin --profile desktop list` 或 `profiles/desktop/node_modules/dispatch-protocol/package.json`）；probe 为 `link:` → 直接吃工作区。发布顺序固定为：提交推送 → `dsh plugin --profile desktop update dispatch-protocol` → 重启 DSH → 台账记一笔。没走完不算发布。
 
+## 使用场景（先读这个）
+
+**给谁用**：用 DSH 开发自己业务项目的团队。它解决的是「多代理并行时谁写代码、谁验收、契约何时冻结」——不是给「维护本插件」用的；维护本仓库时它只是顺带生效的约束，别把维护体验当成产品价值。
+
+**值得开的场景**：
+
+| 场景 | 纪律帮在哪 |
+|---|---|
+| 多文件 / 跨端改动 | 白名单按文件互斥，并行批次不会互相覆盖 |
+| 共享契约（schema / 类型 / 接口 / 路由） | 派发即冻结，契约在批运行期间只读 |
+| 需要并行 | 只读子问题并行发，写批次按文件切 |
+| 要交给别人接手 | spec、台账、交接文件都留在仓库里 |
+| 核心链路（钱 / 权限 / 多租户） | 评审 + 一次性集成验证降低返工 |
+
+**不值得开的场景**：单文件 ≤20 行的小改、机械重命名、改文档 / 配置、陌生代码库探查、紧急热修、一次性数据修复、原型。这些拿不到纪律的收益，只付流程成本。
+
+**成本**：默认正文每请求约 3K token（估算；系统提示词段，可随 KV 缓存复用）；真正的成本大头是 `full` 引起的派发 / 评审 / 提醒轮次（经验值 3–10 倍），小改动尤其明显；大任务 `full` 可能反而省（少返工）。
+
+**三档一句话**：`off` 全静默（不注入、不拦、不提醒）；`shadow` 规则与提醒都在、写入只记不拦；`full` 完整纪律。默认值按项目选，**不要**给全仓库都设 `full`（见「常见误用」）。
+
+**按项目适配**：项目根 `dispatch/protocol.json` 可写 `mode` / `rules` / `allowlist` / `controlPlanePatterns` / `verify.commands` / `contract.patterns` / `docs.patterns`，缺省字段回落 profile；`rules: "business"` 换成精简预设；`/dispatch init` 扫项目生成初始策略。字段与生成规则见 [项目策略文件与 business 预设](#项目策略文件与-business-预设)。
+
+**质量边界**：纪律保**过程**（上下文隔离、契约冻结、白名单、评审范围、一次性验证）；**结果**靠项目自己的 CI（typecheck / test / lint）。评审只做语义核对，抓不到运行时装配错误与视觉问题——必须有 E2E 或真机验收（0.14.0 的 `inject` 缺失、选中态白底白字都是用户点到 / 看到才暴露）。
+
+**常见误用**：
+
+1. **全仓库默认 `full`**：小改动也要走派发 / 评审 / 提醒，经验值 3–10 倍轮次成本；按项目或按任务降档。
+2. **把本仓库的白名单 / 闸门默认值当通用值**：`dispatch/`、`docs/superpowers/specs/`、`tsc` / `test.mjs` 都是本仓库口径，业务项目要用 `/dispatch init` 或手写策略，否则误拦误报。
+3. **以为评审能替代测试**：评审只看 diff 的语义，运行时装配和视觉问题不在它的判定面；没有 E2E / 真机验收，纪律全绿也可能不能用。
+
 ## 它是什么
 
 把「派发纪律」常驻注入 DSH：主控只做控制面、执行面一律派发，并在工具边界拦住越界写入——纪律不依赖模型记得住规则。
 
 | 机制 | 位置 | 拦不拦 |
 |---|---|---|
-| 注入 | 系统提示词 section `## 派发纪律（DSH）`，主控与每个子代理的每次请求都带着（`lib/config.mjs:174-181`） | 不拦 |
-| 写入守卫 | `ctx.tools.guard`，工具调用边界（`plugin.mjs:401-403`） | **拦**：拒绝这一次 `write`/`edit`，回合继续 |
-| 状态闸门 | `agent/turn-stopping`，五个事件闸门（`plugin.mjs:595-657`） | 不拦，只提醒 |
-| 检查点与观测 | 子代理 settle 登记 → 父代理回合收尾判定；根代理回合收尾写观测行（`plugin.mjs:780-855`、`509-565`、`673-717`） | 不拦 |
+| 注入 | 系统提示词 section `## 派发纪律（DSH）`，主控与每个子代理的每次请求都带着（`lib/config.mjs#resolveConfig`） | 不拦 |
+| 写入守卫 | `ctx.tools.guard`，工具调用边界（`plugin.mjs#apply`） | **拦**：拒绝这一次 `write`/`edit`，回合继续 |
+| 状态闸门 | `agent/turn-stopping`，五个事件闸门（`plugin.mjs#evaluateGates`） | 不拦，只提醒 |
+| 检查点与观测 | 子代理 settle 登记 → 父代理回合收尾判定；根代理回合收尾写观测行（`plugin.mjs#registerReminders`、`plugin.mjs#drain`、`plugin.mjs#observeTurn`） | 不拦 |
 | 文档校验 | `scripts/docs-check.mjs`，仓库根无参运行，只判语法 / 围栏 / 表格列数 / 相对链接 / 配置表键名 | 不拦 |
-| 项目级开关 | 每个工具调用 / 回合收尾按会话 cwd 实时读标记文件（`lib/project.mjs:91-118`） | 按项目降档：`shadow` 只记不拦、`off` 全静默 |
+| 项目级开关 | 每个工具调用 / 回合收尾按会话 cwd 实时读标记文件（`lib/project.mjs#readProjectPolicy`） | 按项目降档：`shadow` 只记不拦、`off` 全静默 |
 
 收尾提醒（完成检查点 + 五个闸门）共用一个 `agent/turn-stopping` 处理器，一次收尾最多投一条 `steer`；写入约束不在收尾，而在动作之前。
 
@@ -34,19 +64,19 @@
 
 ### 写入守卫
 
-主控用 `write`/`edit` 写控制面名单（`dispatch/`、`docs/superpowers/specs/`，`lib/write-policy.mjs:28`）之外的文件时，DSH 在工具边界拒绝**这一次**调用：模型收到 `Error: <reason>`，回合继续。纠正点因此从「回合收尾」前移到「动作之前」，零模型步进。
+主控用 `write`/`edit` 写控制面名单（`dispatch/`、`docs/superpowers/specs/`，`lib/write-policy.mjs#DEFAULT_ALLOWLIST`）之外的文件时，DSH 在工具边界拒绝**这一次**调用：模型收到 `Error: <reason>`，回合继续。纠正点因此从「回合收尾」前移到「动作之前」，零模型步进。
 
-- **注册**：`ctx.effect(() => ctx.tools.guard(makeGuard(config)))`，`inject` 带 `'tools'`，插件卸载时随 disposer 一起移除；`writePolicy.enabled: false` 或宿主没有 `ctx.tools.guard` 时不注册（`plugin.mjs:67`、`401-403`）。
-- **判定顺序**：①名单内 → 放行且**不写日志**（控制面写入是主控的合法动作，不制造噪音）；②`dispatch/override.json` 有效 → 放行，日志 `reason: 'override'`；③否则拒绝，`reason` 为 `no-override`/`stale`/`invalid`——`mode: enforce` 返回拒绝串，`shadow` 只记日志（`lib/write-policy.mjs:201-218`、`plugin.mjs:252-282`）。
-- **豁免**：没有 `agent`；子代理（`session.header.origin === 'subagent'`，执行面本来就该写）；工具不在 `writePolicy.tools`；参数里既无 `file_path` 也无 `path`（`plugin.mjs:227-235`）。**子代理放行是有意的**——派发要的正是它在 `src`/`tests`/`scripts` 里写。
-- **路径口径**：`\` → `/`、去 `./`、折叠 `..`；相对路径相对 `session.cwd ?? header.cwd`，绝对路径先转 cwd 相对、cwd 外一律视为不在名单；名单大小写不敏感，带尾 `/` 按前缀匹配，无尾 `/` 按词边界（`lib/write-policy.mjs:82-140`）。
-- **override 是唯一凭据**：默认 `<cwd>/dispatch/override.json`（`writePolicy.overridePath` 可改）；schema 是 `{"reason":"…","source":"…","createdAt":"…"}`，代码只校验 `reason` 非空，`source`/`createdAt` 不参与判定；有效 = JSON 可解析 + `reason` 非空 + **本会话写下**（`mtimeMs >= session.createdAt ?? header.createdAt`），新会话必须重写；取不到会话开始时间时跳过新鲜度判断（fail-open），日志记 `reason: 'override-unbounded'` 以区分（`lib/write-policy.mjs:153-188`、`plugin.mjs:201-204`）。
-- **只拦 `write`/`edit` 的参数路径**：`pwsh` 里的 `Set-Content`/`Remove-Item` 不拦，只在观测与闸门的口径里计为写入（`lib/tool-calls.mjs:250`）。
-- **fail-open**：守卫内部异常一律按放行处理，日志写失败也不影响调用（`plugin.mjs:283-286`）；拒绝串说清「拦了什么、不在哪份名单」，并给两条出路——派给执行批，或按用户明确授权先写 override 再重试（`lib/write-policy.mjs:233-236`）。
+- **注册**：`ctx.effect(() => ctx.tools.guard(makeGuard(config)))`，`inject` 带 `'tools'`，插件卸载时随 disposer 一起移除；`writePolicy.enabled: false` 或宿主没有 `ctx.tools.guard` 时不注册（`plugin.mjs#inject`、`plugin.mjs#apply`）。
+- **判定顺序**：①名单内 → 放行且**不写日志**（控制面写入是主控的合法动作，不制造噪音）；②`dispatch/override.json` 有效 → 放行，日志 `reason: 'override'`；③否则拒绝，`reason` 为 `no-override`/`stale`/`invalid`——`mode: enforce` 返回拒绝串，`shadow` 只记日志（`lib/write-policy.mjs#evaluateWritePolicy`、`plugin.mjs#makeGuard`）。
+- **豁免**：没有 `agent`；子代理（`session.header.origin === 'subagent'`，执行面本来就该写）；工具不在 `writePolicy.tools`；参数里既无 `file_path` 也无 `path`（`plugin.mjs#makeGuard`）。**子代理放行是有意的**——派发要的正是它在 `src`/`tests`/`scripts` 里写。
+- **路径口径**：`\` → `/`、去 `./`、折叠 `..`；相对路径相对 `session.cwd ?? header.cwd`，绝对路径先转 cwd 相对、cwd 外一律视为不在名单；名单大小写不敏感，带尾 `/` 按前缀匹配，无尾 `/` 按词边界（`lib/write-policy.mjs#normalizePath`、`lib/write-policy.mjs#toCwdRelative`、`lib/write-policy.mjs#isAllowedPath`）。
+- **override 是唯一凭据**：默认 `<cwd>/dispatch/override.json`（`writePolicy.overridePath` 可改）；schema 是 `{"reason":"…","source":"…","createdAt":"…"}`，代码只校验 `reason` 非空，`source`/`createdAt` 不参与判定；有效 = JSON 可解析 + `reason` 非空 + **本会话写下**（`mtimeMs >= session.createdAt ?? header.createdAt`），新会话必须重写；取不到会话开始时间时跳过新鲜度判断（fail-open），日志记 `reason: 'override-unbounded'` 以区分（`lib/write-policy.mjs#readOverride`、`plugin.mjs#readSessionStart`）。
+- **只拦 `write`/`edit` 的参数路径**：`pwsh` 里的 `Set-Content`/`Remove-Item` 不拦，只在观测与闸门的口径里计为写入（`lib/tool-calls.mjs#DEFAULT_PWSH_SHELL_PATTERN`）。
+- **fail-open**：守卫内部异常一律按放行处理，日志写失败也不影响调用（`plugin.mjs#makeGuard`）；拒绝串说清「拦了什么、不在哪份名单」，并给两条出路——派给执行批，或按用户明确授权先写 override 再重试（`lib/write-policy.mjs#renderDenyText`）。
 
 ### 状态闸门
 
-五个事件闸门都在 `agent/turn-stopping` 里判定：只对根代理生效、每回合最多一条、判定与投递异常一律吞掉、不阻断任何工具调用；判据只读 `session.snapshotEvents()`，不跑 git、不读磁盘（`lib/gates.mjs:12-14`、`plugin.mjs:595-657`）。
+五个事件闸门都在 `agent/turn-stopping` 里判定：只对根代理生效、每回合最多一条、判定与投递异常一律吞掉、不阻断任何工具调用；判据只读 `session.snapshotEvents()`，不跑 git、不读磁盘（`plugin.mjs#evaluateGates`；`lib/gates.mjs` 的 `evaluate*Gate` 都只收 `events`）。
 
 | 闸门 | 触发 | 动作 | 决定日志 |
 |---|---|---|---|
@@ -56,43 +86,43 @@
 | ReviewGate | 只读评审子代理 `completed` 之后，父代理又有 write/edit（失败的不算、无结果照算；控制面写入不算） | 「评审已失效」提醒，占位 `{files}`（本轮 dirty 去重路径，最多 3 个）/ `{action}`（固定句，见下） | `kind:"gate", gate:"review", files:[...], docOnly:<true\|false>` |
 | HandoffGate | 本回合为空（无本回合 `tool/call`、无非空 text），且往前连续空回合数 ≥ `gates.handoff.emptyTurns` | 「先写 `dispatch/state/<需求>.md` 再开新会话」提醒，占位 `{emptyTurns}` | `kind:"gate", gate:"handoff", emptyTurns:<n>` |
 
-- **让位顺序**：checkpoint → Wait → Verify → Contract → Review → Handoff，固定顺序、不依赖订阅顺序；checkpoint 投递后闸门让位，同一收尾的后续机制不再发第二条（`plugin.mjs:621-651`、`732-748`）。
-- **`{action}` 三句固定、不可配置**：verify 一句（先跑集成命令并留存退出码再收口）、review 代码改动一句（重开受影响切片）、review 文档改动一句（跑 `docs-check` + 交「断言 → 代码位置」表，不必重开代码评审）；`docOnly` 为真时用第三句（`lib/gates.mjs:627-629`、`831-833`）。
-- **验证成功口径**：`pwsh` 命中 `gates.verify.commands`、有对应 `tool/result`、`isError !== true`、结果文本无 `exit code: N` 或 `N === 0`；失败或没有结果的验证不算验证（`lib/gates.mjs:388-391`、`490-496`）。
-- **纯只读 present 不提醒**：整会话零写入、也从未验证时没有 diff 可验（`lib/gates.mjs:603-605`）。
-- **脏判定**：最近一次成功验证之后有成功 write/edit，或命中 `DEFAULT_PWSH_SHELL_PATTERN` 的 `pwsh`；`pwsh` 命中变更模式时，只有形状 A/B/C 的记账写入（`Add-Content`/`Set-Content`/`Out-File`/`Clear-Content` 具名路径、`New-Item` 建目录/文件、`git diff > <路径>`）且目标全在控制面才不脏，其余一律算 `<shell>`（未知=代码）。没有对应结果的调用按脏处理；`git checkout -- <路径>` / `git restore <路径>` 这类还原不算脏（`lib/gates.mjs:429-458`、`342-368`）；显式传 `workdir` 的 `pwsh` 调用一律按脏（落点不由会话 cwd 决定，还原命令也不例外）。
-- **控制面豁免**：VerifyGate 与 ReviewGate 跳过 `gates.controlPlanePatterns`（默认 `dispatch/`、`docs/superpowers/specs/`，与 `writePolicy.allowlist` 同值），控制面写入不计脏、不使评审失效；分类走唯一 `classifyPath`（cwd 锚定 + 段级前缀），`src/**/dispatch/**` 按代码处理（`lib/tool-calls.mjs:189-205`）。
-- **ContractGate 只看收尾时刻**：活跃子代理在 `agent/created` 登记、`subagent/end` 标 `ended`，写入之后、收尾之前结束的子代理不触发（`plugin.mjs:767-772`、`788-789`、`lib/gates.mjs:696`）。
-- **ReviewGate 只看「评审完成 + 之后有写入」**：label 以 `gates.review.labelPrefixes` 开头（默认 `只读评审`/`只读复审`），不解析评审报告 PASS/FAIL，每个基线只提醒一次（`lib/gates.mjs:788-819`、`plugin.mjs:567-570`、`643-644`、`790-816`）。
-- **HandoffGate 是 best-effort**：空回合 = 无本回合 `tool/call` 且无非空 text；宿主在空流/中断回合不再触发 `agent/turn-stopping` 时无法提醒（`lib/gates.mjs:723-763`）。
+- **让位顺序**：checkpoint → Wait → Verify → Contract → Review → Handoff，固定顺序、不依赖订阅顺序；checkpoint 投递后闸门让位，同一收尾的后续机制不再发第二条（`plugin.mjs#evaluateGates`、`plugin.mjs#attach`）。
+- **`{action}` 三句固定、不可配置**：verify 一句（先跑集成命令并留存退出码再收口）、review 代码改动一句（重开受影响切片）、review 文档改动一句（跑 `docs-check` + 交「断言 → 代码位置」表，不必重开代码评审）；`docOnly` 为真时用第三句（`lib/gates.mjs#VERIFY_ACTION`、`lib/gates.mjs#REVIEW_ACTION`、`lib/gates.mjs#REVIEW_DOC_ACTION`、`lib/gates.mjs#renderReviewGate`）。
+- **验证成功口径**：`pwsh` 命中 `gates.verify.commands`、有对应 `tool/result`、`isError !== true`、结果文本无 `exit code: N` 或 `N === 0`；失败或没有结果的验证不算验证（`lib/gates.mjs#exitedZero`、`lib/gates.mjs#analyzeVerification`）。
+- **纯只读 present 不提醒**：整会话零写入、也从未验证时没有 diff 可验（`lib/gates.mjs#evaluateVerifyGate`）。
+- **脏判定**：最近一次成功验证之后有成功 write/edit，或命中 `DEFAULT_PWSH_SHELL_PATTERN` 的 `pwsh`；`pwsh` 命中变更模式时，只有形状 A/B/C 的记账写入（`Add-Content`/`Set-Content`/`Out-File`/`Clear-Content` 具名路径、`New-Item` 建目录/文件、`git diff > <路径>`）且目标全在控制面才不脏，其余一律算 `<shell>`（未知=代码）。没有对应结果的调用按脏处理；`git checkout -- <路径>` / `git restore <路径>` 这类还原不算脏（`lib/gates.mjs#touchedWorkingTree`、`lib/gates.mjs#isRestoreCommand`）；显式传 `workdir` 的 `pwsh` 调用一律按脏（落点不由会话 cwd 决定，还原命令也不例外）。
+- **控制面豁免**：VerifyGate 与 ReviewGate 跳过 `gates.controlPlanePatterns`（默认 `dispatch/`、`docs/superpowers/specs/`，与 `writePolicy.allowlist` 同值），控制面写入不计脏、不使评审失效；分类走唯一 `classifyPath`（cwd 锚定 + 段级前缀），`src/**/dispatch/**` 按代码处理（`lib/tool-calls.mjs#classifyPath`）。
+- **ContractGate 只看收尾时刻**：活跃子代理在 `agent/created` 登记、`subagent/end` 标 `ended`，写入之后、收尾之前结束的子代理不触发（`plugin.mjs#registerReminders`、`lib/gates.mjs#evaluateContractGate`）。
+- **ReviewGate 只看「评审完成 + 之后有写入」**：label 以 `gates.review.labelPrefixes` 开头（默认 `只读评审`/`只读复审`），不解析评审报告 PASS/FAIL，每个基线只提醒一次（`lib/gates.mjs#evaluateReviewGate`、`plugin.mjs#isReviewLabel`、`plugin.mjs#evaluateGates`、`plugin.mjs#registerReminders`）。
+- **HandoffGate 是 best-effort**：空回合 = 无本回合 `tool/call` 且无非空 text；宿主在空流/中断回合不再触发 `agent/turn-stopping` 时无法提醒（`lib/gates.mjs#nonEmptyTurns`、`lib/gates.mjs#evaluateHandoffGate`）。
 
 ### 完成检查点与回合观测
 
 三处记录各写各的、互不回读：检查点提醒父代理验收，观测行记回合事实，决定日志记判定。
 
-**完成检查点**（`plugin.mjs:820-838`）
+**完成检查点**（`plugin.mjs#registerReminders`）
 
 - 子代理 `subagent/end` 且 `stopReason === 'completed'` 才登记「待验收」（每个子代理一次，失败/中止不登记）；判定挪到父代理的 `agent/turn-stopping`，此时父代理整回合的动作已在日志里。
-- 判定：父代理已按汇报动过手 → 静默（`reason: 'handled'`）；子代理整个会话零写入 → 静默（`reason: 'read-only'`）；其余投一条 `steer`，同回合多个 pending 合并成波次消息（`checkpoint.waveText`，`{count}`/`{labels}`）（`plugin.mjs:509-565`）。
-- 「已验收」的判定：父代理在子代理报告可见之后已动过手 → 静默（`reason: 'handled'`）；报告可见点取最后一条——`send_message` 的 `agent/inbox/spliced`（文本含 `Agent {childId} sent a message`），或 `user/message` 且 `data.source.kind === 'subagent-settled'`、`data.source.senderSessionId === {childId}`；没有可见性证据时保守投递（`plugin.mjs:857-881`）。
-- 只读判定用 `callTouchesFile`：`write`/`edit` **尝试即算**，`pwsh` 命中变更动词也算；判定抛错按执行类处理（`plugin.mjs:94-101`、`lib/tool-calls.mjs:265-271`）。
-- 父代理没有 hook 作用域时（如嵌套子代理作父）回退为 settle 时 `followup`，判定顺序不变，`turn` 记 `null`（`plugin.mjs:841-853`）。
+- 判定：父代理已按汇报动过手 → 静默（`reason: 'handled'`）；子代理整个会话零写入 → 静默（`reason: 'read-only'`）；其余投一条 `steer`，同回合多个 pending 合并成波次消息（`checkpoint.waveText`，`{count}`/`{labels}`）（`plugin.mjs#drain`）。
+- 「已验收」的判定：父代理在子代理报告可见之后已动过手 → 静默（`reason: 'handled'`）；报告可见点取最后一条——`send_message` 的 `agent/inbox/spliced`（文本含 `Agent {childId} sent a message`），或 `user/message` 且 `data.source.kind === 'subagent-settled'`、`data.source.senderSessionId === {childId}`；没有可见性证据时保守投递（`plugin.mjs#parentAlreadyHandled`）。
+- 只读判定用 `callTouchesFile`：`write`/`edit` **尝试即算**，`pwsh` 命中变更动词也算；判定抛错按执行类处理（`plugin.mjs#ranReadOnly`、`lib/tool-calls.mjs#callTouchesFile`）。
+- 父代理没有 hook 作用域时（如嵌套子代理作父）回退为 settle 时 `followup`，判定顺序不变，`turn` 记 `null`（`plugin.mjs#registerReminders`）。
 
-**回合观测行**（`plugin.mjs:673-717`）
+**回合观测行**（`plugin.mjs#observeTurn`）
 
-- 根代理回合只要有写入、`pwsh` 变更或派发（任一非零），收尾时往 `<cwd>/dispatch/runs/<sessionId>.jsonl` 追加一行：`time`/`session`/`turn`/`writes`/`files`/`shellWrites`/`failedWrites`/`delegations`；默认目录 `dispatch/runs`（`observation.dir`，`config.mjs:168`）。
-- 同一 `(session, turn)` 只保留首行：`steer` 会让同一回合再跑一步，首行才是自然的回合末快照（`plugin.mjs:682`）。
-- 口径：控制面路径的写入不计入；`write`/`edit` 以失败结果为准排除（没有结果照算，回合被打断时不能把写入抹掉）；`pwsh` 命中变更动词才算 `shellWrites`，`git commit` 不计（`lib/tool-calls.mjs:434-457`）。
-- **观测行不参与判定**：没有任何机制回读它，写盘失败静默吞掉——观测不是门禁（`plugin.mjs:714-716`）。
+- 根代理回合只要有写入、`pwsh` 变更或派发（任一非零），收尾时往 `<cwd>/dispatch/runs/<sessionId>.jsonl` 追加一行：`time`/`session`/`turn`/`writes`/`files`/`shellWrites`/`failedWrites`/`delegations`；默认目录 `dispatch/runs`（`observation.dir`，`lib/config.mjs#resolveConfig`）。
+- 同一 `(session, turn)` 只保留首行：`steer` 会让同一回合再跑一步，首行才是自然的回合末快照（`plugin.mjs#observeTurn`）。
+- 口径：控制面路径的写入不计入；`write`/`edit` 以失败结果为准排除（没有结果照算，回合被打断时不能把写入抹掉）；`pwsh` 命中变更动词才算 `shellWrites`，`git commit` 不计（`lib/tool-calls.mjs#summarizeTurn`）。
+- **观测行不参与判定**：没有任何机制回读它，写盘失败静默吞掉——观测不是门禁（`plugin.mjs#observeTurn`）。
 
-**决定日志**（`config.mjs:192-196`、`plugin.mjs:140-177`）
+**决定日志**（`lib/config.mjs#resolveConfig`、`plugin.mjs#recordDecision`）
 
-- 键是顶层 `log`，默认 `%TEMP%\dispatch-protocol-decisions.jsonl`，`false` 时 checkpoint、写入守卫、闸门都不记；三者写同一文件（`lib/config.mjs:78`）。
-- 只记事实、便于事后分辨「没触发」和「触发后被静默」：checkpoint 每个子代理一行（含 `reason: 'handled'|'read-only'`）、写入守卫每次判定一行（控制面放行不写行）、闸门只记 `delivered`（`plugin.mjs:246-280`、`524-556`、`614`）。
+- 键是顶层 `log`，默认 `%TEMP%\dispatch-protocol-decisions.jsonl`，`false` 时 checkpoint、写入守卫、闸门都不记；三者写同一文件（`lib/config.mjs#DEFAULT_LOG`）。
+- 只记事实、便于事后分辨「没触发」和「触发后被静默」：checkpoint 每个子代理一行（含 `reason: 'handled'|'read-only'`）、写入守卫每次判定一行（控制面放行不写行）、闸门只记 `delivered`（`plugin.mjs#makeGuard`、`plugin.mjs#drain`、`plugin.mjs#evaluateGates`）。
 
 ### 交接
 
-模型失稳（连续空回合、`/compact` 之后丢了上下文）时不要在旧会话里硬撑：先写 `dispatch/state/<需求>.md`，再开新会话接力。HandoffGate 的提醒文案指向本节（`lib/gates.mjs:93`），模板保持最小：
+模型失稳（连续空回合、`/compact` 之后丢了上下文）时不要在旧会话里硬撑：先写 `dispatch/state/<需求>.md`，再开新会话接力。HandoffGate 的提醒文案指向本节（`lib/gates.mjs#DEFAULT_HANDOFF_TEXT`），模板保持最小：
 
 ```text
 需求：<slug>
@@ -106,7 +136,7 @@
 
 - **台账按需求分文件**：`dispatch/state/<需求>.md` 与 `dispatch/ledger/<需求>.md`，两处同一个 slug；只写自己需求那份。
 - **开工先看 `dispatch/state/`**：先看目录里已有哪些需求在进行，同一需求已有进行中的文件时先问用户是否接手（这一步是约定，守卫认不出文件属于谁）；遗留 `dispatch/state.md` 只读。
-- **`dispatch/override.json` 仍是单文件**（已知限制）：它按 mtime 判本会话新鲜度，并行会话里 A 的直改豁免可被 B 复用；需要隔离时手动删除该文件再各自重写（`lib/write-policy.mjs:177-187`）。
+- **`dispatch/override.json` 仍是单文件**（已知限制）：它按 mtime 判本会话新鲜度，并行会话里 A 的直改豁免可被 B 复用；需要隔离时手动删除该文件再各自重写（`lib/write-policy.mjs#readOverride`）。
 
 ## 评审
 
@@ -123,53 +153,83 @@
 
 ## 项目级开关
 
-同一个 profile 里有些项目不需要派发纪律。在项目根建一个标记文件即可降档或静默：`dispatch/protocol.json` 写 `{"mode":"off"}`（或不写 `mode`、只写 `{"enabled":false}`），写 `{"mode":"shadow"}` 则是「照常提醒、写入只记不拦」。判定在每个工具调用与回合收尾时实时读文件（`lib/project.mjs:99-114`），**不需要重启 DSH、不需要改 profile**；标记文件只按会话 cwd 查找（`lib/project.mjs:47-56`），同 profile 的其它项目不受影响。
+同一个 profile 里有些项目不需要派发纪律。在项目根建一个标记文件即可降档或静默：`dispatch/protocol.json` 写 `{"mode":"off"}`（或不写 `mode`、只写 `{"enabled":false}`），写 `{"mode":"shadow"}` 则是「照常提醒、写入只记不拦」。判定在每个工具调用与回合收尾时实时读文件（`lib/project.mjs#readProjectPolicy`），**不需要重启 DSH、不需要改 profile**；标记文件只按会话 cwd 查找（`lib/project.mjs#resolveMarkerFile`），同 profile 的其它项目不受影响。
 
 | 档位 | 提示词段 | 写入守卫 | 完成检查点 | 五个闸门 | 观测行 |
 |---|---|---|---|---|---|
 | `full`（无标记，或标记写 `{"mode":"full"}` / `{"enabled":true}`） | 注入（现状） | 照常拦（现状） | 照常提醒（现状） | 照常提醒（现状） | 照常写（现状） |
-| `shadow` | 注入 | 判定照跑，**永不返回拒绝串**；仅对本会被拦下的写入改记一条 `reason: 'project-shadow'`（`plugin.mjs:265-271`） | 照常提醒 | 照常提醒 | 照常写 |
-| `off`（`{"mode":"off"}` 或 `{"enabled":false}`） | 不注入：`text` 返回 `''`，空段被宿主丢弃（`plugin.mjs:381-394`） | 根代理带路径的 `write`/`edit` 直接放行，每 `(会话, cwd)` 记一条 `kind:"project", reason:"project-off"`（`plugin.mjs:241-251`；子代理、名单外工具、无 `file_path`/`path` 的调用在 `off` 判定之前就已豁免，不记） | 不投递；每个 child 记一条 `kind:"checkpoint", reason:"project-off"`（`plugin.mjs:518-529`） | 判定入口即短路（`plugin.mjs:610`） | 不写 jsonl、不建目录（`plugin.mjs:688-689`） |
+| `shadow` | 注入 | 判定照跑，**永不返回拒绝串**；仅对本会被拦下的写入改记一条 `reason: 'project-shadow'`（`plugin.mjs#makeGuard`） | 照常提醒 | 照常提醒 | 照常写 |
+| `off`（`{"mode":"off"}` 或 `{"enabled":false}`） | 不注入：`text` 返回 `''`，空段被宿主丢弃（`plugin.mjs#apply`） | 根代理带路径的 `write`/`edit` 直接放行，每 `(会话, cwd)` 记一条 `kind:"project", reason:"project-off"`（`plugin.mjs#makeGuard`；子代理、名单外工具、无 `file_path`/`path` 的调用在 `off` 判定之前就已豁免，不记） | 不投递；每个 child 记一条 `kind:"checkpoint", reason:"project-off"`（`plugin.mjs#drain`） | 判定入口即短路（`plugin.mjs#evaluateGates`） | 不写 jsonl、不建目录（`plugin.mjs#observeTurn`） |
 
-判定口径（顺序固定，`lib/project.mjs:91-118`）：
+判定口径（顺序固定，`lib/project.mjs#readProjectPolicy`）：
 
-- 配置来自顶层 `projectSwitch`，默认 `{enabled:true, path:'dispatch/protocol.json'}`（`lib/project.mjs:30`）；`enabled` 非布尔、`path` 空白在加载期报错（`lib/config.mjs:210-224`）；`enabled`/`path` 写 `null` 视同未设置，回落默认值（其余配置段同款 `??` 口径）。
-- `projectSwitch.enabled: false`、cwd 不是非空字符串、路径归一化失败 → `full`（`lib/project.mjs:94-97`）。
-- 标记文件不存在、`stat` 或读取失败 → `full`（`lib/project.mjs:99-105`）。
-- JSON 解析失败、顶层不是 plain object（`[]`、`null`）→ `full`（`lib/project.mjs:72-78`）。
-- 对象含 `mode` 且为 `full`/`shadow`/`off` 之一 → 该值；否则 `enabled: false` → `off`，其余 → `full`（`lib/project.mjs:80-82`）。
-- 路径只相对会话 cwd：绝对路径落在 cwd 外或含 `..` 逃逸 → 归一化失败 → `full`（`lib/project.mjs:47-56`）。
-- fail-open 是唯一口径：任何异常都回落 `full`，永不抛错（`lib/project.mjs:115-117`），与写入守卫同口径（`plugin.mjs:283-286`）。
+- 配置来自顶层 `projectSwitch`，默认 `{enabled:true, path:'dispatch/protocol.json'}`（`lib/project.mjs#DEFAULT_PROJECT_SWITCH`）；`enabled` 非布尔、`path` 空白在加载期报错（`lib/config.mjs#resolveConfig`）；`enabled`/`path` 写 `null` 视同未设置，回落默认值（其余配置段同款 `??` 口径）。
+- `projectSwitch.enabled: false`、cwd 不是非空字符串、路径归一化失败 → `full`（`lib/project.mjs#readProjectPolicy`）。
+- 标记文件不存在、`stat` 或读取失败 → `full`（`lib/project.mjs#readProjectPolicy`）。
+- JSON 解析失败、顶层不是 plain object（`[]`、`null`）→ `full`（`lib/project.mjs#readPolicyDocument`）。
+- 对象含 `mode` 且为 `full`/`shadow`/`off` 之一 → 该值；否则 `enabled: false` → `off`，其余 → `full`（`lib/project.mjs#modeOfDocument`）。
+- 路径只相对会话 cwd：绝对路径落在 cwd 外或含 `..` 逃逸 → 归一化失败 → `full`（`lib/project.mjs#resolveMarkerFile`）。
+- fail-open 是唯一口径：任何异常都回落 `full`，永不抛错（`lib/project.mjs#readProjectPolicy`），与写入守卫同口径（`plugin.mjs#makeGuard`）。
 
-判定按 `(归一化绝对路径, mtimeMs)` 记忆化：每次调用先 `stat` 取 mtime（实时读取），mtime 变了就是新缓存键；`stat` 或读取失败不缓存（`lib/project.mjs:107-113`）。
+判定按 `(归一化绝对路径, mtimeMs)` 记忆化：每次调用先 `stat` 取 mtime（实时读取），mtime 变了就是新缓存键；`stat` 或读取失败不缓存（`lib/project.mjs#readProjectPolicy`）。
 
-日志（与 checkpoint、写入守卫、闸门共用同一份决定日志，`log: false` 时都不写，`lib/config.mjs:192-196`）：
+日志（与 checkpoint、写入守卫、闸门共用同一份决定日志，`log: false` 时都不写，`lib/config.mjs#resolveConfig`）：
 
-- 写入守卫的 `off` 记录每 `(会话, cwd)` 只有一条——键是 `session.id + '\0' + cwd`，去重集合在守卫闭包里（`plugin.mjs:222-224`、`243-249`）。
-- 检查点是「每个 child 一条」：沿用既有 `kind:"checkpoint"` + `reason` 字段，便于事后区分「没触发」与「触发后被静默」（`plugin.mjs:524-556`）。
+- 写入守卫的 `off` 记录每 `(会话, cwd)` 只有一条——键是 `session.id + '\0' + cwd`，去重集合在守卫闭包里（`plugin.mjs#makeGuard`）。
+- 检查点是「每个 child 一条」：沿用既有 `kind:"checkpoint"` + `reason` 字段，便于事后区分「没触发」与「触发后被静默」（`plugin.mjs#drain`）。
 
 边界：
 
-- `shadow` 只放弃拒绝串，不放弃判定与日志：越界写入记成 `decision:"allowed", reason:"project-shadow", mode:"shadow"`（`plugin.mjs:265-271`）。
-- `off` 的项目不再背派发纪律：规则段整段消失（`plugin.mjs:381-394`），该项目的模型不会被提醒、也不会被拦——漏派发只能靠用户自己发现。
-- 标记文件只认会话 cwd（`lib/project.mjs:41-56`）：子代理继承父 cwd 时同档（提示词段按 context 的会话 cwd 求值，`plugin.mjs:384-392`），取不到 cwd 时回落 `full`（`lib/project.mjs:95`）。
+- `shadow` 只放弃拒绝串，不放弃判定与日志：越界写入记成 `decision:"allowed", reason:"project-shadow", mode:"shadow"`（`plugin.mjs#makeGuard`）。
+- `off` 的项目不再背派发纪律：规则段整段消失（`plugin.mjs#apply`），该项目的模型不会被提醒、也不会被拦——漏派发只能靠用户自己发现。
+- 标记文件只认会话 cwd（`lib/project.mjs#resolveMarkerFile`）：子代理继承父 cwd 时同档（提示词段按 context 的会话 cwd 求值，`plugin.mjs#apply`），取不到 cwd 时回落 `full`（`lib/project.mjs#readProjectPolicy`）。
+
+## 项目策略文件与 business 预设
+
+0.15.0 把 `dispatch/protocol.json` 从「一个 mode」扩成「项目自带纪律策略」：模式、主控白名单、闸门的验证/契约/文档口径、规则预设都写在项目里，缺省字段回落到 profile 配置。文件仍是唯一真相：实时读、按 `(路径, mtime)` 记忆化，改完不需要重启（`lib/project.mjs#readProjectPolicy`）。
+
+| 字段 | 缺省回落（profile 解析值） | 作用 |
+|---|---|---|
+| `mode` | `full`（`enabled:false` → `off`） | 三档行为与 0.13 一致，见「项目级开关」 |
+| `rules` | 默认六条 + 默认收口（`config.rules` / `config.footer`） | `"plugin"` 同上；`"business"` 用精简预设（见下） |
+| `allowlist` | `writePolicy.allowlist` | 主控可直接写的 cwd 相对前缀（`isAllowedPath` 口径） |
+| `controlPlanePatterns` | `gates.controlPlanePatterns` | VerifyGate / ReviewGate 的控制面豁免（`classifyPath` 口径） |
+| `verify.commands` | `gates.verify.commands` | 视为「已验证」的命令片段（大小写不敏感子串） |
+| `contract.patterns` | `gates.contract.patterns` | 有子代理运行时改写契约文件的提醒 |
+| `docs.patterns` | `gates.verify.docPatterns` | 文档/控制面判定：verify 不触发、review 复用同一列表 |
+
+**字段级 fail-open**：某个字段类型或内容非法（空数组、含非字符串、`rules` 不是两个预设名之一）只丢该字段、回落 profile，其它字段与 `mode` 不受影响；整个文件坏 JSON 或缺失 → 全部回落，行为与 0.14.3 一致。路径匹配沿用 `classifyPath` / `isAllowedPath`（cwd 锚定、大小写不敏感、尾 `/` 前缀），没有第二套归一化。
+
+**`business` 预设**：`BUSINESS_RULES`（实测 900 字，六条骨架）+ `BUSINESS_FOOTER`（217 字）冻结在 `lib/config.mjs`；相对默认正文（规则正文 3216 字 + 5 个分隔换行、合计 3221；收口 615 ≈ 3.8K）约 3/10（含换行实测：business 正文 905/3221 ≈ 28%，含收口 1122/3836 ≈ 29%，不到三分之一）。删掉的是本仓库专属细节：docs-check、「断言 → 代码位置」表、`docs/superpowers/specs` 路径与 spec 冻结/评审切片细则；留下的是主控只做控制面、派发自包含、验收只付一次、评审只审变更集、提交权、并行读写判级。预设只换规则正文，不改白名单与闸门口径——业务项目仍要配 `allowlist` / `verify.commands`。
+
+**`/dispatch init`**：扫项目并写出 `dispatch/protocol.json`（已存在则拒绝并提示先查看或删除，绝不覆盖）：
+
+- 检测项（全部 best-effort，失败即跳过该字段）：锁文件 → 包管理器（`pnpm-lock.yaml` / `yarn.lock` / `package-lock.json`，有 `package.json` 无锁文件按 npm）；`package.json#scripts.test|typecheck|build` → `pnpm test` / `npm run build` 之类；`uv.lock` / `pyproject.toml` → `uv run pytest`；`*.csproj` / `*.sln` → `dotnet test`。
+- 白名单：有 `docs/` → `["dispatch/", "docs/"]`，否则 `["dispatch/"]`（`controlPlanePatterns` 同值）。
+- 契约面：存在 `src/types/`、`prisma/schema.prisma`、`openapi.{yaml,yml,json}` 的才各加一条。
+- 预设：`package.json` 含 `dsh.bundle` / `dsh.client` → `plugin`，否则 `business`。
+- 返回一行摘要（文件、preset、命令数、契约面数）+「随时 `/dispatch off|shadow|full` 切档」；生成的是可直接手改的示例 JSON（`mode` 固定 `full`）。
+
+**切换 mode 会保留其它字段**：`/dispatch off|shadow|full` 只替换 `mode`（读现有 JSON 后原子写回），不会抹掉手写的 `rules` / `allowlist` / `verify`；文件缺失或坏 JSON 时仍只写 `{"mode":"…"}`（0.14 行为）。
+
+**与 0.13/0.14 兼容**：只有 `{"mode":…}`（或 `{"enabled":false}`）的文件行为逐字节不变——策略字段全部缺省即回落。
 
 ## 会话区控件与 /dispatch
 
-0.14.0 起有两个新入口，读写的是同一个标记文件 `dispatch/protocol.json`：宿主命令 `/dispatch`（无参=查询，`/dispatch off|shadow|full`=切换）和输入框下方的常驻控件。**文件仍是唯一真相**：在默认 `projectSwitch.path` 下，控件、命令、手改文件三者等价，无标记文件时一律按 `full`；自定义 `path` 时见下方读口径与「已知坑」。
+0.14.0 起有两个新入口，读写的是同一个标记文件 `dispatch/protocol.json`：宿主命令 `/dispatch`（无参=查询，`/dispatch off|shadow|full`=切换，`/dispatch init`=按项目检测生成策略文件）和输入框下方的常驻控件。**文件仍是唯一真相**：在默认 `projectSwitch.path` 下，控件、命令、手改文件三者等价，无标记文件时一律按 `full`；自定义 `path` 时见下方读口径与「已知坑」。
 
-控件落点是 `conversation.composer.dock`——输入框卡片正下方那一行（与队列、Todo 停靠同一片区域）。它显示 `派发纪律` 和当前档位，右侧三个窄按钮 `off` / `shadow` / `full`；窄屏（宽度不超过 640px）只留当前档位那一个按钮，点它之前先看档位、点其它档位需横向空间。会话 id 由 slot 的 session 作用域注入传进来，控件不依赖 owner props（`client.js:368-377`、`dsh-client-ui-conversation` 的 `src/client/contract/slots.ts:317`）。
+控件落点是 `conversation.composer.dock`——输入框卡片正下方那一行（与队列、Todo 停靠同一片区域）。它显示 `派发纪律` 和当前档位，右侧三个窄按钮 `off` / `shadow` / `full`；窄屏（宽度不超过 640px）只留当前档位那一个按钮，点它之前先看档位、点其它档位需横向空间。会话 id 由 slot 的 session 作用域注入传进来，控件不依赖 owner props（`client.js#apply`、`dsh-client-ui-conversation` 的 `src/client/contract/slots.ts:317`）。
 
-读口径（`client.js:150-173`）：
+读口径（`client.js#readModeOf`）：
 
-- `remote.workspaceFiles.read(sessionId, 'dispatch/protocol.json', {})`，路径按**工作区根相对**解析。**控件拿不到 profile 配置**：这个路径是硬编码的默认值（`client.js:49`），改了 `projectSwitch.path` 的项目控件仍读默认文件，可能停在 `full`——这类项目以 `/dispatch` 为准（见「已知坑」）。
+- `remote.workspaceFiles.read(sessionId, 'dispatch/protocol.json', {})`，路径按**工作区根相对**解析。**控件拿不到 profile 配置**：这个路径是硬编码的默认值（`client.js#MARKER_PATH`），改了 `projectSwitch.path` 的项目控件仍读默认文件，可能停在 `full`——这类项目以 `/dispatch` 为准（见「已知坑」）。
 - 错误码 `workspace-file/not-found` → 显示 `full`（没有标记就是全文规则）。
 - 其它错误（越界、非文本、RPC 失败）→ 显示 `未知`，鼠标悬停的 title 给出错误码与消息。
-- 文件能读到但 JSON 坏 → 与宿主读取器同口径回落 `full`（`client.js:125-137`、`lib/project.mjs:72-78`）。
+- 文件能读到但 JSON 坏 → 与宿主读取器同口径回落 `full`（`client.js#modeOfText`、`lib/project.mjs#readPolicyDocument`）。
 
-写口径（首选面，`client.js:179-205`）：点按钮走 `remote.commands.execute(sessionId, '/dispatch <mode>', [])`，也就是 `/` 菜单敲命令走的那条 admission 路径（`dsh-client-ui-commands` 的 `src/client/service.ts:420-435`）；成功与否看返回的 `{ ok, value: { result } }`，`result.kind === 'error'` 时把宿主文案放进 `切换失败：…` 提示。`remote`、`remote.commands`、`remote.workspaceFiles` 都写在 `inject` 里（`client.js:327`）——它们是独立的子服务，少一个宿主就不加载本插件（控件整块不出现，而不是「显示未知/不支持」），所以注入是必需项，不做第二套写入。
+写口径（首选面，`client.js#switchModeOf`）：点按钮走 `remote.commands.execute(sessionId, '/dispatch <mode>', [])`，也就是 `/` 菜单敲命令走的那条 admission 路径（`dsh-client-ui-commands` 的 `src/client/service.ts:420-435`）；成功与否看返回的 `{ ok, value: { result } }`，`result.kind === 'error'` 时把宿主文案放进 `切换失败：…` 提示。`remote`、`remote.commands`、`remote.workspaceFiles` 都写在 `inject` 里（`client.js#inject`）——它们是独立的子服务，少一个宿主就不加载本插件（控件整块不出现，而不是「显示未知/不支持」），所以注入是必需项，不做第二套写入。
 
-刷新时机（`client.js:237-264`）：挂载时、会话切换时、`command/executed` 事件（浏览器本地确认，`service.ts:437-452`）、窗口 `focus` / `pageshow`、标签页 `visibilitychange` 各重读一次；组件卸载时移除全部监听。**页面刷新才拿得到新控件**：客户端产物没有热更，装完插件必须刷新；没跑 UI 的宿主（headless / SDK）不受影响，用 `/dispatch` 即可。
+刷新时机（`client.js#DispatchDock`）：挂载时、会话切换时、`command/executed` 事件（浏览器本地确认，`service.ts:437-452`）、窗口 `focus` / `pageshow`、标签页 `visibilitychange` 各重读一次；组件卸载时移除全部监听。**页面刷新才拿得到新控件**：客户端产物没有热更，装完插件必须刷新；没跑 UI 的宿主（headless / SDK）不受影响，用 `/dispatch` 即可。
 
 ## 配置
 
@@ -214,9 +274,9 @@
 | `gates.handoff.emptyTurns` | `1` | 连续空回合达到该值才提醒（正整数） |
 | `gates.handoff.text` | 内置模板 | 覆盖交接提醒，支持 `{emptyTurns}` |
 
-表内 26 个 `gates.*` / `writePolicy.*` 键就是 `resolveGates({})` / `resolveWritePolicy({})` 的叶子键减去 4 个镜像/编译字段；`enabled`/`order`/`rules`/`footer`/`checkpoint.*`/`observation.*`/`log`/`projectSwitch.*` 是 `resolveConfig` 的顶层键（`projectSwitch` 段默认值只在 `lib/project.mjs:30`，校验在 `lib/config.mjs:210-224`）。
+表内 26 个 `gates.*` / `writePolicy.*` 键就是 `resolveGates({})` / `resolveWritePolicy({})` 的叶子键减去 4 个镜像/编译字段；`enabled`/`order`/`rules`/`footer`/`checkpoint.*`/`observation.*`/`log`/`projectSwitch.*` 是 `resolveConfig` 的顶层键（`projectSwitch` 段默认值只在 `lib/project.mjs#DEFAULT_PROJECT_SWITCH`，校验在 `lib/config.mjs#resolveConfig`）。
 
-**占位符语义**（`lib/gates.mjs:641-651`、`670-681`）：`{files}` 脏路径（去重，最多 3 个，多余追加「等 N 个」，为空时用「工作区」）；`{kind}` 为 `代码` 或 `未知`（`<shell>` 占位算未知）；`{action}` 是闸门固定给出的一句结论——verify 一句「先跑集成命令」，review 按 `docOnly` 给两句之一（代码：重开切片；文档：跑 docs-check + 交断言表）；`{changes}` 脏改动计数、`{lastVerify}` 最近一次成功验证命令（缺失记为「从未验证」）是兼容占位；模板里未知占位原样保留、不抛错。
+**占位符语义**（`lib/gates.mjs#renderGateText`、`lib/gates.mjs#formatPaths`、`lib/gates.mjs#changeKind`）：`{files}` 脏路径（去重，最多 3 个，多余追加「等 N 个」，为空时用「工作区」）；`{kind}` 为 `代码` 或 `未知`（`<shell>` 占位算未知）；`{action}` 是闸门固定给出的一句结论——verify 一句「先跑集成命令」，review 按 `docOnly` 给两句之一（代码：重开切片；文档：跑 docs-check + 交断言表）；`{changes}` 脏改动计数、`{lastVerify}` 最近一次成功验证命令（缺失记为「从未验证」）是兼容占位；模板里未知占位原样保留、不抛错。
 
 非法配置在插件加载时直接报错，不会静默降级：`order` 非有限数字、`rules` 为空/非数组、`footer` 或 `checkpoint.*` 非字符串、`log` 既非非空路径也非 `false`、`observation.dir` 非非空字符串也非 `false`、`nudge` 段出现、`writePolicy.mode` 不是 `enforce`/`shadow`、`writePolicy.allowlist`/`tools`/`delegationTools` 为空数组或含空白串、`writePolicy.overridePath` 空白、`gates.wait.threshold` 与 `gates.handoff.emptyTurns` 非正整数、`gates.*.text` 空白、`gates.verify.commitPattern` 无法编译、各字符串列表为空或含非字符串、`gates.contract`/`review`/`handoff` 非对象、`projectSwitch` 非对象/`projectSwitch.enabled` 非布尔/`projectSwitch.path` 空白。
 
@@ -229,24 +289,25 @@
 - **DOC002** 围栏：三反引号代码围栏成对闭合（计数为偶数）。
 - **DOC003** 表格列数：同一表格块内每行列数与块首行一致，忽略行内代码里的竖线与转义竖线。
 - **DOC004** 相对链接：行内 `](path)` 形态的相对目标必须存在；跳过 `http(s)://`、`mailto:` 与 `#` 锚点，先按文档所在目录、再按 root 解析。
-- **DOC005** 配置表键名：表格行首的 `gates.*` / `writePolicy.*` 必须逐字命中输入键集合；集合由本脚本运行时从 `resolveGates({})` / `resolveWritePolicy({})` 的叶子键推导，再减去 4 个镜像/编译字段（`gates.verify.commitRegExp`、`gates.verify.controlPlanePatterns`、`gates.review.controlPlanePatterns`、`gates.review.docPatterns`）→ 26 个输入键（`scripts/docs-check.mjs:50-75`）。
+- **DOC005** 配置表键名：表格行首的 `gates.*` / `writePolicy.*` 必须逐字命中输入键集合；集合由本脚本运行时从 `resolveGates({})` / `resolveWritePolicy({})` 的叶子键推导，再减去 4 个镜像/编译字段（`gates.verify.commitRegExp`、`gates.verify.controlPlanePatterns`、`gates.review.controlPlanePatterns`、`gates.review.docPatterns`）→ 26 个输入键（`scripts/docs-check.mjs#CONFIG_KEYS`）。
 - **与断言表的分工**：机器只判语法、链接、表格与键名，判不了「这句话与它引用的那行代码是否一致」。所以文档批必须交「断言 → 代码位置」表：表空（纯措辞/格式/排版）→ docs-check 绿即收口；表非空 → 派 1 次有界只读评审（范围仅本批 md 的 diff + 表中代码锚点，输出逐条 `PASS|FAIL` + 未入表断言清单），修完只复跑 docs-check、不再复审；`AGENTS.md` 与 `docs/agent/*` 属注入面，断言表强制非空，表空收口不适用于注入面（规则 1 的「表空即收口」已写明该例外）。
 
 ## 验证
 
 | 命令 | 期望 |
 |---|---|
-| `node plugins/dispatch-protocol/test.mjs` | 168 pass（`pass=168 fail=0`），exit 0 |
-| `node plugins/dispatch-protocol/scripts/docs-check.mjs` | 无参扫仓库根，`docs-check: files=<N> fail=0`，exit 0 |
-| `node plugins/dispatch-protocol/scripts/docs-check.mjs --self-test` | `self-test: pass=<N> fail=0`，exit 0 |
+| `node plugins/dispatch-protocol/test.mjs` | 183 pass（`ℹ pass 183` / `ℹ fail 0`），exit 0 |
+| `node plugins/dispatch-protocol/scripts/docs-check.mjs` | 无参扫仓库根，`docs-check: files=28 fail=0`，exit 0 |
+| `node plugins/dispatch-protocol/scripts/check-anchors.mjs` | 无参扫仓库根 `README.md` 与 `plugins/*/README.md`，`anchors-check: files=4 fail=0`，exit 0 |
+| `node plugins/dispatch-protocol/scripts/docs-check.mjs --self-test` | `self-test: pass=21 fail=0`，exit 0 |
 
-前两条是离线回归，第三条只验检查器自身（fixture 全建在 `os.tmpdir()`，不写仓库）。真机口径另走临时 profile：`dsh plugin --profile probe add "link:<仓库根>/plugins/dispatch-protocol"` 后 headless 问系统提示词「派发纪律」里的六条，模型应逐条复述。
+前三条都是离线检查（测试、文档语法、锚点有效性）；最后一条只验 docs-check 自身（fixture 全建在 `os.tmpdir()`，不写仓库；`check-anchors.mjs --self-test` 同理）。真机口径另走临时 profile：`dsh plugin --profile probe add "link:<仓库根>/plugins/dispatch-protocol"` 后 headless 问系统提示词「派发纪律」里的六条，模型应逐条复述。
 
 ## 设计取舍
 
-- **① 为什么是插件而不是 `AGENTS.md` 文件**：六条规则要每次请求都在场；`AGENTS.md` 得模型主动读、每个任务仓库还得各复制一份，读不读没有保证。插件把正文挂进系统提示词 section（`lib/config.mjs:174-181`），与加载了哪些 skill 无关；代价是改正文会影响 KV 缓存前缀（见「已知坑」）。
-- **② 为什么闸门只提醒不阻断（fail-open）**：闸门读的是回合日志、不是权威状态，误判一次阻断就会把用户卡死；所以判定与投递异常一律吞掉、每回合最多一条、固定让位顺序（`plugin.mjs:595-657`、`lib/gates.mjs:12-14`）。代价是宿主在空流/中断回合不触发 `agent/turn-stopping` 时提醒不到。
-- **③ 为什么 `dispatch/override.json` 是唯一凭据**：散文里的「豁免」「直接做」不可审计、也判不出新旧；文件有 schema、mtime、会话起点三个可判字段，新会话必须重写（`lib/write-policy.mjs:153-188`）。
+- **① 为什么是插件而不是 `AGENTS.md` 文件**：六条规则要每次请求都在场；`AGENTS.md` 得模型主动读、每个任务仓库还得各复制一份，读不读没有保证。插件把正文挂进系统提示词 section（`lib/config.mjs#resolveConfig`），与加载了哪些 skill 无关；代价是改正文会影响 KV 缓存前缀（见「已知坑」）。
+- **② 为什么闸门只提醒不阻断（fail-open）**：闸门读的是回合日志、不是权威状态，误判一次阻断就会把用户卡死；所以判定与投递异常一律吞掉、每回合最多一条、固定让位顺序（`plugin.mjs#evaluateGates`；`lib/gates.mjs` 的 `evaluate*Gate` 都只收 `events`）。代价是宿主在空流/中断回合不触发 `agent/turn-stopping` 时提醒不到。
+- **③ 为什么 `dispatch/override.json` 是唯一凭据**：散文里的「豁免」「直接做」不可审计、也判不出新旧；文件有 schema、mtime、会话起点三个可判字段，新会话必须重写（`lib/write-policy.mjs#readOverride`）。
 - **④ 为什么文档分三层**：docs-check 判确定性失败（括号、围栏、表格、链接、键名），断言表判语义失败（这句话还有没有代码出处——机器判不了），有界评审只核表与 diff 锚点。三层各管一类失败，机器能判的不付评审钱；表空时 docs-check 绿即可收口。
 - **⑤ 预算经验一：派发后不守着**：等待期主控的动作只有「结束回合等完成事件」；`Start-Sleep` / `list_agents` 轮询用完整模型步进换零信息（实测 31 次 sleep 合计 54.1 分钟，子代理状态并没有变）。预算过半时的一次主动检查是唯一例外。
 - **⑥ 预算经验二：预算对称、触顶即停**：子代理单批 15 分钟 / 30 次编辑，主控单回合 15 分钟 / 20 步；过半报一句进度，超预算先报阻塞点再停，不得自行续期——续期由派发方给，量不够按场景切片。
@@ -261,11 +322,12 @@
 | `0.12.1` | 纪律正文补四处缺口：规则 1 允许仓库没有 `scripts/docs-check.mjs`（记一行台账、不新建脚本）；只回 `ok` 记「ok 视为接受推荐项」、不得写「用户已确认」；勘察结论须含「现存调用方」，无调用方的实现标「预防性实现」；规则 3 补多包仓库「按端各一条、每端只跑一次」。正文 3611 → 3716 字符，条款数仍为 6。 |
 | `0.12.2` | 闸门噪声两修。D1：检查点去重收敛成一个原语「子代理报告对父代理可见之后，父代理有没有动过手」——settle 事件与 `send_message` 两条上报路径都认，不再只认 inbox 标记。D2（第三次复审后的设计反转）：删除「解析 PowerShell 求写入目标」的多目标解析器（`readShellWriteTargets`、动词/开关表、逗号合并、残段复检全部删除，无并列实现），改为封闭形状豁免——`controlPlaneOnlyShellWrite` 只在整条命令每段都能构造性证明是记账写入（形状 A/B/C：`Add-Content`/`Set-Content`/`Out-File`/`Clear-Content` 具名路径、`New-Item` 建目录/文件、`git diff > <路径>`）且路径唯一、全在控制面时返回 true，其余一律 false → 脏 → `<shell>`（未知=代码）；`gates.mjs` 的脏路径随之退回单路径（`write`/`edit` 取参数路径，`pwsh` 与取不到路径一律 `<shell>`），`{files}` 里的 shell 条目重新显示为 `<shell>`。代价是偶尔多跑一次集成命令，收益是漏验方向不可能静默。 |
 | `0.12.3` | 规则 1「表空即收口」补注入面例外：`AGENTS.md` 与 `docs/agent/*` 不得空表收口——此前规则 1 的空表收口吞掉了规则 4 的「注入面断言表强制非空」，注入面文档可凭一句无验证的「本批无机制断言」零评审收口。规则 1 正文 1259 → 1306 字符，条款数仍为 6。 |
-| `0.13.0` | 项目级开关：新增顶层 `projectSwitch`（默认 `{enabled:true, path:'dispatch/protocol.json'}`），按会话 cwd 读标记文件分三档——`full` 行为不变、`shadow` 规则与提醒照旧但写入只记不拦、`off` 规则段/写入守卫/检查点/五闸门/观测行全部静默（判定与 fail-open 见 `lib/project.mjs:91-118`）。实时读文件、按 `(路径, mtime)` 记忆化，每个 `off` 项目留一条 `kind:"project"` 决定日志。无标记文件时与 `0.12.3` 逐字节一致：规则正文、`gates.*`/`writePolicy.*` 默认值与校验全未改，配置段只是新增。 |
+| `0.13.0` | 项目级开关：新增顶层 `projectSwitch`（默认 `{enabled:true, path:'dispatch/protocol.json'}`），按会话 cwd 读标记文件分三档——`full` 行为不变、`shadow` 规则与提醒照旧但写入只记不拦、`off` 规则段/写入守卫/检查点/五闸门/观测行全部静默（判定与 fail-open 见 `lib/project.mjs#readProjectMode`）。实时读文件、按 `(路径, mtime)` 记忆化，每个 `off` 项目留一条 `kind:"project"` 决定日志。无标记文件时与 `0.12.3` 逐字节一致：规则正文、`gates.*`/`writePolicy.*` 默认值与校验全未改，配置段只是新增。 |
 | `0.14.0` | 会话区控件 + `/dispatch` 命令：宿主命令 `/dispatch [off\|shadow\|full]`（无参查询，写标记文件走 `writeProjectMode` 的原子写）；浏览器半区新增 `client.js`，在 `conversation.composer.dock` 显示当前档位与三态按钮，读走 `remote.workspaceFiles.read`、写走 `remote.commands.execute`（与 `/` 菜单同一条 admission 路径），`command/executed` / 窗口 focus / 会话切换后重读。`package.json` 加 `dsh.client`（`platform: 'web'` + inject 清单）与 `./client` 导出，`locale/zh.json` / `locale/en.json` 加 `ui` 词条。宿主行为零变化：无 client 运行时、`enabled:false`、无 `commands` 服务都照旧。 |
 | `0.14.1` | 客户端注入缺陷修复：`client.js` 此前未声明 Remote 命名空间注入，点 dock 按钮报 `cannot get property "remote.commands" without inject`；现在 `inject` 含 `slots`/`locale`/`remote`/`remote.commands`/`remote.workspaceFiles`（与官方 Goal 控件同款），注入是前置条件——缺面时控件整块不出现；`test.mjs` 补回归断言（168 pass：`client.js` 的 `inject` 必须含这五个名字）。 |
 | `0.14.2` | `package.json` 的 `files` 白名单补回 `test.mjs`——0.14.0 引入 `files` 时漏了它，导致 `scripts/verify-install.mjs` 的 `files` 项在每次发布后永久报「installed 缺失」（该脚本按仓库插件目录全部文件与 installed 逐项比对）。 |
 | `0.14.3` | dock 选中态改用「标签主色 + 透明度」着色（`color-mix` 叠在 `--dsw-alias-label-primary` 上，14% / hover 20% + 1px `inset` 描边），原先用 `--dsw-alias-brand-primary`，该别名在浅/深主题下解析成白色底色、配 `--dsw-alias-label-inverse` 回落 `#fff` → 白底白字；不支持 `color-mix` 的浏览器回退到 `--dsw-alias-bg-layer-3`（缺失则 `--dsw-alias-interactive-bg-hover`）+ `--dsw-alias-label-primary`。 |
+| `0.15.0` | 项目策略文件 + `business` 预设 + `/dispatch init`：`dispatch/protocol.json` 从 mode 扩成项目策略（`rules` / `allowlist` / `controlPlanePatterns` / `verify.commands` / `contract.patterns` / `docs.patterns`，字段级 fail-open——坏字段只丢自己；切换 mode 只替换 `mode`、保留其它字段）；`rules:"business"` 用 900 + 217 字的精简预设（默认正文 3.8K，约 3/10）；`/dispatch init` 按锁文件 / scripts / `docs/` / 契约面 / `dsh.bundle|client` 检测生成示例 JSON，已存在不覆盖；`/dispatch` 的 `input.hint` 与用法串加 `init`。无策略文件时行为与 0.14.3 一致；测试 183 条（相对 0.14.3 的 168 条新增 15 条：策略读取 / 回落 / business / init / 切档保留 / 命令形状）。 |
 
 0.10.0–0.11.0 为未发布的中间提交，内容并入 0.12.0。
 
@@ -286,5 +348,5 @@
 - **记账在 TEMP 里**：`log` 默认落系统临时目录（`dispatch-protocol-decisions.jsonl`），不随仓库版本化；要长期留档就把路径指到固定位置，或写 `false` 全关。
 - **观测计数与守卫是两套口径**：观测行按去重路径计、失败写入不计；检查点的只读判定按调用名、尝试即算（失败或被拒也算执行类）；守卫只看参数路径，不解析 `pwsh`。
 - **HandoffGate 是 best-effort**：空回合依赖宿主触发 `agent/turn-stopping`，空流/中断回合可能不触发，提醒不到时按「交接」模板手工落盘。
-- **控件只读默认标记路径**（0.14.0 已知限制）：浏览器控件拿不到 profile 的配置，读路径硬编码为 `dispatch/protocol.json`（`client.js:49`），丢弃 `projectSwitch.path`。自定义了 `projectSwitch.path` 的项目**以 `/dispatch` 为准**——命令与写入守卫走同一份配置，仍是唯一真相；控件的显示可能停在 `full`（它读的默认文件不存在，`workspace-file/not-found` 按 `full` 显示）。
+- **控件只读默认标记路径**（0.14.0 已知限制）：浏览器控件拿不到 profile 的配置，读路径硬编码为 `dispatch/protocol.json`（`client.js#MARKER_PATH`），丢弃 `projectSwitch.path`。自定义了 `projectSwitch.path` 的项目**以 `/dispatch` 为准**——命令与写入守卫走同一份配置，仍是唯一真相；控件的显示可能停在 `full`（它读的默认文件不存在，`workspace-file/not-found` 按 `full` 显示）。
 - **profile 插件不支持热加载**：装完必须重启 DSH；`dsh plugin update` 失败可能留下半残目录（被打开的子目录进入 delete-pending），只能重启 Windows 清——先完全退出 DSH 再 update。

@@ -5,20 +5,29 @@
 // 0.12.3 的行为。判定在每个工具调用 / 回合收尾时实时读文件——不需要重启 DSH，
 // 也不需要改 profile。
 //
-// 本模块只做纯判定（无宿主对象、无日志）：读标记文件 → `'full' | 'shadow' | 'off'`。
-// fail-open 是本模块唯一的口径（spec §3.2）：
+// 本模块只做纯判定（无宿主对象、无日志）。
+//
+// 0.15.0：标记文件升级成「项目策略文件」（spec
+// `2026-11-17-project-policy-design.md` §2.1/§2.2）。`readProjectPolicy` 返回
+// `{ mode, rules?, allowlist?, controlPlanePatterns?, verifyCommands?,
+// contractPatterns?, docsPatterns? }`，只带「文件里有效出现的字段」；缺省字段
+// 不出现，由调用方回落 profile 配置。`readProjectMode` 保留为
+// `readProjectPolicy(...).mode` 的薄封装（0.13 调用面不断裂）。
+//
+// fail-open 是本模块唯一的口径（spec §3.2，0.15 仍是）：
 //   1. 开关关闭 / cwd 非法 / 路径归一化失败 → 'full'
 //   2. 文件不存在（stat/read 失败）→ 'full'
 //   3. JSON 解析失败或顶层不是 plain object → 'full'（坏文件是「没配」，不是错误）
 //   4. `mode` 命中三档 → 该值
 //   5. 否则 `enabled === false` → 'off'，其余 → 'full'
+//   6. 0.15：策略字段类型/内容非法 → **只丢该字段**，其它字段与 mode 不受影响
 //
 // 路径归一化复用 `write-policy.mjs` 的 `normalizePath` / `toCwdRelative`：名单、
 // override 与本开关必须共用同一套折叠规则，否则 `dispatch/../src` 这类路径会在
 // 一处命中、另一处不命中。
 //
 // 记忆化按 `(归一化绝对路径, mtimeMs)` 缓存：同一回合里守卫、闸门、观察行会各
-// 读一次模式，缓存把重复读取压成一次 stat。缓存键含绝对路径，不会跨 cwd 串味；
+// 读一次策略，缓存把重复读取压成一次 stat。缓存键含绝对路径，不会跨 cwd 串味；
 // stat 失败或读取失败不缓存（下一次调用仍会重试）。
 
 import { randomBytes } from 'node:crypto'
@@ -31,9 +40,6 @@ export const DEFAULT_PROJECT_SWITCH = { enabled: true, path: 'dispatch/protocol.
 
 /** 允许的档位，顺序即优先级无关的完整枚举。 */
 export const PROJECT_MODES = ['full', 'shadow', 'off']
-
-/** `(归一化绝对路径, mtimeMs)` → 模式。mtime 变了就是新键，旧项不再命中。 */
-const modeCache = new Map()
 
 /**
  * 把 `projectSwitch.path` 解析成标记文件的绝对路径。
@@ -55,12 +61,90 @@ function resolveMarkerFile(cwd, markerPath) {
   return join(normalizedCwd, relative)
 }
 
+
+/** `(归一化绝对路径, mtimeMs)` → 解析后的策略文件内容（或坏文件哨兵）。mtime 变了就是新键。 */
+const policyCache = new Map()
+
+/** 坏文件（JSON 坏 / 顶层不是 plain object）的缓存哨兵：等于「只回 mode」。 */
+const INVALID_DOCUMENT = Symbol('invalid-policy-document')
+
+/** 规则预设枚举（spec §2.1）；只影响提示词段正文，不影响任何机制。 */
+const RULE_PRESETS = ['plugin', 'business']
+
+/** 只有 plain object 才算「配置对象」；数组与 null 都不是。 */
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 /**
- * 读并解析标记文件，返回模式；读不到返回 undefined（不缓存）。
- * @param file - 标记文件绝对路径。
- * @returns `'full' | 'shadow' | 'off' | undefined`。
+ * 只保留「非空字符串数组」；其它形状一律返回 undefined（＝该字段不存在）。
+ * 返回副本：调用方拿到的数组永远不与缓存共享。
+ * @param value - 文件里的候选值。
+ * @returns 非空字符串数组的副本，或 undefined。
  */
-function readMarkerMode(file) {
+function validStringList(value) {
+  if (!Array.isArray(value) || value.length === 0) return undefined
+  if (!value.every(item => typeof item === 'string' && item.trim() !== '')) return undefined
+  return value.slice()
+}
+
+/**
+ * 秒读一个 `{ key: string[] }` 子段（`verify.commands` / `contract.patterns` /
+ * `docs.patterns`）。子段缺失或不是 plain object 都返回 undefined。
+ * @param document - 策略文件解析结果。
+ * @param section - 子段名（`verify` / `contract` / `docs`）。
+ * @param key - 子段里的数组字段名（`commands` / `patterns`）。
+ * @returns 非空字符串数组的副本，或 undefined。
+ */
+function readNestedList(document, section, key) {
+  const group = document[section]
+  if (!isPlainObject(group)) return undefined
+  return validStringList(group[key])
+}
+
+/**
+ * `mode` / `enabled` 的 0.13 判定（顺序完全不变）：`mode` 命中三档优先，
+ * 其次 `enabled: false → 'off'`，其余 `'full'`。
+ * @param document - 策略文件解析结果（plain object）。
+ * @returns `'full' | 'shadow' | 'off'`。
+ */
+function modeOfDocument(document) {
+  if (typeof document.mode === 'string' && PROJECT_MODES.includes(document.mode)) return document.mode
+  if (document.enabled === false) return 'off'
+  return 'full'
+}
+
+/**
+ * 把策略文件内容投影成 `readProjectPolicy` 的返回对象：只写「有效出现」的字段。
+ * 字段级校验在这里做——缓存里永远只有原始解析结果，不会缓存校验后的返回值，
+ * 所以一个字段写坏只丢它自己，也不会把脏值留给下一次调用。
+ * @param document - 策略文件解析结果（plain object）。
+ * @returns 策略对象，至少含 `mode`。
+ */
+function buildPolicy(document) {
+  const policy = { mode: modeOfDocument(document) }
+
+  if (RULE_PRESETS.includes(document.rules)) policy.rules = document.rules
+  const allowlist = validStringList(document.allowlist)
+  if (allowlist !== undefined) policy.allowlist = allowlist
+  const controlPlanePatterns = validStringList(document.controlPlanePatterns)
+  if (controlPlanePatterns !== undefined) policy.controlPlanePatterns = controlPlanePatterns
+  const verifyCommands = readNestedList(document, 'verify', 'commands')
+  if (verifyCommands !== undefined) policy.verifyCommands = verifyCommands
+  const contractPatterns = readNestedList(document, 'contract', 'patterns')
+  if (contractPatterns !== undefined) policy.contractPatterns = contractPatterns
+  const docsPatterns = readNestedList(document, 'docs', 'patterns')
+  if (docsPatterns !== undefined) policy.docsPatterns = docsPatterns
+
+  return policy
+}
+
+/**
+ * 读并解析标记文件，返回策略文件内容；读不到返回 undefined（不缓存）。
+ * @param file - 标记文件绝对路径。
+ * @returns 解析后的 plain object、坏文件哨兵，或 undefined（读失败）。
+ */
+function readPolicyDocument(file) {
   let raw
   try {
     raw = readFileSync(file, 'utf8')
@@ -72,49 +156,67 @@ function readMarkerMode(file) {
   try {
     data = JSON.parse(raw)
   } catch {
-    return 'full'
+    // 坏文件是「没配」，不是错误：等价于只剩 mode（spec §2.1）。
+    return INVALID_DOCUMENT
   }
   // 数组与 null 都不是「配置对象」：与 `readOverride` 的 invalid 口径一致。
-  if (typeof data !== 'object' || data === null || Array.isArray(data)) return 'full'
-
-  if (typeof data.mode === 'string' && PROJECT_MODES.includes(data.mode)) return data.mode
-  if (data.enabled === false) return 'off'
-  return 'full'
+  if (!isPlainObject(data)) return INVALID_DOCUMENT
+  return data
 }
 
 /**
- * 解析一个会话 cwd 的项目档位（spec §3.2）。
+ * 解析一个会话 cwd 的项目策略（spec §2.1/§2.2）。
+ *
+ * 只返回文件里**有效出现**的字段；缺省字段不出现，由调用方回落 profile 配置。
+ * 字段级 fail-open：某字段类型/内容非法 → 该字段不出现，其它字段与 mode 不受
+ * 影响；整个文件坏/缺失 → 只回 `{ mode: 'full' }`。永不抛错。
  * @param cwd - 会话工作目录（`session.cwd ?? session.header.cwd`）。
  * @param projectSwitch - 已解析的 `projectSwitch` 段；缺省用默认值。
- * @returns `'full' | 'shadow' | 'off'`，任何异常都回落 `'full'`。
+ * @returns `{ mode, rules?, allowlist?, controlPlanePatterns?, verifyCommands?, contractPatterns?, docsPatterns? }`。
  */
-export function readProjectMode(cwd, projectSwitch) {
+export function readProjectPolicy(cwd, projectSwitch) {
   try {
     const settings = projectSwitch ?? DEFAULT_PROJECT_SWITCH
-    if (settings.enabled === false) return 'full'
-    if (typeof cwd !== 'string' || cwd.trim() === '') return 'full'
+    if (settings.enabled === false) return { mode: 'full' }
+    if (typeof cwd !== 'string' || cwd.trim() === '') return { mode: 'full' }
     const file = resolveMarkerFile(cwd, settings.path ?? DEFAULT_PROJECT_SWITCH.path)
-    if (file === undefined) return 'full'
+    if (file === undefined) return { mode: 'full' }
 
     let mtimeMs
     try {
       mtimeMs = statSync(file).mtimeMs
     } catch {
       // 文件不存在（ENOENT）与其它 stat 失败同口径：fail-open，且不缓存。
-      return 'full'
+      return { mode: 'full' }
     }
 
+    // 键仍是 `(绝对路径, mtimeMs)`：同一回合里守卫、闸门、提示词段各读一次，
+    // 缓存把重复读取压成一次 stat；stat/读取失败不缓存（下一次调用仍会重试）。
     const key = `${file}\0${mtimeMs}`
-    const cached = modeCache.get(key)
-    if (cached !== undefined) return cached
-
-    const mode = readMarkerMode(file)
-    if (mode === undefined) return 'full'
-    modeCache.set(key, mode)
-    return mode
+    let document = policyCache.get(key)
+    if (document === undefined) {
+      document = readPolicyDocument(file)
+      if (document === undefined) return { mode: 'full' }
+      policyCache.set(key, document)
+    }
+    if (document === INVALID_DOCUMENT) return { mode: 'full' }
+    return buildPolicy(document)
   } catch {
-    return 'full'
+    return { mode: 'full' }
   }
+}
+
+/**
+ * 解析一个会话 cwd 的项目档位（spec §3.2 / 0.15 §2.2）。
+ *
+ * 0.15.0 起是 `readProjectPolicy(...).mode` 的薄封装：导出保留，0.13 调用面与
+ * 可观察行为（含记忆化）不变。
+ * @param cwd - 会话工作目录（`session.cwd ?? session.header.cwd`）。
+ * @param projectSwitch - 已解析的 `projectSwitch` 段；缺省用默认值。
+ * @returns `'full' | 'shadow' | 'off'`，任何异常都回落 `'full'`。
+ */
+export function readProjectMode(cwd, projectSwitch) {
+  return readProjectPolicy(cwd, projectSwitch).mode
 }
 
 /**

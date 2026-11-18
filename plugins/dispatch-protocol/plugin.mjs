@@ -50,13 +50,15 @@
 //     cannot fire twice for the same turn.
 //   - `session.snapshotEvents()` — committed `tool/call` events carry their own
 //     `turn`, `name` and JSON `arguments`.
-import { randomUUID } from 'node:crypto'
-import { appendFileSync, mkdirSync } from 'node:fs'
-import { join } from 'node:path'
-import { resolveConfig } from './lib/config.mjs'
-import { PROJECT_MODES, readProjectMode, writeProjectMode } from './lib/project.mjs'
+import { randomBytes, randomUUID } from 'node:crypto'
+import {
+  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync,
+} from 'node:fs'
+import { dirname, join } from 'node:path'
+import { resolveConfig, resolveRulesPreset } from './lib/config.mjs'
+import { DEFAULT_PROJECT_SWITCH, PROJECT_MODES, readProjectMode, readProjectPolicy, writeProjectMode } from './lib/project.mjs'
 import { callTouchesFile, summarizeTurn } from './lib/tool-calls.mjs'
-import { evaluateWritePolicy, renderDenyText } from './lib/write-policy.mjs'
+import { evaluateWritePolicy, normalizePath, renderDenyText, toCwdRelative } from './lib/write-policy.mjs'
 import {
   evaluateContractGate, evaluateHandoffGate, evaluateReviewGate,
   evaluateVerifyGate, evaluateWaitGate,
@@ -65,6 +67,297 @@ import {
 
 export const name = 'dispatch-protocol'
 export const inject = ['systemPrompt', 'agents', 'tools']
+
+// ---------------------------------------------------------------------------
+// 0.15.0 项目策略文件（spec `2026-11-17-project-policy-design.md` §2.3）：把
+// `dispatch/protocol.json` 里出现的字段投影到「本次判定」的配置副本上。
+//
+// 三个投影点共用一条口径：字段缺省即回落 profile 的原值；只读、不缓存判定结果
+// （策略文件按 `(路径, mtime)` 记忆化在 `lib/project.mjs` 里），且返回的必须是
+// 新对象——profile 配置是进程级共享的，就地改 `config.gates` / `config.writePolicy`
+// 会让一个项目的策略泄漏到其它项目。
+
+/**
+ * 把策略字段并入一次闸门判定用的 gates（§2.3 五闸门一行）。
+ *
+ * `verify.commands` / `contract.patterns` 逐字段覆盖；`docs.patterns` 与
+ * `controlPlanePatterns` 同时挂到 verify 与 review——0.12 起 review 复用
+ * verify.docPatterns，两处不同源会让评审闸门按另一套口径判定（spec §2.3 明示
+ * 「保持同源」）。
+ * @param gates - 已解析的 `gates` 段（profile 值）。
+ * @param policy - `readProjectPolicy` 的返回值；缺字段即回落。
+ * @returns 供本次判定使用的新 gates 对象；`gates` 本身不被修改。
+ */
+function applyPolicyToGates(gates, policy) {
+  if (policy === undefined || policy === null) return gates
+  return {
+    ...gates,
+    verify: {
+      ...gates.verify,
+      ...(policy.verifyCommands === undefined ? {} : { commands: policy.verifyCommands }),
+      ...(policy.docsPatterns === undefined ? {} : { docPatterns: policy.docsPatterns }),
+      ...(policy.controlPlanePatterns === undefined ? {} : { controlPlanePatterns: policy.controlPlanePatterns }),
+    },
+    contract: {
+      ...gates.contract,
+      ...(policy.contractPatterns === undefined ? {} : { patterns: policy.contractPatterns }),
+    },
+    review: {
+      ...gates.review,
+      ...(policy.docsPatterns === undefined ? {} : { docPatterns: policy.docsPatterns }),
+      ...(policy.controlPlanePatterns === undefined ? {} : { controlPlanePatterns: policy.controlPlanePatterns }),
+    },
+  }
+}
+
+/**
+ * 把策略字段并入一次写入判定用的 writePolicy 副本（§2.3 写入守卫一行）。
+ *
+ * `controlPlanePatterns` 一并带上：`evaluateWritePolicy` 目前不消费它，但判定的
+ * 配置面上要能回答「这个项目把哪些路径算控制面」——后续机制读同一份副本即可，
+ * 不必再各读一次策略文件。
+ * @param writePolicy - 已解析的 `writePolicy` 段（profile 值）。
+ * @param policy - `readProjectPolicy` 的返回值；缺字段即回落。
+ * @returns 供本次判定使用的新 writePolicy 对象；`writePolicy` 本身不被修改。
+ */
+function applyPolicyToWritePolicy(writePolicy, policy) {
+  const allowlist = policy?.allowlist
+  const controlPlanePatterns = policy?.controlPlanePatterns
+  if (allowlist === undefined && controlPlanePatterns === undefined) return writePolicy
+  return {
+    ...writePolicy,
+    ...(allowlist === undefined ? {} : { allowlist }),
+    ...(controlPlanePatterns === undefined ? {} : { controlPlanePatterns }),
+  }
+}
+
+/**
+ * 把一个 JSON 对象渲染成提示词段正文，口径与 `resolveConfig` 完全一致
+ * （标题 + 编号规则 + 空行 + footer）。
+ * @param rules - 规则正文数组（不带编号）。
+ * @param footer - 收尾段。
+ * @returns the section body.
+ */
+function renderRulesText(rules, footer) {
+  const numbered = rules.map((rule, index) => `${index + 1}. ${rule}`).join('\n')
+  return ['## 派发纪律（DSH）', '', numbered, '', footer].join('\n')
+}
+
+/**
+ * 进程内 `(mode, rules)` 渲染缓存：提示词段每次 assemble 都会求值，business
+ * 预设是冻结常量（`resolveRulesPreset` 忽略 profile），重复拼 3KB 字符串没有意义。
+ */
+const presetTextCache = new Map()
+
+/**
+ * 按项目策略选提示词正文（§2.3 提示词段一行）。
+ * @param policy - `readProjectPolicy` 的返回值。
+ * @param config - the resolved plugin config（`text` 是 profile 的回落值）。
+ * @returns 提示词段正文；非 business 一律回落 `config.text`（逐字节不变）。
+ */
+function projectTextFor(policy, config) {
+  if (policy?.rules !== 'business') return config.text
+  let cached = presetTextCache.get('business')
+  if (cached === undefined) {
+    const preset = resolveRulesPreset('business', config)
+    cached = renderRulesText(preset.rules, preset.footer)
+    presetTextCache.set('business', cached)
+  }
+  return cached
+}
+
+/** 原子写一个 JSON 文件：同目录临时文件 + `rename`（与 `lib/project.mjs` 同款口径）。 */
+function writeJsonAtomically(file, document) {
+  const temporary = `${file}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`
+  try {
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(temporary, `${JSON.stringify(document)}\n`)
+    renameSync(temporary, file)
+  } catch (error) {
+    // rename 失败时临时文件可能已经存在：清掉，不留 `.tmp-<pid>-<rand>` 垃圾。
+    try {
+      unlinkSync(temporary)
+    } catch {
+      // 临时文件从未创建（mkdir/write 就失败了）。
+    }
+    throw error
+  }
+}
+
+/**
+ * 把 `projectSwitch.path` 解析成 `{ file, relative }`（命令层读写用）。
+ *
+ * `lib/project.mjs` 的解析器是私有函数且不在本批白名单里，所以这里复用同一套
+ * 归一化（`normalizePath` / `toCwdRelative` 仍只有 `write-policy.mjs` 一份实现），
+ * 只补「必须在 cwd 内」这一步：逃出 cwd 或无法解析一律返回 undefined，调用方
+ * 回落 0.14 的 `writeProjectMode`（读写都由它给出权威的失败原因）。
+ * @param cwd - 会话工作目录。
+ * @param projectSwitch - 已解析的 `projectSwitch` 段。
+ * @returns `{ file: absolute, relative: cwd-relative posix }`, or undefined.
+ */
+function resolveProjectFile(cwd, projectSwitch) {
+  const settings = projectSwitch ?? DEFAULT_PROJECT_SWITCH
+  const normalizedCwd = normalizePath(cwd)
+  const normalizedPath = normalizePath(settings.path ?? DEFAULT_PROJECT_SWITCH.path)
+  if (normalizedCwd === undefined || normalizedPath === undefined) return undefined
+  // 与 `write-policy.mjs#toCwdRelative` 同一套绝对路径判定（盘符或根斜杠）。
+  const absolute = /^[A-Za-z]:\//.test(normalizedPath) || normalizedPath.startsWith('/')
+  const file = absolute ? normalizedPath : join(normalizedCwd, normalizedPath)
+  const relative = toCwdRelative(file, cwd)
+  if (relative === undefined || relative === '') return undefined
+  if (relative === '..' || relative.startsWith('../')) return undefined
+  return { file, relative }
+}
+
+/**
+ * 切换档位时保留策略文件里的其它字段（§2.3 新条款）。
+ *
+ * `writeProjectMode` 只写 `{"mode":…}`，按它切换会把用户手写的 `rules` /
+ * `allowlist` / `verify` 等整份策略抹掉。这里先读现有 JSON，再原子写
+ * `{ ...existing, mode }`；文件不存在 / 坏 JSON / 顶层不是对象时**仍走
+ * `writeProjectMode`**，保持 0.14 行为（也是既有断言的口径）。
+ * @param cwd - 会话工作目录。
+ * @param projectSwitch - 已解析的 `projectSwitch` 段。
+ * @param mode - `'full' | 'shadow' | 'off'`。
+ * @returns 与 `writeProjectMode` 相同的 `{ ok, file?, mode?, reason?, error? }`。
+ */
+function mergeModeIntoPolicyFile(cwd, projectSwitch, mode) {
+  const settings = projectSwitch ?? DEFAULT_PROJECT_SWITCH
+  try {
+    if (!PROJECT_MODES.includes(mode)) return { ok: false, reason: 'invalid-path' }
+    if (typeof cwd !== 'string' || cwd.trim() === '') return { ok: false, reason: 'invalid-cwd' }
+    const resolved = resolveProjectFile(cwd, settings)
+    // 路径非法 / 逃出 cwd / cwd 归一化失败：交给 `writeProjectMode` 给出权威原因。
+    if (resolved === undefined) return writeProjectMode(cwd, settings, mode)
+    let existing
+    try {
+      const parsed = JSON.parse(readFileSync(resolved.file, 'utf8'))
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) existing = parsed
+    } catch {
+      // 文件缺失或坏 JSON：0.14 行为，只写 mode。
+    }
+    if (existing === undefined) return writeProjectMode(cwd, settings, mode)
+    writeJsonAtomically(resolved.file, { ...existing, mode })
+    return { ok: true, file: resolved.relative, mode }
+  } catch (error) {
+    return { ok: false, reason: 'write-failed', error: error?.message ?? String(error) }
+  }
+}
+
+/** 读一个 JSON 文件；不存在 / 坏 JSON / 读失败都返回 undefined（best-effort）。 */
+function readJsonFile(file) {
+  try {
+    return JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    return undefined
+  }
+}
+
+/** 判断一个值是否是普通对象（数组与 null 都不算）。 */
+function isPlainRecord(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * 扫描项目并生成 `dispatch/protocol.json` 的内容（§2.5，全部 best-effort）。
+ *
+ * 每一段检测独立回落：读不到 `package.json`、目录不可列、没有锁文件都只是少
+ * 写一个字段，绝不抛错。检测到的字段才写进文件——空数组在读取侧是非法字段
+ * （`readProjectPolicy` 会丢掉它），写进文件只会造成误导。
+ * @param cwd - 会话工作目录。
+ * @returns the policy document to write.
+ */
+function detectProjectPolicy(cwd) {
+  const has = (relative) => existsSync(join(cwd, ...relative.split('/')))
+  let entries = []
+  try {
+    entries = readdirSync(cwd)
+  } catch {
+    entries = []
+  }
+  const lowerEntries = entries.map(entry => entry.toLowerCase())
+  const hasEntry = (name) => lowerEntries.includes(name.toLowerCase())
+  const hasSuffix = (suffix) => lowerEntries.some(entry => entry.endsWith(suffix))
+
+  const packageJson = readJsonFile(join(cwd, 'package.json'))
+  const hasPackageJson = isPlainRecord(packageJson)
+  const scripts = hasPackageJson && isPlainRecord(packageJson.scripts) ? packageJson.scripts : {}
+
+  // 包管理器：锁文件优先（spec §2.5 的顺序）；有 package.json 但没有锁文件时按
+  // npm（npm 是基线，缺锁文件的检出仍能跑起来）。
+  const manager = hasEntry('pnpm-lock.yaml') ? 'pnpm'
+    : hasEntry('yarn.lock') ? 'yarn'
+      : hasEntry('package-lock.json') ? 'npm'
+        : hasPackageJson ? 'npm' : undefined
+
+  const commands = []
+  for (const name of ['test', 'typecheck', 'build']) {
+    const script = scripts[name]
+    if (typeof script !== 'string' || script.trim() === '') continue
+    commands.push(name === 'test'
+      ? `${manager} test`
+      : manager === 'npm' ? `npm run ${name}` : `${manager} ${name}`)
+  }
+  if (hasEntry('uv.lock') || hasEntry('pyproject.toml')) commands.push('uv run pytest')
+  if (hasSuffix('.csproj') || hasSuffix('.sln')) commands.push('dotnet test')
+
+  // 文档目录：存在 docs/ 时把整棵目录纳入主控白名单与文档判定。
+  const hasDocs = has('docs')
+  const allowlist = hasDocs ? ['dispatch/', 'docs/'] : ['dispatch/']
+  const docsPatterns = hasDocs ? ['.md', 'docs/'] : ['.md']
+
+  const contractPatterns = []
+  if (has('src/types')) contractPatterns.push('src/types/')
+  if (has('prisma/schema.prisma')) contractPatterns.push('prisma/schema.prisma')
+  for (const name of ['openapi.yaml', 'openapi.yml', 'openapi.json']) {
+    if (hasEntry(name)) contractPatterns.push(name)
+  }
+
+  // 预设：DSH 插件（package.json#dsh.bundle / dsh.client）用 plugin 规则，其余
+  // 项目用精简的 business 规则（spec §2.5 第 1 步）。
+  const dsh = hasPackageJson && isPlainRecord(packageJson.dsh) ? packageJson.dsh : {}
+  const rules = Object.hasOwn(dsh, 'bundle') || Object.hasOwn(dsh, 'client') ? 'plugin' : 'business'
+
+  return {
+    mode: 'full',
+    rules,
+    allowlist,
+    controlPlanePatterns: allowlist.slice(),
+    ...(commands.length === 0 ? {} : { verify: { commands } }),
+    ...(contractPatterns.length === 0 ? {} : { contract: { patterns: contractPatterns } }),
+    docs: { patterns: docsPatterns },
+  }
+}
+
+/**
+ * `/dispatch init`（§2.5）：扫项目、写出一份贴合的 `dispatch/protocol.json`。
+ *
+ * 已存在即拒绝：文件是唯一真相，覆盖会丢掉用户手写的策略。全部 best-effort——
+ * 任何异常都变成 `{ kind: 'error' }`，绝不抛回宿主。
+ * @param cwd - 会话工作目录。
+ * @param projectSwitch - 已解析的 `projectSwitch` 段。
+ * @returns the command result `{ kind, text }`.
+ */
+function runInit(cwd, projectSwitch) {
+  try {
+    const resolved = resolveProjectFile(cwd, projectSwitch)
+    if (resolved === undefined) return { kind: 'error', text: 'init 失败：项目策略文件路径非法' }
+    if (existsSync(resolved.file)) {
+      return { kind: 'error', text: `已存在 ${resolved.relative}，未覆盖；先查看或删除该文件后再 /dispatch init` }
+    }
+    const document = detectProjectPolicy(cwd)
+    writeJsonAtomically(resolved.file, document)
+    const commandCount = document.verify?.commands?.length ?? 0
+    const contractCount = document.contract?.patterns?.length ?? 0
+    return {
+      kind: 'success',
+      text: `已生成 ${resolved.relative}（preset: ${document.rules}，命令 ${commandCount} 条，契约面 ${contractCount} 个）；随时 /dispatch off|shadow|full 切档`,
+    }
+  } catch (error) {
+    const detail = error?.message === undefined ? '' : `（${error.message}）`
+    return { kind: 'error', text: `init 失败：write-failed${detail}` }
+  }
+}
 
 /**
  * Build a complete user-role message. `Agent.followup` takes a `UserMessage`,
@@ -238,7 +531,10 @@ function makeGuard(config) {
       // 0.13.0 项目级开关（spec §3.3）：`off` 直接放行（只留一条决定日志），
       // `shadow` 让判定照跑但不返回拒绝串。模式判定 fail-open，读不到标记文件
       // 的项目与 0.12.3 逐字节一致。
-      const projectMode = readProjectMode(cwd, config.projectSwitch)
+      // 0.15.0：同一次读取带回策略字段（spec §2.3），守卫按项目的 allowlist
+      // 判定；`off`/`shadow` 分支与 0.14 行为一致。
+      const projectPolicy = readProjectPolicy(cwd, config.projectSwitch)
+      const projectMode = projectPolicy.mode
       if (projectMode === 'off') {
         const key = `${session?.id ?? ''}\0${cwd ?? ''}`
         if (!reported.has(key)) {
@@ -249,8 +545,9 @@ function makeGuard(config) {
         }
         return undefined
       }
+      const effectivePolicy = applyPolicyToWritePolicy(policy, projectPolicy)
       const result = evaluateWritePolicy({
-        file, cwd, tool, config: policy, sessionStart: readSessionStart(session),
+        file, cwd, tool, config: effectivePolicy, sessionStart: readSessionStart(session),
       })
 
       if (result.decision === 'allow') {
@@ -279,7 +576,9 @@ function makeGuard(config) {
         mode: policy.mode,
       })
       if (policy.mode === 'shadow') return undefined
-      return renderDenyText({ tool, file, allowlist: policy.allowlist, overridePath: policy.overridePath })
+      return renderDenyText({
+        tool, file, allowlist: effectivePolicy.allowlist, overridePath: policy.overridePath,
+      })
     } catch {
       // 守卫自己出错时按放行处理：绝不影响宿主。
       return undefined
@@ -287,15 +586,17 @@ function makeGuard(config) {
   }
 }
 
-/** `/dispatch` 的用法行：参数不在三档时原样返回（spec §3.1 第 3 步）。 */
-const COMMAND_USAGE = '用法：/dispatch [off|shadow|full]（无参=查询）'
+/** `/dispatch` 的用法行：参数不在三档或 `init` 时原样返回（spec §3.1 第 3 步、§2.5 第 4 条）。 */
+const COMMAND_USAGE = '用法：/dispatch [off|shadow|full|init]（无参=查询）'
 
 /**
  * 注册宿主命令 `/dispatch`（0.14.0，spec `2026-11-17-dispatch-ui-design.md` §3.1）。
  *
  * 命令是「文件唯一真相」的第二个写入口：无参读 `readProjectMode`，带参写
- * `writeProjectMode`，和 UI 控件读写同一个标记文件。不写决定日志——日志只记
- * 守卫/闸门/检查点的判定，命令是用户显式动作，不需要记账。
+ * `writeProjectMode`（0.15.0 起走 `mergeModeIntoPolicyFile`，只替换 mode 并保留
+ * 策略字段），`init` 生成一份项目策略文件（spec §2.5），和 UI 控件读写同一个
+ * 标记文件。不写决定日志——日志只记守卫/闸门/检查点的判定，命令是用户显式
+ * 动作，不需要记账。
  *
  * 注册用可选服务注入 `ctx.inject(['commands'], …)`，而不是插件顶层的 `inject`
  * 数组：`commands` 是可选能力，放进顶层会让 headless/ACP 宿主因为缺服务而整个
@@ -326,9 +627,14 @@ function registerCommand(ctx, config) {
       if (argument === '') {
         return { kind: 'success', text: `当前项目档位：${readProjectMode(cwd, settings)}` }
       }
+      // 0.15.0 新增子命令（spec §2.5）：扫项目并生成策略文件。已存在即拒绝，
+      // 不覆盖用户手写的策略。
+      if (argument === 'init') return runInit(cwd, settings)
       if (!PROJECT_MODES.includes(argument)) return { kind: 'error', text: COMMAND_USAGE }
 
-      const written = writeProjectMode(cwd, settings, argument)
+      // 0.15.0 §2.3：切换档位只替换 `mode`，文件里其它策略字段必须保留；文件
+      // 缺失 / 坏 JSON 时该函数仍走 0.14 的 `writeProjectMode`（只写 mode）。
+      const written = mergeModeIntoPolicyFile(cwd, settings, argument)
       if (!written.ok) {
         const detail = written.error === undefined ? '' : `（${written.error}）`
         return { kind: 'error', text: `保存失败：${written.reason}${detail}` }
@@ -349,7 +655,7 @@ function registerCommand(ctx, config) {
         const register = () => cctx.commands.register({
           name: 'dispatch',
           description: '查看/切换当前项目的派发纪律档位',
-          input: { hint: '[off|shadow|full]' },
+          input: { hint: '[off|shadow|full|init]' },
           handler,
         })
         // 与 DSH settings README 的写法一致：disposer 交给子上下文的 effect，
@@ -378,6 +684,8 @@ export function apply(ctx, rawConfig) {
   // cwd 求值。`off` 时返回空串——系统提示词渲染层会丢弃 `text.length === 0` 的
   // 段，规则随之消失。拿不到 context 或判定抛错时一律回落 `config.text`：提示词
   // 组装失败会让整个请求失败，项目开关只是便利功能，不能有这种代价。
+  // 0.15.0：同一次读取选择规则预设（spec §2.3）——`rules: "business"` 用精简
+  // 正文，其余（含 `plugin`、缺省）逐字节回落 `config.text`。
   ctx.effect(() => ctx.systemPrompt.section({
     name: 'dispatch-protocol',
     order: config.order,
@@ -385,7 +693,9 @@ export function apply(ctx, rawConfig) {
       try {
         const session = context?.agent?.session
         const cwd = session?.cwd ?? session?.header?.cwd
-        return readProjectMode(cwd, config.projectSwitch) === 'off' ? '' : config.text
+        const projectPolicy = readProjectPolicy(cwd, config.projectSwitch)
+        if (projectPolicy.mode === 'off') return ''
+        return projectTextFor(projectPolicy, config)
       } catch {
         return config.text
       }
@@ -607,7 +917,11 @@ function registerReminders(ctx, config) {
       const cwd = target?.session?.cwd ?? target?.session?.header?.cwd
       // 0.13.0 项目级开关（spec §3.3）：`off` 的项目不投递任何状态闸门。判定放
       // 在 cwd 之后、任何 `deliver` 之前，本回合继续走观测与收尾。
-      if (readProjectMode(cwd, config.projectSwitch) === 'off') return false
+      // 0.15.0（spec §2.3）：一次读取带回策略字段，构造本回合的 `effectiveGates`
+      // ——纯函数返回新对象，不改 `config.gates`；闸门文案仍取 profile 的值。
+      const projectPolicy = readProjectPolicy(cwd, config.projectSwitch)
+      if (projectPolicy.mode === 'off') return false
+      const effectiveGates = applyPolicyToGates(gates, projectPolicy)
       /** 投递一条闸门消息：steer + 决定日志 + 本回合去重。 */
       const deliver = (text, payload) => {
         steerText(target, text)
@@ -618,21 +932,21 @@ function registerReminders(ctx, config) {
       }
       // 派发工具名复用写入守卫的解析结果：两套名单若各写一份，配置改了其中
       // 一处就会出现「守卫认为派发过、闸门认为干等」的矛盾（spec §3）。
-      const wait = evaluateWaitGate(events, turn, gates, writePolicy.delegationTools)
+      const wait = evaluateWaitGate(events, turn, effectiveGates, writePolicy.delegationTools)
       if (wait !== null) return deliver(renderWaitGate(gates.wait.text, wait), { gate: 'wait', observations: wait.count })
 
-      const verify = evaluateVerifyGate(events, turn, gates, cwd)
+      const verify = evaluateVerifyGate(events, turn, effectiveGates, cwd)
       if (verify !== null) {
         return deliver(renderVerifyGate(gates.verify.text, verify),
           { gate: 'verify', changes: verify.changes, lastVerify: verify.lastVerify })
       }
 
-      const contract = evaluateContractGate(events, turn, gates, activeChildCount(parentId))
+      const contract = evaluateContractGate(events, turn, effectiveGates, activeChildCount(parentId))
       if (contract !== null) {
         return deliver(renderContractGate(gates.contract.text, contract), { gate: 'contract', files: contract.files })
       }
 
-      const review = evaluateReviewGate(events, gates, reviewState.get(parentId), cwd)
+      const review = evaluateReviewGate(events, effectiveGates, reviewState.get(parentId), cwd)
       if (review !== null) {
         // 0.11.0 D4：文案模型统一——`renderReviewGate` 按 `docOnly` 自己选
         // `{action}`（文档/控制面改动只提示机器校验，混合代码时重开受影响切片）。
@@ -645,7 +959,7 @@ function registerReminders(ctx, config) {
         return delivered
       }
 
-      const handoff = evaluateHandoffGate(events, turn, gates)
+      const handoff = evaluateHandoffGate(events, turn, effectiveGates)
       if (handoff !== null) {
         return deliver(renderHandoffGate(gates.handoff.text, handoff), { gate: 'handoff', emptyTurns: handoff.emptyTurns })
       }

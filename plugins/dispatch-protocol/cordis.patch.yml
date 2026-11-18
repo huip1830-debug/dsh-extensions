@@ -24,6 +24,10 @@
         # projectSwitch:        # 0.13.0 per-project switch: {"mode":"off"|"shadow"} in a marker file downgrades one project only
         #   enabled: true       # master switch; false restores 0.12.3 behavior (the marker file is never read)
         #   path: 'dispatch/protocol.json'   # marker file, session-cwd relative; missing/bad file falls back to full (fail-open)
+        #   # 0.15.0: the same file is a project policy — optional rules/allowlist/controlPlanePatterns/
+        #   # verify.commands/contract.patterns/docs.patterns override the profile per field; an invalid field
+        #   # falls back alone, missing/bad JSON falls back entirely. rules: 'business' (~1.1K) trims the
+        #   # default ~3.8K text; `/dispatch init` writes a detected policy file, never overwriting an existing one.
         # gates:                # 0.6.0/0.7.0 event gates: Wait + Verify + Contract + Review + Handoff
         #   enabled: true       # master switch for all five gates; judged at the root agent's turn-stopping
         #   wait:

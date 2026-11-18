@@ -18,8 +18,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import * as plugin from './plugin.mjs'
-import { resolveConfig, DEFAULT_RULES } from './lib/config.mjs'
-import { DEFAULT_PROJECT_SWITCH, PROJECT_MODES, readProjectMode, writeProjectMode } from './lib/project.mjs'
+import { resolveConfig, DEFAULT_RULES, BUSINESS_FOOTER, BUSINESS_RULES, resolveRulesPreset } from './lib/config.mjs'
+import {
+  DEFAULT_PROJECT_SWITCH, PROJECT_MODES, readProjectMode, readProjectPolicy, writeProjectMode,
+} from './lib/project.mjs'
 import {
   ARTIFACT, callTouchesFile, classifyPath, controlPlaneOnlyShellWrite, DEFAULT_CONTROL_PLANE_PATTERNS,
   DEFAULT_PWSH_MUTATION_PATTERN, DEFAULT_PWSH_SHELL_PATTERN, readWorkdir, summarizeTurn,
@@ -3107,6 +3109,7 @@ test('0.13.0: the prompt section text is a per-cwd function', () => {
 
 test('0.14.0: apply registers the /dispatch command with the frozen shape', () => {
   // §5：命令名/描述/hint 是契约面，出错会直接改变用户看到的 `/` 菜单。
+  // 0.15.0 契约演进：hint 加 `init`（spec §2.5 第 4 条），这是有意更新，不是回归。
   const h = harness()
   plugin.apply(h.ctx, quiet)
 
@@ -3114,7 +3117,7 @@ test('0.14.0: apply registers the /dispatch command with the frozen shape', () =
   const [command] = h.commands
   assert.equal(command.name, 'dispatch')
   assert.equal(command.description, '查看/切换当前项目的派发纪律档位')
-  assert.deepEqual(command.input, { hint: '[off|shadow|full]' })
+  assert.deepEqual(command.input, { hint: '[off|shadow|full|init]' })
   assert.equal(typeof command.handler, 'function')
 })
 
@@ -3260,7 +3263,7 @@ test('0.14.0: the /dispatch command rejects an unknown argument and a missing cw
     const agent = h.main('agent-errors', [], {}, 'session-errors', cwd)
 
     assert.deepEqual(runCommand(h, 'loud', agent),
-      { kind: 'error', text: '用法：/dispatch [off|shadow|full]（无参=查询）' })
+      { kind: 'error', text: '用法：/dispatch [off|shadow|full|init]（无参=查询）' })
     assert.equal(existsSync(join(cwd, 'dispatch')), false, 'an unknown argument writes nothing')
 
     assert.deepEqual(runCommand(h, 'off', { session: {} }),
@@ -3285,7 +3288,7 @@ test('0.14.0: a non-string rawInput is a usage error, not a no-arg query', () =>
 
     for (const rawInput of [[], ['off'], {}, { mode: 'off' }, 42, null]) {
       assert.deepEqual(runCommand(h, rawInput, agent),
-        { kind: 'error', text: '用法：/dispatch [off|shadow|full]（无参=查询）' }, `rawInput=${JSON.stringify(rawInput)}`)
+        { kind: 'error', text: '用法：/dispatch [off|shadow|full|init]（无参=查询）' }, `rawInput=${JSON.stringify(rawInput)}`)
     }
     assert.equal(existsSync(join(cwd, 'dispatch')), false, 'a non-string argument writes nothing')
   } finally {
@@ -3439,6 +3442,680 @@ test('0.14.0: client.js declares the Remote namespace and both faces in inject',
     else globalThis.window = previousWindow
   }
 })
+
+// ---------------------------------------------------------------------------
+// 0.15.0 项目策略文件：`readProjectPolicy`（spec `2026-11-17-project-policy-
+// design.md` §2.1/§2.2）+ `business` 规则预设（§2.4）。用例全部只碰临时目录。
+
+test('0.15.0: readProjectPolicy returns only the fields the file validly carries', () => {
+  // §2.1/§2.2 / §5-A：缺省字段不出现（由调用方回落 config），坏的整个文件只回 mode。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-'))
+  try {
+    const config = resolveConfig({}).projectSwitch
+    const project = (name, body) => {
+      const cwd = join(dir, name)
+      mkdirSync(cwd, { recursive: true })
+      if (body !== undefined) writeProjectMarker(cwd, body)
+      return cwd
+    }
+
+    assert.deepEqual(readProjectPolicy(project('missing'), config), { mode: 'full' },
+      'no marker file → only the mode, no policy fields')
+    assert.deepEqual(readProjectPolicy(project('empty-file', ''), config), { mode: 'full' })
+    assert.deepEqual(readProjectPolicy(project('bad-json', '{oops'), config), { mode: 'full' })
+    assert.deepEqual(readProjectPolicy(project('array', '[]'), config), { mode: 'full' })
+    assert.deepEqual(readProjectPolicy(project('null', 'null'), config), { mode: 'full' })
+
+    // mode / enabled 的 0.13 判定顺序不变。
+    assert.deepEqual(readProjectPolicy(project('mode-shadow', '{"mode":"shadow"}'), config), { mode: 'shadow' })
+    assert.deepEqual(readProjectPolicy(project('enabled-false', '{"enabled":false}'), config), { mode: 'off' })
+    assert.deepEqual(readProjectPolicy(project('unknown-mode', '{"mode":"loud"}'), config), { mode: 'full' })
+    assert.deepEqual(readProjectPolicy(project('mode-off-rules', '{"mode":"off","rules":"business"}'), config),
+      { mode: 'off', rules: 'business' },
+      'mode and rules are independent fields')
+
+    // 全部字段有效时逐字段投影，数组形状与文件一致。
+    const full = {
+      mode: 'shadow',
+      enabled: true,
+      rules: 'business',
+      allowlist: ['dispatch/', 'docs/design/'],
+      controlPlanePatterns: ['dispatch/', 'docs/design/'],
+      verify: { commands: ['pnpm -w test', 'pnpm -w typecheck'] },
+      contract: { patterns: ['src/types/', 'prisma/schema.prisma'] },
+      docs: { patterns: ['.md', 'docs/'] },
+    }
+    assert.deepEqual(readProjectPolicy(project('full', JSON.stringify(full)), config), {
+      mode: 'shadow',
+      rules: 'business',
+      allowlist: ['dispatch/', 'docs/design/'],
+      controlPlanePatterns: ['dispatch/', 'docs/design/'],
+      verifyCommands: ['pnpm -w test', 'pnpm -w typecheck'],
+      contractPatterns: ['src/types/', 'prisma/schema.prisma'],
+      docsPatterns: ['.md', 'docs/'],
+    }, 'nested verify/contract/docs flatten to verifyCommands/contractPatterns/docsPatterns')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.15.0: an invalid policy field falls back alone, keeping the other fields and the mode', () => {
+  // §2.1：字段级 fail-open——某字段类型/内容非法 → 该字段不出现，其它字段与 mode 不受影响。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-fields-'))
+  try {
+    const config = resolveConfig({}).projectSwitch
+    const project = (name, body) => {
+      const cwd = join(dir, name)
+      mkdirSync(cwd, { recursive: true })
+      writeProjectMarker(cwd, body)
+      return cwd
+    }
+    const base = {
+      mode: 'shadow',
+      rules: 'business',
+      allowlist: ['dispatch/'],
+      controlPlanePatterns: ['dispatch/'],
+      verify: { commands: ['pnpm test'] },
+      contract: { patterns: ['src/types/'] },
+      docs: { patterns: ['.md'] },
+    }
+    const expected = {
+      mode: 'shadow',
+      rules: 'business',
+      allowlist: ['dispatch/'],
+      controlPlanePatterns: ['dispatch/'],
+      verifyCommands: ['pnpm test'],
+      contractPatterns: ['src/types/'],
+      docsPatterns: ['.md'],
+    }
+    const without = (...dropped) => {
+      const policy = structuredClone(expected)
+      for (const field of dropped) delete policy[field]
+      return policy
+    }
+    const policyOf = (name, patch) => readProjectPolicy(
+      project(name, JSON.stringify({ ...base, ...patch })), config)
+
+    assert.deepEqual(policyOf('rules-unknown', { rules: 'x' }), without('rules'))
+    assert.deepEqual(policyOf('rules-number', { rules: 1 }), without('rules'))
+    assert.deepEqual(policyOf('allowlist-empty', { allowlist: [] }), without('allowlist'))
+    assert.deepEqual(policyOf('allowlist-string', { allowlist: 'a' }), without('allowlist'))
+    assert.deepEqual(policyOf('allowlist-number-item', { allowlist: ['a', 2] }), without('allowlist'))
+    assert.deepEqual(policyOf('allowlist-empty-item', { allowlist: ['a', ''] }), without('allowlist'))
+    assert.deepEqual(policyOf('control-plane-empty', { controlPlanePatterns: [] }), without('controlPlanePatterns'))
+    assert.deepEqual(policyOf('verify-empty', { verify: { commands: [] } }), without('verifyCommands'))
+    assert.deepEqual(policyOf('verify-not-list', { verify: { commands: 'a' } }), without('verifyCommands'))
+    assert.deepEqual(policyOf('verify-not-object', { verify: 'x' }), without('verifyCommands'))
+    assert.deepEqual(policyOf('contract-number-item', { contract: { patterns: [1] } }), without('contractPatterns'))
+    assert.deepEqual(policyOf('contract-empty', { contract: { patterns: [] } }), without('contractPatterns'))
+    assert.deepEqual(policyOf('docs-empty', { docs: { patterns: [] } }), without('docsPatterns'))
+
+    // 缓存里只有解析结果，返回的数组不与缓存共享：改返回值不影响下一次读取。
+    const isolation = project('isolation', JSON.stringify(base))
+    readProjectPolicy(isolation, config).allowlist.push('src/')
+    assert.deepEqual(readProjectPolicy(isolation, config).allowlist, ['dispatch/'],
+      'the memoized document is never handed out as a mutable policy object')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.15.0: readProjectMode is exactly readProjectPolicy(...).mode and never throws', () => {
+  // §2.2：`readProjectMode` 保留为薄封装，0.13 调用面与可观察行为逐例不变。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-mode-parity-'))
+  try {
+    const config = resolveConfig({}).projectSwitch
+    const project = (name, body) => {
+      const cwd = join(dir, name)
+      mkdirSync(cwd, { recursive: true })
+      if (body !== undefined) writeProjectMarker(cwd, body)
+      return cwd
+    }
+    const cases = [
+      ['missing', undefined],
+      ['bad-json', '{oops'],
+      ['array', '[]'],
+      ['null', 'null'],
+      ['empty-object', '{}'],
+      ['enabled-false', '{"enabled":false}'],
+      ['enabled-true-mode-shadow', '{"enabled":true,"mode":"shadow"}'],
+      ['mode-off', '{"mode":"off"}'],
+      ['mode-full', '{"mode":"full"}'],
+      ['unknown-mode', '{"mode":"loud"}'],
+      ['policy-fields', '{"mode":"shadow","rules":"business","allowlist":["dispatch/"]}'],
+      ['bad-policy-fields', '{"mode":"off","rules":"x","allowlist":[],"verify":{"commands":[]}}'],
+    ]
+    for (const [name, body] of cases) {
+      const cwd = project(name, body)
+      assert.equal(readProjectMode(cwd, config), readProjectPolicy(cwd, config).mode,
+        `readProjectMode and readProjectPolicy disagree on ${name}`)
+    }
+
+    // fail-open 的全部入口形态：缺 cwd、空 cwd、开关关闭、路径逃逸。
+    assert.deepEqual(readProjectPolicy(undefined, config), { mode: 'full' })
+    assert.deepEqual(readProjectPolicy('', config), { mode: 'full' })
+    assert.deepEqual(readProjectPolicy('   ', config), { mode: 'full' })
+    assert.deepEqual(readProjectPolicy(project('switch-disabled', '{"rules":"business"}'),
+      { enabled: false, path: 'dispatch/protocol.json' }), { mode: 'full' },
+    'projectSwitch.enabled === false wins over any policy content')
+    assert.deepEqual(readProjectPolicy(project('escaping-path', '{"rules":"business"}'),
+      { enabled: true, path: '../outside.json' }), { mode: 'full' },
+    'a path escaping the cwd is not a marker file')
+    assert.deepEqual(readProjectPolicy(project('custom-path', '{"rules":"business"}'),
+      { enabled: true, path: 'dispatch/custom.json' }), { mode: 'full' },
+    'the default marker path is only read when projectSwitch.path says so')
+    assert.deepEqual(readProjectMode(undefined), 'full', 'no projectSwitch at all still fails open')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.15.0: the business preset is six non-empty rules and one short footer', (t) => {
+  // §2.4/§5-A：条款数与长度是可断言的契约，实际值进失败信息（也进诊断行）。
+  const total = BUSINESS_RULES.reduce((sum, rule) => sum + rule.length, 0)
+  t.diagnostic(`BUSINESS_RULES ${BUSINESS_RULES.length} 条 / ${total} 字符；BUSINESS_FOOTER ${BUSINESS_FOOTER.length} 字符`)
+  assert.equal(BUSINESS_RULES.length, 6, 'the preset keeps six skeleton rules')
+  BUSINESS_RULES.forEach((rule, index) => {
+    assert.equal(typeof rule, 'string', `rule ${index + 1} must be a string`)
+    assert.ok(rule.trim() !== '', `rule ${index + 1} must be non-empty`)
+  })
+  // §2.4 正文逐字冻结，实测六条合计 900 字符（派发稿的 1200–1800 区间是按
+  // 「约 1.5K」估的，与逐字正文不符；以冻结正文为准，下界取实测值，上限保留
+  // 派发稿的 1800，任何正文字数漂移都会在这里报出实际值）。
+  assert.ok(total >= 900 && total <= 1800,
+    `BUSINESS_RULES is ${total} characters (frozen §2.4 text = 900, expected 900-1800)`)
+  assert.ok(BUSINESS_RULES.every(rule => !/^\d+\.\s/.test(rule)),
+    'numbering is the renderer\'s job, so the preset stores bare rules')
+  assert.equal(typeof BUSINESS_FOOTER, 'string')
+  assert.ok(BUSINESS_FOOTER.trim() !== '', 'BUSINESS_FOOTER must be non-empty')
+  assert.ok(BUSINESS_FOOTER.length < 400,
+    `BUSINESS_FOOTER is ${BUSINESS_FOOTER.length} characters (expected < 400)`)
+
+  // 预设必须删掉本仓库专属细节，否则 business 项目会去跑不存在的脚本。
+  const joined = [...BUSINESS_RULES, BUSINESS_FOOTER].join('\n')
+  assert.ok(!joined.includes('docs-check'), 'the business preset names no repo-specific script')
+  assert.ok(!joined.includes('superpowers/specs'), 'the business preset names no repo-specific spec path')
+  assert.ok(!joined.includes('断言表'), 'the business preset carries no assertion-table clause')
+})
+
+test('0.15.0: resolveRulesPreset is pure and picks the preset by name', () => {
+  const config = resolveConfig({})
+  const plugin = resolveRulesPreset('plugin', config)
+  assert.equal(plugin.rules, config.rules, 'plugin keeps the configured rules object')
+  assert.equal(plugin.footer, config.footer)
+  assert.equal(resolveRulesPreset(undefined, config).rules, config.rules,
+    'a missing rules value falls back to the profile config')
+  assert.equal(resolveRulesPreset('other', config).footer, config.footer)
+
+  const custom = { rules: ['r'], footer: 'f' }
+  assert.equal(resolveRulesPreset('plugin', custom).rules, custom.rules)
+  assert.equal(resolveRulesPreset('plugin', custom).footer, custom.footer)
+  const business = resolveRulesPreset('business', custom)
+  assert.equal(business.rules, BUSINESS_RULES, 'business returns the frozen preset array')
+  assert.equal(business.footer, BUSINESS_FOOTER)
+  assert.deepEqual(custom, { rules: ['r'], footer: 'f' }, 'the preset choice never mutates the config')
+
+  // 纯函数且不抛错：没有 config 也回落默认值，而不是抛 TypeError。
+  assert.deepEqual(resolveRulesPreset('plugin', undefined),
+    { rules: DEFAULT_RULES, footer: config.footer })
+
+  // 0.15.0 不改 `resolveConfig` 的返回对象：`text` 仍按 profile 的 rules/footer 渲染。
+  assert.deepEqual(resolveConfig({}), config)
+  assert.equal(resolveConfig({}).text, [
+    '## 派发纪律（DSH）',
+    '',
+    DEFAULT_RULES.map((rule, index) => `${index + 1}. ${rule}`).join('\n'),
+    '',
+    config.footer,
+  ].join('\n'), 'the default rendered text is unchanged by 0.15.0')
+})
+
+// ---------------------------------------------------------------------------
+// 0.15.0 批 B：策略字段接线（spec §2.3）与 `/dispatch init`（§2.5）。
+//
+// 每个用例先写 `<cwd>/dispatch/protocol.json` 自带策略，再走 harness 的真实
+// 判定路径（守卫 / 闸门 / 提示词段 / 命令），断言「策略生效」并且「回落原值」。
+
+test('0.15.0: the write guard uses the project allowlist and still honours the override', () => {
+  // §2.3 写入守卫行 / §5-B：命中放行、未命中拦截、override 仍生效。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-guard-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    writeProjectMarker(cwd, JSON.stringify({ allowlist: ['dispatch/', 'src/'] }))
+
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const root = h.main('session-policy-guard', [], {}, 'session-policy-guard', cwd)
+
+    assert.equal(h.guard({ agent: root, name: 'write', arguments: { file_path: 'src/app.ts' } }), undefined,
+      'a project allowlist entry admits the write')
+    assert.equal(h.guard({ agent: root, name: 'edit', arguments: { file_path: 'dispatch/state/x.md' } }), undefined,
+      'the other listed prefix still works')
+
+    const denied = h.guard({ agent: root, name: 'write', arguments: { file_path: 'tests/x.test.ts' } })
+    assert.equal(typeof denied, 'string', 'a path outside the project allowlist is denied')
+    assert.match(denied, /tests\/x\.test\.ts/, 'the rejected path is named')
+    assert.ok(denied.includes('dispatch/、src/'), 'the rejection names the project allowlist, not the profile one')
+    assert.doesNotMatch(denied, /docs\/superpowers\/specs\//, 'the profile allowlist is replaced, not merged')
+
+    // override 仍生效：豁免凭据与名单是两个独立机制（§5-B）。
+    const overrideDir = join(cwd, 'dispatch')
+    mkdirSync(overrideDir, { recursive: true })
+    writeFileSync(join(overrideDir, 'override.json'), JSON.stringify({ reason: '用户要求直接修这 4 行' }))
+    assert.equal(h.guard({ agent: root, name: 'edit', arguments: { file_path: 'server/src/y.ts' } }), undefined,
+      'a fresh override still releases a project-denied write')
+
+    const rows = readRows(log)
+    assert.ok(rows.some(row => row.decision === 'denied' && row.file === 'tests/x.test.ts'),
+      'the denial is logged')
+    assert.ok(rows.some(row => row.decision === 'allowed' && row.reason === 'override' && row.file === 'server/src/y.ts'),
+      'the override is logged')
+    assert.equal(rows.some(row => row.file === 'src/app.ts'), false, 'an allowlist hit is not logged')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.15.0: the verify gate uses the project verify.commands', () => {
+  // §2.3 五闸门行 / §5-B：策略里的命令才算验证，profile 的默认命令不再算。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-verify-'))
+  try {
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    writeProjectMarker(cwd, JSON.stringify({ verify: { commands: ['pnpm -w test'] } }))
+
+    const verified = harness()
+    plugin.apply(verified.ctx, quiet)
+    const clean = verified.main('session-policy-verify-ok', [
+      call(1, 'write', { file_path: 'src/a.ts' }, 'write-1'),
+      result(1, 'write-1', false),
+      call(2, 'pwsh', { command: 'pnpm -w test' }, 'verify-1'),
+      resultWithText(2, 'verify-1', 'exit code: 0'),
+      call(3, 'present', { file_path: 'report.md' }, 'present-1'),
+    ], {}, 'session-policy-verify-ok', cwd)
+    verified.created(clean)
+    verified.turnStopping(clean, 1)
+    verified.turnStopping(clean, 2)
+    verified.turnStopping(clean, 3)
+    assert.equal(clean.messages.length, 0, 'the project command counts as the verification')
+
+    const profileOnly = harness()
+    plugin.apply(profileOnly.ctx, quiet)
+    const dirty = profileOnly.main('session-policy-verify-default', [
+      call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+      resultWithText(1, 'verify-1', 'exit code: 0'),
+      call(2, 'write', { file_path: 'src/a.ts' }, 'write-1'),
+      result(2, 'write-1', false),
+      call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+    ], {}, 'session-policy-verify-default', cwd)
+    profileOnly.created(dirty)
+    profileOnly.turnStopping(dirty, 1)
+    profileOnly.turnStopping(dirty, 2)
+    assert.equal(dirty.messages.length, 1,
+      'a profile-default command is not a verification once the project supplies its own list')
+    assert.match(dirty.messages[0].text, /准备 present\/commit/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.15.0: the contract gate uses the project contract.patterns', () => {
+  // §2.3 五闸门行 / §5-B：契约面只由策略决定。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-contract-'))
+  try {
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    writeProjectMarker(cwd, JSON.stringify({ contract: { patterns: ['schema/'] } }))
+
+    const h = harness()
+    plugin.apply(h.ctx, { log: false, checkpoint: { enabled: false } })
+    const parent = h.main('session-policy-contract', [
+      call(1, 'write', { file_path: 'schema/user.json' }, 'write-1'),
+    ], {}, 'session-policy-contract', cwd)
+    h.created(parent)
+    h.created(h.child('child-policy-contract', 'session-policy-contract', '实现 A'))
+    h.turnStopping(parent, 1)
+    assert.equal(parent.messages.length, 1, 'the project contract pattern fires the gate')
+    assert.match(parent.messages[0].text, /schema\/user\.json/)
+
+    // 默认片段 "contract" 已被策略替换：同名文件不再触发。
+    const replaced = harness()
+    plugin.apply(replaced.ctx, { log: false, checkpoint: { enabled: false } })
+    const quietParent = replaced.main('session-policy-contract-default', [
+      call(1, 'write', { file_path: 'tmp/fix-contract.md' }, 'write-1'),
+    ], {}, 'session-policy-contract-default', cwd)
+    replaced.created(quietParent)
+    replaced.created(replaced.child('child-contract-default', 'session-policy-contract-default', '实现 B'))
+    replaced.turnStopping(quietParent, 1)
+    assert.equal(quietParent.messages.length, 0,
+      'the profile pattern is replaced by the project list')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.15.0: the docs patterns flow into both verify and review', () => {
+  // §2.3 五闸门行 / §5-B：verify.docPatterns 与 review.docPatterns 同源覆盖。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-docs-'))
+  try {
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    writeProjectMarker(cwd, JSON.stringify({ docs: { patterns: ['.txt'] } }))
+
+    // verify：策略认 .txt 是文档，收口静默；.md 不再是文档，收口触发。
+    const docOnly = harness()
+    plugin.apply(docOnly.ctx, quiet)
+    const clean = docOnly.main('session-policy-docs-verify', [
+      call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+      resultWithText(1, 'verify-1', 'exit code: 0'),
+      call(2, 'write', { file_path: 'notes.txt' }, 'write-1'),
+      result(2, 'write-1', false),
+      call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+    ], {}, 'session-policy-docs-verify', cwd)
+    docOnly.created(clean)
+    docOnly.turnStopping(clean, 1)
+    docOnly.turnStopping(clean, 2)
+    assert.equal(clean.messages.length, 0, 'the project treats .txt as documentation, so no verify gate')
+
+    const codeChange = harness()
+    plugin.apply(codeChange.ctx, quiet)
+    const dirty = codeChange.main('session-policy-docs-code', [
+      call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+      resultWithText(1, 'verify-1', 'exit code: 0'),
+      call(2, 'write', { file_path: 'notes.md' }, 'write-1'),
+      result(2, 'write-1', false),
+      call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+    ], {}, 'session-policy-docs-code', cwd)
+    codeChange.created(dirty)
+    codeChange.turnStopping(dirty, 1)
+    codeChange.turnStopping(dirty, 2)
+    assert.equal(dirty.messages.length, 1, 'a .md write is code under the project doc patterns')
+
+    // review：同一份策略让评审闸门按文档口径选文案。
+    const events = []
+    const reviewHarness = harness()
+    plugin.apply(reviewHarness.ctx, {
+      log: false, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+    })
+    const parent = reviewHarness.main('session-policy-docs-review', events, {}, 'session-policy-docs-review', cwd)
+    reviewHarness.created(parent)
+    reviewHarness.created(reviewHarness.child('review-policy-docs', 'session-policy-docs-review', '只读评审：diff'))
+    reviewHarness.ended({ childId: 'review-policy-docs', stopReason: 'completed' })
+    events.push(call(2, 'write', { file_path: 'notes.txt' }, 'write-1'), result(2, 'write-1', false))
+    reviewHarness.turnStopping(parent, 2)
+    assert.equal(parent.messages.length, 1, 'the review gate sees the write')
+    assert.match(parent.messages[0].text, /不必重开代码评审/,
+      'review.docPatterns reuses the project docs list')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.15.0: the gates use the project controlPlanePatterns', () => {
+  // §2.3 五闸门行 / §5-B：控制面豁免也按项目策略，verify 与 review 同源。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-control-'))
+  try {
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    writeProjectMarker(cwd, JSON.stringify({ controlPlanePatterns: ['src/notes/'] }))
+
+    const controlHarness = harness()
+    plugin.apply(controlHarness.ctx, quiet)
+    const clean = controlHarness.main('session-policy-control-verify', [
+      call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+      resultWithText(1, 'verify-1', 'exit code: 0'),
+      call(2, 'write', { file_path: 'src/notes/x.md' }, 'write-1'),
+      result(2, 'write-1', false),
+      call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+    ], {}, 'session-policy-control-verify', cwd)
+    controlHarness.created(clean)
+    controlHarness.turnStopping(clean, 1)
+    controlHarness.turnStopping(clean, 2)
+    assert.equal(clean.messages.length, 0,
+      'a write under the project control plane is not a dirty change')
+
+    const codeHarness = harness()
+    plugin.apply(codeHarness.ctx, quiet)
+    const dirty = codeHarness.main('session-policy-control-code', [
+      call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
+      resultWithText(1, 'verify-1', 'exit code: 0'),
+      call(2, 'write', { file_path: 'src/other/x.ts' }, 'write-1'),
+      result(2, 'write-1', false),
+      call(2, 'present', { file_path: 'report.md' }, 'present-1'),
+    ], {}, 'session-policy-control-code', cwd)
+    codeHarness.created(dirty)
+    codeHarness.turnStopping(dirty, 1)
+    codeHarness.turnStopping(dirty, 2)
+    assert.equal(dirty.messages.length, 1, 'a code write outside the project control plane still gates')
+
+    // review 复用同一份 controlPlanePatterns：src/notes/ 下的写入不让评审失效。
+    const events = []
+    const reviewHarness = harness()
+    plugin.apply(reviewHarness.ctx, {
+      log: false, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
+    })
+    const parent = reviewHarness.main('session-policy-control-review', events, {}, 'session-policy-control-review', cwd)
+    reviewHarness.created(parent)
+    reviewHarness.created(reviewHarness.child('review-policy-control', 'session-policy-control-review', '只读评审：diff'))
+    reviewHarness.ended({ childId: 'review-policy-control', stopReason: 'completed' })
+    events.push(call(2, 'write', { file_path: 'src/notes/x.md' }, 'write-1'), result(2, 'write-1', false))
+    reviewHarness.turnStopping(parent, 2)
+    assert.equal(parent.messages.length, 0,
+      'the project control plane keeps the review valid')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.15.0: the prompt section switches to the business preset by rules', () => {
+  // §2.3 提示词段行 / §5-B：business 文本出现、plugin 文本不出现，off 仍旧为空。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-prompt-'))
+  try {
+    const businessCwd = join(dir, 'business')
+    mkdirSync(businessCwd, { recursive: true })
+    writeProjectMarker(businessCwd, '{"rules":"business"}')
+    const pluginCwd = join(dir, 'plugin')
+    mkdirSync(pluginCwd, { recursive: true })
+    writeProjectMarker(pluginCwd, '{"rules":"plugin"}')
+    const offCwd = join(dir, 'off')
+    mkdirSync(offCwd, { recursive: true })
+    writeProjectMarker(offCwd, '{"mode":"off","rules":"business"}')
+
+    const h = harness()
+    plugin.apply(h.ctx, {})
+    const section = h.rawSections[0]
+    const config = resolveConfig({})
+    const context = cwd => ({ agent: { session: { cwd } } })
+
+    const businessText = section.text(context(businessCwd))
+    const expected = [
+      '## 派发纪律（DSH）',
+      '',
+      BUSINESS_RULES.map((rule, index) => `${index + 1}. ${rule}`).join('\n'),
+      '',
+      BUSINESS_FOOTER,
+    ].join('\n')
+    assert.equal(businessText, expected, 'the business preset uses the frozen body and the resolveConfig layout')
+    assert.ok(businessText.includes('结论以项目自己的 CI 为准'), 'the business footer is rendered')
+    assert.ok(!businessText.includes('docs-check'), 'the business preset names no repo-specific script')
+    assert.ok(!businessText.includes('superpowers/specs'), 'the business preset names no repo-specific spec path')
+
+    const pluginText = section.text(context(pluginCwd))
+    assert.equal(pluginText, config.text, 'rules: "plugin" falls back to the profile text byte for byte')
+    assert.ok(pluginText.includes('docs-check'), 'the profile text is the long form')
+    assert.equal(section.text(context(offCwd)), '', 'off still drops the section')
+    assert.equal(section.text({ agent: { session: {} } }), config.text,
+      'a cwd-less context falls back to the profile text')
+
+    // 自定义 profile 正文在 business 项目里让位给冻结预设（§2.3 回退列）。
+    const custom = harness()
+    plugin.apply(custom.ctx, { rules: ['profile rule'], footer: 'profile footer' })
+    assert.equal(custom.rawSections[0].text(context(businessCwd)), expected,
+      'the project preset wins over the profile rules/footer')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.15.0: /dispatch init writes the detected policy and never overwrites', () => {
+  // §2.5 / §5-B：生成预期 JSON（scripts 检测 + dsh.bundle → plugin），已存在不覆盖。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-init-plugin-'))
+  try {
+    const cwd = join(dir, 'plugin-project')
+    mkdirSync(cwd, { recursive: true })
+    writeFileSync(join(cwd, 'package.json'), JSON.stringify({
+      name: 'some-dsh-plugin',
+      scripts: { test: 'node test.mjs', typecheck: 'tsc --noEmit', build: 'vite build' },
+      dsh: { bundle: { id: 'some-dsh-plugin' } },
+    }))
+    writeFileSync(join(cwd, 'pnpm-lock.yaml'), '')
+    mkdirSync(join(cwd, 'docs'))
+    mkdirSync(join(cwd, 'src', 'types'), { recursive: true })
+    mkdirSync(join(cwd, 'prisma'), { recursive: true })
+    writeFileSync(join(cwd, 'prisma', 'schema.prisma'), '')
+    writeFileSync(join(cwd, 'openapi.json'), '{}')
+
+    const h = harness()
+    plugin.apply(h.ctx, quiet)
+    const agent = h.main('agent-init', [], {}, 'session-init', cwd)
+    const result = runCommand(h, 'init', agent)
+
+    assert.equal(result.kind, 'success', result.text)
+    const file = join(cwd, 'dispatch', 'protocol.json')
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), {
+      mode: 'full',
+      rules: 'plugin',
+      allowlist: ['dispatch/', 'docs/'],
+      controlPlanePatterns: ['dispatch/', 'docs/'],
+      verify: { commands: ['pnpm test', 'pnpm typecheck', 'pnpm build'] },
+      contract: { patterns: ['src/types/', 'prisma/schema.prisma', 'openapi.json'] },
+      docs: { patterns: ['.md', 'docs/'] },
+    }, 'the generated file carries the detected fields')
+    assert.match(result.text, /dispatch\/protocol\.json/)
+    assert.match(result.text, /preset: plugin/)
+    assert.match(result.text, /命令 3 条/)
+    assert.match(result.text, /契约面 3 个/)
+    assert.match(result.text, /\/dispatch off\|shadow\|full/)
+
+    // 已存在不覆盖：返回错误文案且文件逐字节不变。
+    const before = readFileSync(file, 'utf8')
+    const again = runCommand(h, 'init', agent)
+    assert.equal(again.kind, 'error')
+    assert.match(again.text, /已存在 dispatch\/protocol\.json/)
+    assert.match(again.text, /未覆盖/)
+    assert.equal(readFileSync(file, 'utf8'), before, 'an existing policy file is never overwritten')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.15.0: /dispatch init defaults to the business preset and reads other ecosystems', () => {
+  // §2.5 第 1 步：无 dsh.bundle/client → business；python/dotnet 各给一条命令。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-init-business-'))
+  try {
+    const cwd = join(dir, 'business-project')
+    mkdirSync(cwd, { recursive: true })
+    writeFileSync(join(cwd, 'package.json'), JSON.stringify({ scripts: { build: 'vite build' } }))
+    writeFileSync(join(cwd, 'package-lock.json'), '{}')
+    writeFileSync(join(cwd, 'pyproject.toml'), '')
+
+    const h = harness()
+    plugin.apply(h.ctx, quiet)
+    const result = runCommand(h, 'init', h.main('agent-init-biz', [], {}, 'session-init-biz', cwd))
+
+    assert.equal(result.kind, 'success', result.text)
+    const written = JSON.parse(readFileSync(join(cwd, 'dispatch', 'protocol.json'), 'utf8'))
+    assert.equal(written.mode, 'full')
+    assert.equal(written.rules, 'business', 'a project without dsh.bundle/client gets the business preset')
+    assert.deepEqual(written.allowlist, ['dispatch/'], 'without docs/ the allowlist stays dispatch/ only')
+    assert.deepEqual(written.controlPlanePatterns, written.allowlist)
+    assert.deepEqual(written.docs, { patterns: ['.md'] })
+    assert.deepEqual(written.verify.commands, ['npm run build', 'uv run pytest'],
+      'npm scripts use npm run, python adds uv run pytest')
+    assert.equal('contract' in written, false, 'undetected contract surfaces are omitted, not written empty')
+    assert.match(result.text, /preset: business/)
+
+    // 检测到的文件必须能被 readProjectPolicy 原样读回（字段形状合法）。
+    const policy = readProjectPolicy(cwd, resolveConfig({}).projectSwitch)
+    assert.equal(policy.rules, 'business')
+    assert.deepEqual(policy.verifyCommands, ['npm run build', 'uv run pytest'])
+    assert.deepEqual(policy.allowlist, ['dispatch/'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.15.0: switching mode preserves the other policy fields', () => {
+  // §2.3 新条款（关键回归）：文件里先有策略 → `/dispatch off` → 只有 mode 变。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-switch-'))
+  try {
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    writeProjectMarker(cwd, JSON.stringify({
+      mode: 'full',
+      rules: 'business',
+      allowlist: ['dispatch/', 'docs/design/'],
+      verify: { commands: ['pnpm test'] },
+      custom: { keep: true },
+    }))
+
+    const h = harness()
+    plugin.apply(h.ctx, quiet)
+    const agent = h.main('agent-switch', [], {}, 'session-switch', cwd)
+    const result = runCommand(h, 'off', agent)
+
+    assert.deepEqual(result, { kind: 'success', text: '已切换为 off（dispatch/protocol.json）' })
+    const written = JSON.parse(readFileSync(join(cwd, 'dispatch', 'protocol.json'), 'utf8'))
+    assert.deepEqual(written, {
+      mode: 'off',
+      rules: 'business',
+      allowlist: ['dispatch/', 'docs/design/'],
+      verify: { commands: ['pnpm test'] },
+      custom: { keep: true },
+    }, 'only the mode changes; every other policy field survives')
+    assert.equal(readProjectPolicy(cwd, resolveConfig({}).projectSwitch).rules, 'business',
+      'the reader still finds the preserved preset')
+
+    // 文件缺失 / 坏 JSON 仍是 0.14 行为：只写 {"mode":"…"}。
+    const bare = join(dir, 'bare')
+    mkdirSync(bare, { recursive: true })
+    runCommand(h, 'shadow', h.main('agent-switch-bare', [], {}, 'session-switch-bare', bare))
+    assert.equal(readFileSync(join(bare, 'dispatch', 'protocol.json'), 'utf8'), '{"mode":"shadow"}\n')
+
+    const broken = join(dir, 'broken')
+    mkdirSync(broken, { recursive: true })
+    writeProjectMarker(broken, '{oops')
+    runCommand(h, 'full', h.main('agent-switch-broken', [], {}, 'session-switch-broken', broken))
+    assert.equal(readFileSync(join(broken, 'dispatch', 'protocol.json'), 'utf8'), '{"mode":"full"}\n',
+      'a broken file still gets the 0.14 single-field rewrite')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.15.0: the unknown-argument error mentions init so the subcommand is discoverable', () => {
+  // §2.5 第 4 条：hint 与用法串都加了 init，未知参数的报错必须跟着带上它，
+  // 否则 `/dispatch init` 只能靠翻代码或 spec 才知道。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-usage-init-'))
+  try {
+    const h = harness()
+    plugin.apply(h.ctx, quiet)
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+
+    const result = runCommand(h, 'loud', h.main('agent-usage', [], {}, 'session-usage', cwd))
+
+    assert.equal(result.kind, 'error')
+    assert.match(result.text, /init/, 'the usage error advertises the init subcommand')
+    assert.match(result.text, /\/dispatch \[off\|shadow\|full\|init\]/)
+    assert.equal(existsSync(join(cwd, 'dispatch')), false, 'an unknown argument still writes nothing')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 
 // ---------------------------------------------------------------------------
 function call(turn, name, args, id) {
