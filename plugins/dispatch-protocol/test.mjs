@@ -2135,6 +2135,338 @@ test('0.17.1: the dock row mirrors the composer card width in every layout varia
 })
 
 // ---------------------------------------------------------------------------
+// 0.18.0 — 控件未激活态与激活按钮（spec
+// `2026-11-18-dispatch-dock-activation-design.md` §3/§5）。
+
+/**
+ * Minimal hooks runtime: the dock is a plain function component, so
+ * useState/useRef/useEffect is all a stub needs to mount, re-render and click.
+ * @returns `{ api, render(component, props) }`; `render` returns the tree and the
+ *   effects collected on that render (run them only for the first render).
+ */
+function hookReact() {
+  const states = []
+  const refs = []
+  let stateIndex = 0
+  let refIndex = 0
+  let effects = []
+  const api = {
+    createElement: (type, props, ...children) => ({ type, props: { ...(props ?? {}), children } }),
+    useState: (initial) => {
+      const index = stateIndex++
+      if (states[index] === undefined) states[index] = { value: initial }
+      return [states[index].value, (next) => { states[index].value = next }]
+    },
+    useRef: (initial) => {
+      const index = refIndex++
+      if (refs[index] === undefined) refs[index] = { current: initial }
+      return refs[index]
+    },
+    useEffect: (fn) => { effects.push(fn) },
+  }
+  return {
+    api,
+    render(component, props) {
+      stateIndex = 0
+      refIndex = 0
+      effects = []
+      const tree = component(props)
+      const mount = effects
+      effects = []
+      return { tree, mount }
+    },
+  }
+}
+
+/** Dictionary lookup with `{name}` interpolation, mirroring the host `t`. */
+function translate(dict) {
+  return (key, params) => {
+    let text = typeof dict[key] === 'string' ? dict[key] : key
+    for (const [name, value] of Object.entries(params ?? {})) text = text.split('{' + name + '}').join(value)
+    return text
+  }
+}
+
+/** Every element in a rendered tree, including ones nested inside arrays. */
+function elementsOf(node, out = []) {
+  if (node === null || node === undefined || typeof node === 'boolean') return out
+  if (Array.isArray(node)) {
+    for (const child of node) elementsOf(child, out)
+    return out
+  }
+  if (typeof node !== 'object') return out
+  out.push(node)
+  for (const child of node.props?.children ?? []) elementsOf(child, out)
+  return out
+}
+
+/** Every text node of a rendered tree, in render order. */
+function textsOf(node, out = []) {
+  if (node === null || node === undefined || typeof node === 'boolean') return out
+  if (typeof node === 'string' || typeof node === 'number') {
+    out.push(String(node))
+    return out
+  }
+  if (Array.isArray(node)) {
+    for (const child of node) textsOf(child, out)
+    return out
+  }
+  for (const child of node.props?.children ?? []) textsOf(child, out)
+  return out
+}
+
+/** Flush the pending promise chain of one dock interaction. */
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+test('0.18.0: dockStateOf maps one read outcome to initialized / mode / unknown', () => {
+  // §3.1：未初始化只在 `workspace-file/not-found` 时成立；坏文件仍是已初始化
+  // （宿主按 auto 兜底），其它读失败保持 0.14 的「未知」。
+  const previousWindow = globalThis.window
+  let captured
+  try {
+    globalThis.window = { __ModuleLoader__: { load(registration) { captured = registration } } }
+    new Function(readFileSync(new URL('./client.js', import.meta.url), 'utf8'))()
+    const exports = captured.factory((id) => {
+      if (id === 'react') return { createElement: () => null }
+      throw new Error(`client.js required an unexpected module: ${id}`)
+    })
+    const state = exports.pure.dockStateOf
+
+    assert.deepEqual(state({ ok: true, value: { text: '{"mode":"shadow"}\n' } }),
+      { initialized: true, mode: 'shadow' })
+    assert.deepEqual(state({ ok: true, value: { text: '{"enabled":true}' } }),
+      { initialized: true, mode: 'full' })
+    assert.deepEqual(state({ ok: true, value: { text: '{oops' } }),
+      { initialized: true, mode: 'auto' },
+      'a bad marker is still initialized; the mode falls back to auto like lib/project.mjs')
+    assert.deepEqual(state({ ok: false, error: { code: 'workspace-file/not-found' } }),
+      { initialized: false, mode: undefined },
+      'no marker means the project was never initialized')
+    assert.deepEqual(state({ ok: false, error: { code: 'workspace-file/too-large', message: 'nope' } }),
+      { initialized: undefined, mode: undefined, detail: 'workspace-file/too-large: nope' })
+    assert.deepEqual(state(null), { initialized: undefined, mode: undefined, detail: 'unknown' },
+      'an unreadable outcome keeps the 0.14 unknown state, never 未激活')
+
+    const zh = JSON.parse(readFileSync(new URL('./locale/zh.json', import.meta.url), 'utf8'))
+    const en = JSON.parse(readFileSync(new URL('./locale/en.json', import.meta.url), 'utf8'))
+    for (const key of ['inactive', 'activate', 'activateHint', 'activateFailed']) {
+      assert.equal(exports.dictionaries.zh[key], zh.ui[key], `zh dictionary mirrors locale/zh.json (${key})`)
+      assert.equal(exports.dictionaries.en[key], en.ui[key], `en dictionary mirrors locale/en.json (${key})`)
+    }
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  }
+})
+
+test('0.18.0: an uninitialized project renders 未激活 + 激活 and no mode chips', async () => {
+  // §3.2：标签保留（说明插件开启），但没有档位值、没有四档按钮；点激活走注入
+  // 的 activate 服务（session 作用域传当前 SessionId）。
+  const previousWindow = globalThis.window
+  let captured
+  try {
+    globalThis.window = { __ModuleLoader__: { load(registration) { captured = registration } } }
+    new Function(readFileSync(new URL('./client.js', import.meta.url), 'utf8'))()
+    const runtime = hookReact()
+    const exports = captured.factory((id) => {
+      if (id === 'react') return runtime.api
+      throw new Error(`client.js required an unexpected module: ${id}`)
+    })
+
+    let component
+    exports.apply({
+      slots: {
+        inject(name, callback) { callback(); return () => {} },
+        register(definition, render) { component = render; return () => {} },
+      },
+      locale: { register() { return () => {} } },
+      remote: { workspaceFiles: { read() {} }, commands: { execute() {} } },
+      effect(fn) { fn(); return () => {} },
+      on() { return () => {} },
+    })
+
+    const activated = []
+    const props = {
+      t: translate(exports.dictionaries.zh),
+      sessionId: 'sess-1',
+      readMode: () => Promise.resolve({ initialized: false, mode: undefined }),
+      switchMode: () => Promise.resolve({ ok: false }),
+      activate: (sessionId) => { activated.push(sessionId); return Promise.resolve({ ok: true }) },
+      subscribe: () => undefined,
+    }
+
+    const first = runtime.render(component, props)
+    for (const effect of first.mount) effect()
+    await flush()
+    const { tree } = runtime.render(component, props)
+
+    assert.deepEqual(textsOf(tree), ['派发纪律', '未激活', '激活'],
+      'the row keeps the plugin label and offers activation')
+    const elements = elementsOf(tree)
+    assert.equal(elements.some((node) => typeof node.props?.className === 'string'
+      && node.props.className.includes('ddp-mode')), false,
+    'no mode chip is rendered before the project is initialized')
+    const buttons = elements.filter((node) => node.type === 'button')
+    assert.equal(buttons.length, 1, 'activation is the only action in the uninitialized state')
+    assert.equal(buttons[0].props.className, 'ddp-activate')
+
+    buttons[0].props.onClick()
+    await flush()
+    assert.deepEqual(activated, ['sess-1'], 'activation goes through the injected activate service')
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  }
+})
+
+test('0.18.0: apply passes activate and runs /dispatch init through the command surface', async () => {
+  // §3.3：激活与切档共用同一条宿主命令 admission 路径，只是一个拼 init、一个
+  // 拼 mode；两个服务都在 slot props 上，客户端不直接写文件。
+  const previousWindow = globalThis.window
+  let captured
+  try {
+    globalThis.window = { __ModuleLoader__: { load(registration) { captured = registration } } }
+    new Function(readFileSync(new URL('./client.js', import.meta.url), 'utf8'))()
+    const exports = captured.factory((id) => {
+      if (id === 'react') return { createElement: () => null }
+      throw new Error(`client.js required an unexpected module: ${id}`)
+    })
+
+    const calls = []
+    let registered
+    exports.apply({
+      slots: {
+        inject(name, callback) { callback(); return () => {} },
+        register(definition, render) { registered = { definition, render }; return () => {} },
+      },
+      locale: { register() { return () => {} } },
+      remote: {
+        workspaceFiles: { read() {} },
+        commands: {
+          execute(sessionId, line, attachments) {
+            calls.push({ sessionId, line, attachments })
+            return Promise.resolve({ ok: true, value: { result: { kind: 'success', text: 'ok' } } })
+          },
+        },
+      },
+      effect(fn) { fn(); return () => {} },
+      on() { return () => {} },
+    })
+
+    const props = registered.definition.inject('sess-1')
+    assert.equal(typeof props.activate, 'function', 'the slot props carry the activation service')
+    assert.deepEqual(await props.activate('sess-1'), { ok: true })
+    assert.deepEqual(await props.switchMode('sess-1', 'shadow'), { ok: true })
+    assert.deepEqual(calls, [
+      { sessionId: 'sess-1', line: '/dispatch init', attachments: [] },
+      { sessionId: 'sess-1', line: '/dispatch shadow', attachments: [] },
+    ])
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  }
+})
+
+test('0.18.0: activation failure reports the Host text unless a concurrent init won', async () => {
+  // §3.3：失败先把状态重读一次——宿主「已存在…未覆盖」在并发场景下其实是
+  // 成功；只有重读仍为未初始化时才把宿主文案显示在行内。
+  const previousWindow = globalThis.window
+  let captured
+  try {
+    globalThis.window = { __ModuleLoader__: { load(registration) { captured = registration } } }
+    new Function(readFileSync(new URL('./client.js', import.meta.url), 'utf8'))()
+    const failure = '已存在 dispatch/protocol.json，未覆盖；先查看或删除该文件后再 /dispatch init'
+    const mount = async (runtime, component, props) => {
+      const first = runtime.render(component, props)
+      for (const effect of first.mount) effect()
+      await flush()
+      return props
+    }
+    const clickActivate = async (runtime, component, props) => {
+      const tree = runtime.render(component, props).tree
+      const button = elementsOf(tree).find((node) => node.props?.className === 'ddp-activate')
+      assert.ok(button, 'the inactive row offers activation')
+      button.props.onClick()
+      await flush()
+      return runtime.render(component, props).tree
+    }
+
+    // (a) still uninitialized after the failed command: show the Host text inline.
+    const runtimeA = hookReact()
+    const exportsA = captured.factory((id) => {
+      if (id === 'react') return runtimeA.api
+      throw new Error(`client.js required an unexpected module: ${id}`)
+    })
+    let componentA
+    exportsA.apply({
+      slots: {
+        inject(name, callback) { callback(); return () => {} },
+        register(definition, render) { componentA = render; return () => {} },
+      },
+      locale: { register() { return () => {} } },
+      remote: { workspaceFiles: { read() {} }, commands: { execute() {} } },
+      effect(fn) { fn(); return () => {} },
+      on() { return () => {} },
+    })
+    const failing = await mount(runtimeA, componentA, {
+      t: translate(exportsA.dictionaries.zh),
+      sessionId: 'sess-1',
+      readMode: () => Promise.resolve({ initialized: false, mode: undefined }),
+      switchMode: () => Promise.resolve({ ok: true }),
+      activate: () => Promise.resolve({ ok: false, reason: 'handler', detail: failure }),
+      subscribe: () => undefined,
+    })
+    const treeA = await clickActivate(runtimeA, componentA, failing)
+    assert.ok(textsOf(treeA).includes(`激活失败：${failure}`),
+      'the Host error text is surfaced when the project is still uninitialized')
+    assert.equal(textsOf(treeA).filter((text) => text === '激活失败：' + failure).length, 1,
+      'one activation failure produces one notice')
+
+    // (b) another Session won the race: the Host refuses to overwrite, and the
+    // re-read proves initialized — render the four-mode control, no error.
+    const runtimeB = hookReact()
+    const exportsB = captured.factory((id) => {
+      if (id === 'react') return runtimeB.api
+      throw new Error(`client.js required an unexpected module: ${id}`)
+    })
+    let componentB
+    exportsB.apply({
+      slots: {
+        inject(name, callback) { callback(); return () => {} },
+        register(definition, render) { componentB = render; return () => {} },
+      },
+      locale: { register() { return () => {} } },
+      remote: { workspaceFiles: { read() {} }, commands: { execute() {} } },
+      effect(fn) { fn(); return () => {} },
+      on() { return () => {} },
+    })
+    let reads = 0
+    const racing = await mount(runtimeB, componentB, {
+      t: translate(exportsB.dictionaries.zh),
+      sessionId: 'sess-2',
+      readMode: () => {
+        reads += 1
+        return Promise.resolve(reads === 1
+          ? { initialized: false, mode: undefined }
+          : { initialized: true, mode: 'full' })
+      },
+      switchMode: () => Promise.resolve({ ok: true }),
+      activate: () => Promise.resolve({ ok: false, reason: 'handler', detail: failure }),
+      subscribe: () => undefined,
+    })
+    const treeB = await clickActivate(runtimeB, componentB, racing)
+    assert.equal(textsOf(treeB).includes(`激活失败：${failure}`), false,
+      'a concurrent init is success, not an activation failure')
+    assert.equal(textsOf(treeB)[1], 'full', 'the value shows the mode the concurrent init wrote')
+    assert.ok(elementsOf(treeB).some((node) => node.props?.className === 'ddp-modes'),
+      'the row switches to the four-mode control')
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  }
+})
+
+// ---------------------------------------------------------------------------
 // 0.15.0 项目策略文件：`readProjectPolicy`（spec `2026-11-17-project-policy-
 // design.md` §2.1/§2.2）+ `business` 规则预设（§2.4）。用例全部只碰临时目录。
 

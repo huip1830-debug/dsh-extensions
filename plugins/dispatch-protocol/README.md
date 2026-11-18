@@ -201,20 +201,22 @@
 
 ## 会话区控件与 /dispatch
 
-0.14.0 起有两个新入口，读写的是同一个标记文件 `dispatch/protocol.json`：宿主命令 `/dispatch`（无参=查询，`/dispatch off|auto|shadow|full`=切换，`/dispatch init`=按项目检测生成策略文件）和输入框上方的常驻控件。**文件仍是唯一真相**：在默认 `projectSwitch.path` 下，控件、命令、手改文件三者等价，无标记文件时按 `auto`；自定义 `path` 时见下方读口径与「已知坑」。
+0.14.0 起有两个新入口，读写的是同一个标记文件 `dispatch/protocol.json`：宿主命令 `/dispatch`（无参=查询，`/dispatch off|auto|shadow|full`=切换，`/dispatch init`=按项目检测生成策略文件）和输入框上方的常驻控件。**文件仍是唯一真相**：在默认 `projectSwitch.path` 下，控件、命令、手改文件三者等价，无标记文件时按 `auto` 兜底；自定义 `path` 时见下方读口径与「已知坑」。0.18.0 起，没有标记文件的项目在控件上显示「未激活」+「激活」按钮，点击激活执行 `/dispatch init`——不再把宿主的 `auto` 兜底显示成已生效的档位。
 
-控件落点是 `conversation.input.dock`——输入框卡片正上方那一行（与 Todo、队列停靠同一片区域，本控件 `order: 10`）。它显示 `派发纪律` 和当前档位，右侧四个窄按钮 `off` / `auto` / `shadow` / `full`；窄屏（宽度不超过 640px）只留当前档位那一个按钮，点它之前先看档位、点其它档位需横向空间。会话 id 由 slot 的 session 作用域注入传进来，控件不依赖 owner props（`client.js#apply`、`dsh-client-ui-conversation` 的 `src/client/contract/slots.ts:301-305`）。0.14.x 的 `conversation.composer.dock` 不行：宿主只在 `variant === 'composer'` 时渲染它（`dsh-client-ui-conversation` 的 `src/client/skeleton/InputBar.tsx:596-599`），而新建的空白会话是 hero 态（同包 `src/client/skeleton/ConversationMainPanel.tsx:32-35`），整行控件因此不出现；`input.dock` 只要求会话与输入态就绪（同包 `src/client/skeleton/ConversationContent.tsx:86-87`、`:169`）。
+控件落点是 `conversation.input.dock`——输入框卡片正上方那一行（与 Todo、队列停靠同一片区域，本控件 `order: 10`）。已初始化时显示 `派发纪律` 和当前档位，右侧四个窄按钮 `off` / `auto` / `shadow` / `full`；窄屏（宽度不超过 640px）只留当前档位那一个按钮，点它之前先看档位、点其它档位需横向空间。**未初始化时**只显示 `派发纪律` / `未激活` / `激活` 按钮，不渲染四档按钮（详见下方「未激活与激活」）。会话 id 由 slot 的 session 作用域注入传进来，控件不依赖 owner props（`client.js#apply`、`dsh-client-ui-conversation` 的 `src/client/contract/slots.ts:301-305`）。0.14.x 的 `conversation.composer.dock` 不行：宿主只在 `variant === 'composer'` 时渲染它（`dsh-client-ui-conversation` 的 `src/client/skeleton/InputBar.tsx:596-599`），而新建的空白会话是 hero 态（同包 `src/client/skeleton/ConversationMainPanel.tsx:32-35`），整行控件因此不出现；`input.dock` 只要求会话与输入态就绪（同包 `src/client/skeleton/ConversationContent.tsx:86-87`、`:169`）。
 
-**宽度对齐（0.17.1）**：slot outlet 是 `display:contents`，控件直接成为宿主 `.composerStack` 的 flex 子项，而这个栈占满整条会话列——宿主只居中输入框卡片本身（`max-width: var(--dsh-composer-card-max-width)`）。所以 dock 行必须自己带上同样的约束，否则会贴在会话列最左边、离卡片很远（0.17.0 的线上表现）。控件照抄宿主的两级几何：`.ddp-frame` ≈ `.GRgSLq_root`（`padding:0 var(--dsh-composer-side-clearance)` + 列向居中），`.ddp-dock` ≈ `.GRgSLq_card`（`width:100%` + `max-width:var(--dsh-composer-card-max-width)`），内容再按 `--dsh-composer-dock-inset`（8px）内缩，与卡片内工具栏行（`InputBar.module.css#row` 的 8px padding）左对齐。**为什么不是一行 `calc(100% - 2×clearance)`**：嵌入形态（右侧栏子代理会话）的 `--dsh-composer-card-max-width` 本身是百分比（`min(calc(100% - 16px), 952px)`），单行 calc 会让它按「用它的元素」解析、每边差 8px；镜像两级容器后两边基准一致。效果是**窗口任意宽度、缩放、hero↔active 切换、右侧栏展开/收起都保持左右边缘重合**（0.17.1 用宿主真实 CSS 在 420–2200px × active/hero/embedded 21 组尺寸上实测：`dockLeft - cardLeft = 0`，内容内缩恒为 8px）。官方 `QueueDock` / `TodoPanel` 同样各自承担这段宽度 CSS。
+**宽度对齐（0.17.1）**：slot outlet 是 `display:contents`，控件直接成为宿主 `.composerStack` 的 flex 子项，而这个栈占满整条会话列——宿主只居中输入框卡片本身（`max-width: var(--dsh-composer-card-max-width)`）。所以 dock 行必须自己带上同样的约束，否则会贴在会话列最左边、离卡片很远（0.17.0 的线上表现）。控件照抄宿主的两级几何：`.ddp-frame` ≈ `.GRgSLq_root`（`padding:0 var(--dsh-composer-side-clearance)` + 列向居中），`.ddp-dock` ≈ `.GRgSLq_card`（`width:100%` + `max-width:var(--dsh-composer-card-max-width)`），内容再按 `--dsh-composer-dock-inset`（8px）内缩，与卡片内工具栏行（8px 内边距）左对齐。**为什么不是一行 `calc(100% - 2×clearance)`**：嵌入形态（右侧栏子代理会话）的 `--dsh-composer-card-max-width` 本身是百分比（`min(calc(100% - 16px), 952px)`），单行 calc 会让它按「用它的元素」解析、每边差 8px；镜像两级容器后两边基准一致。效果是**窗口任意宽度、缩放、hero↔active 切换、右侧栏展开/收起都保持左右边缘重合**（0.17.1 用宿主真实 CSS 在 420–2200px × active/hero/embedded 21 组尺寸上实测：`dockLeft - cardLeft = 0`，内容内缩恒为 8px）。官方 `QueueDock` / `TodoPanel` 同样各自承担这段宽度 CSS。
 
-读口径（`client.js#readModeOf`）：
+**未激活与激活（0.18.0）**：未激活态只有三个元素——`派发纪律` 标签、`未激活` 值、`激活` 按钮；档位值与四档按钮都不渲染，因为项目还没建立策略文件。点击激活走 `remote.commands.execute(sessionId, '/dispatch init', [])`（与 `/` 菜单同一条 admission 路径），宿主按项目检测写出 `dispatch/protocol.json`（`mode:"full"` + preset + 白名单）；成功后控件重读，切成四档控件并将当前档显示为 `full`。请求期间按钮禁用、同一时刻只允许一次激活。失败时先把状态重读一次：并发下另一个会话已先建好文件（宿主返回「已存在…未覆盖」）按已初始化展示、不显示错误；仍为未初始化才在行内显示 `激活失败：<detail>`。`激活` 按钮在窄屏下不被 `max-width:640px` 的规则隐藏——它是未激活项目唯一的入口。
 
-- `remote.workspaceFiles.read(sessionId, 'dispatch/protocol.json', {})`，路径按**工作区根相对**解析。**控件拿不到 profile 配置**：这个路径是硬编码的默认值（`client.js#MARKER_PATH`），改了 `projectSwitch.path` 的项目控件仍读默认文件，可能停在 `auto`——这类项目以 `/dispatch` 为准（见「已知坑」）。
-- 错误码 `workspace-file/not-found` → 显示 `auto`（没有标记就是默认档）。
-- 其它错误（越界、非文本、RPC 失败）→ 显示 `未知`，鼠标悬停的 title 给出错误码与消息。
-- 文件能读到但 JSON 坏 → 与宿主读取器同口径回落 `auto`（`client.js#modeOfText`、`lib/project.mjs#readPolicyDocument`）。
+读口径（`client.js#readModeOf`、`client.js#dockStateOf`）：
 
-写口径（首选面，`client.js#switchModeOf`）：点按钮走 `remote.commands.execute(sessionId, '/dispatch <mode>', [])`，也就是 `/` 菜单敲命令走的那条 admission 路径（`dsh-client-ui-commands` 的 `src/client/service.ts:420-435`）；成功与否看返回的 `{ ok, value: { result } }`，`result.kind === 'error'` 时把宿主文案放进 `切换失败：…` 提示。`remote`、`remote.commands`、`remote.workspaceFiles` 都写在 `inject` 里（`client.js#inject`）——它们是独立的子服务，少一个宿主就不加载本插件（控件整块不出现，而不是「显示未知/不支持」），所以注入是必需项，不做第二套写入。
+- `remote.workspaceFiles.read(sessionId, 'dispatch/protocol.json', {})`，路径按**工作区根相对**解析。**控件拿不到 profile 配置**：这个路径是硬编码的默认值（`client.js#MARKER_PATH`），改了 `projectSwitch.path` 的项目控件仍读默认文件，会一直显示 `未激活`（点激活写的是自定义文件，控件读不到）——这类项目以 `/dispatch` 为准（见「已知坑」）。
+- 错误码 `workspace-file/not-found` → 显示 `未激活` + 激活按钮（0.18.0；宿主仍按 `auto` 兜底，但项目没被初始化，控件不假装已启用）。
+- 其它错误（越界、非文本、RPC 失败）→ 显示 `未知`，鼠标悬停的 title 给出错误码与消息；**不给**激活按钮（状态判不出来时不做写动作）。
+- 文件能读到但 JSON 坏 → 仍算已初始化，档位与宿主读取器同口径回落 `auto`（`client.js#modeOfText`、`lib/project.mjs#readPolicyDocument`）。
+
+写口径（首选面，`client.js#switchModeOf` / `client.js#activateProjectOf`）：点档位按钮走 `remote.commands.execute(sessionId, '/dispatch <mode>', [])`，点激活走同一条路径拼 `/dispatch init`，也就是 `/` 菜单敲命令走的那条 admission 路径（`dsh-client-ui-commands` 的 `src/client/service.ts:420-435`）；成功与否看返回的 `{ ok, value: { result } }`，`result.kind === 'error'` 时把宿主文案放进 `切换失败：…` / `激活失败：…` 提示。`remote`、`remote.commands`、`remote.workspaceFiles` 都写在 `inject` 里（`client.js#inject`）——它们是独立的子服务，少一个宿主就不加载本插件（控件整块不出现，而不是「显示未知/不支持」），所以注入是必需项，不做第二套写入；激活同样只调宿主命令，客户端从不直接写文件。
 
 刷新时机（`client.js#DispatchDock`）：挂载时、会话切换时、`command/executed` 事件（浏览器本地确认，`service.ts:437-452`）、窗口 `focus` / `pageshow`、标签页 `visibilitychange` 各重读一次；组件卸载时移除全部监听。**页面刷新才拿得到新控件**：客户端产物没有热更，装完插件必须刷新；没跑 UI 的宿主（headless / SDK）不受影响，用 `/dispatch` 即可。
 
@@ -261,8 +263,8 @@
 
 | 命令 | 期望 |
 |---|---|
-| `node plugins/dispatch-protocol/test.mjs` | 110 pass（`ℹ pass 110` / `ℹ fail 0`），exit 0 |
-| `node plugins/dispatch-protocol/scripts/docs-check.mjs` | 无参扫仓库根，`docs-check: files=30 fail=0`，exit 0 |
+| `node plugins/dispatch-protocol/test.mjs` | 115 pass（`ℹ pass 115` / `ℹ fail 0`），exit 0 |
+| `node plugins/dispatch-protocol/scripts/docs-check.mjs` | 无参扫仓库根，`docs-check: files=31 fail=0`，exit 0 |
 | `node plugins/dispatch-protocol/scripts/check-anchors.mjs` | 无参扫仓库根 `README.md` 与 `plugins/*/README.md`，`anchors-check: files=4 fail=0`，exit 0 |
 | `node plugins/dispatch-protocol/scripts/docs-check.mjs --self-test` | `self-test: pass=20 fail=0`，exit 0 |
 
@@ -297,6 +299,7 @@
 | `0.16.0` | `auto` 默认档 + 模型请示 + 单向升级工具：默认从 `full` 改为 `auto`（无标记 / 坏文件 / 无 `mode` 的策略文件都回落 `auto`；`{"enabled":true}` 仍是 `full`），`auto` 只给根代理注入 370 余字的提级提示（判断式：`full` 的四件事是否会显著受益，不列文件数门槛），不拦写入、不投递检查点/闸门、不写观测行；新增 `dispatch_upgrade_full` 工具，仅在「根代理 + 当前 auto」可见，用户确认后原子写回 `mode:"full"` 并保留其它策略字段；`/dispatch`、dock 与客户端读取器增加 `auto`。行为变化只有一条：没有标记的项目从 `full` 降到 `auto`；测试 188 条（新增 4 条：默认/静默/工具/客户端）。 |
 | `0.17.0` | 删除五个收尾状态闸门（Wait / Verify / Contract / Review / Handoff）：`agent/turn-stopping` 不再逐回合 steer「本回合事实」，收尾只留完成检查点；`lib/gates.mjs` 整体删除，`plugin.mjs` 去掉闸门判定/状态/文案，`config.gates` 段与 `gates.*` 默认值删除（旧 profile 写 `gates` 段即加载期报错并给迁移提示）；项目策略文件只剩 `mode` / `rules` / `allowlist`（闸门专用的 `controlPlanePatterns` / `verify.commands` / `contract.patterns` / `docs.patterns` 一并删除，旧文件里出现也忽略）；`/dispatch init` 不再检测验证命令 / 契约面 / 文档口径；`tool-calls.mjs` 删除只服务闸门的 `controlPlaneOnlyShellWrite`，`DEFAULT_DOC_PATTERNS` 搬入 `tool-calls.mjs`；docs-check 的 DOC005 输入键集合只剩 6 个 `writePolicy.*`。写入守卫、完成检查点、观测行、项目开关、`auto` 提级与升级工具不变；测试 110 条（删除 80 条闸门用例，新增 2 条：`gates` 段加载期报错、收尾不 steer 而观测行照写）。 |
 | `0.17.1` | dock 行对齐输入框卡片：slot outlet 是 `display:contents`，控件成为宿主 `.composerStack`（占满整条会话列）的 flex 子项，而宿主只居中卡片本身——0.17.0 的 `.ddp-dock` 没有宽度约束，整行贴在会话列最左边、离卡片很远，线上看到的「没和输入框对齐」即此。现在控件照抄宿主两级几何：`.ddp-frame` ≈ `.GRgSLq_root`（侧留白 + 居中）、`.ddp-dock` ≈ `.GRgSLq_card`（`width:100%` + 卡片宽度上限），内容按 `--dsh-composer-dock-inset` 内缩 8px 与卡片内工具栏行对齐；不用单行 calc 是因为嵌入形态的卡片上限是百分比、解析基准会差 8px。窗口任意宽度（含 680/920px 钳制区、hero 态、≤640px）与右侧栏展开/收起均实测边缘重合（21 组尺寸 `dockLeft - cardLeft = 0`）；测试 111 条（新增 1 条 CSS + 元素树契约回归）。 |
+| `0.18.0` | 会话区控件新增未激活态与激活按钮：没有 `dispatch/protocol.json` 的项目显示 `派发纪律 未激活 [激活]`（不显示档位值与四档按钮），点击激活执行 `/dispatch init`（写 `mode:"full"` + preset + 白名单），成功重读后切成四档控件；激活失败先重读状态，并发的「已存在…未覆盖」按已初始化展示；已初始化项目与坏 JSON 行为不变；新增 `dockStateOf` 状态映射，locale 加 `inactive` / `activate` / `activateHint` / `activateFailed`；测试 115 条（新增 4 条：状态映射、未激活渲染、激活接线、失败/并发）。 |
 
 0.10.0–0.11.0 为未发布的中间提交，内容并入 0.12.0。
 
@@ -316,7 +319,7 @@
 - **override 是文件不是散文**：正文里写「豁免」「直接做」彻底无效；每会话有效、新会话必须重写；它仍是单文件，并行会话可互相复用；取不到会话开始时间时跳过新鲜度判断（日志 `override-unbounded`）。
 - **记账在 TEMP 里**：`log` 默认落系统临时目录（`dispatch-protocol-decisions.jsonl`），不随仓库版本化；要长期留档就把路径指到固定位置，或写 `false` 全关。
 - **观测计数与守卫是两套口径**：观测行按去重路径计、失败写入不计；检查点的只读判定按调用名、尝试即算（失败或被拒也算执行类）；守卫只看参数路径，不解析 `pwsh`。
-- **控件只读默认标记路径**（0.14.0 已知限制）：浏览器控件拿不到 profile 的配置，读路径硬编码为 `dispatch/protocol.json`（`client.js#MARKER_PATH`），丢弃 `projectSwitch.path`。自定义了 `projectSwitch.path` 的项目**以 `/dispatch` 为准**——命令与写入守卫走同一份配置，仍是唯一真相；控件的显示可能停在 `auto`（它读的默认文件不存在，`workspace-file/not-found` 按 `auto` 显示）。
+- **控件只读默认标记路径**（0.14.0 已知限制）：浏览器控件拿不到 profile 的配置，读路径硬编码为 `dispatch/protocol.json`（`client.js#MARKER_PATH`），丢弃 `projectSwitch.path`。自定义了 `projectSwitch.path` 的项目**以 `/dispatch` 为准**——命令与写入守卫走同一份配置，仍是唯一真相；控件的显示会一直是 `未激活`（它读的默认文件不存在，0.18.0 起 `workspace-file/not-found` 按未初始化显示）；点激活会写自定义文件，但控件读不到，仍显示未激活。
 - **auto 没有兜底**：默认档只注入提示，模型漏问就等同无纪律；需要「保证不裸奔」的项目显式写 `{"mode":"full"}`。
 - **升级工具依赖宿主工具面**：`ctx.tools.register` 不存在时工具静默缺席，模型只能请用户点 dock 或输入 `/dispatch full`；提示段已写这条兜底。
 - **无会话 / 会话未就绪时不显示控件**（0.15.1 的 `input.dock` 也如此）：该槽要求会话已打开且输入态就绪（`zone` 需 `session` 与 `inputState`）——还没选/建会话（`sessionId === undefined`）、会话打开中、打开失败时整行不渲染，属预期；会话打开且输入态就绪后显示（**空白新会话也算**），`/dispatch` 在这些状态下始终可用。

@@ -6,6 +6,12 @@
 // to platform seed modules; only `react` is used here.
 //
 // Spec: docs/superpowers/specs/2026-11-17-dispatch-ui-design.md §3.2.
+// 0.18.0 adds the activation state (spec
+// docs/superpowers/specs/2026-11-18-dispatch-dock-activation-design.md §3): a
+// project with no `dispatch/protocol.json` renders `未激活` + an Activate button
+// that runs `/dispatch init` through the Host command. The mode chips only show
+// once the marker file exists — the Host still falls back to `auto`, but the dock
+// must not look like the project opted in.
 //
 // Signal surfaces consumed (verified against the shipped desktop build):
 //   - Slot `conversation.input.dock`: a `list` slot of `scope: 'session'`,
@@ -69,6 +75,10 @@ window.__ModuleLoader__.load({
       modeShadow: '只记',
       modeFull: '全部',
       modeUnknown: '未知',
+      inactive: '未激活',
+      activate: '激活',
+      activateHint: '在项目里写入 dispatch/protocol.json（mode: full），激活后可用四档',
+      activateFailed: '激活失败：{detail}',
       unknownHint: '读不到标记文件：{detail}',
       writeFailed: '切换失败：{detail}',
       unsupported: '当前宿主没有客户端命令执行面',
@@ -83,6 +93,10 @@ window.__ModuleLoader__.load({
       modeShadow: 'Shadow',
       modeFull: 'Full',
       modeUnknown: 'Unknown',
+      inactive: 'Not activated',
+      activate: 'Activate',
+      activateHint: 'Write dispatch/protocol.json in this project (mode: full) to enable the four modes',
+      activateFailed: 'Activation failed: {detail}',
       unknownHint: 'Cannot read the marker file: {detail}',
       writeFailed: 'Switch failed: {detail}',
       unsupported: 'This host has no client command surface',
@@ -131,6 +145,11 @@ window.__ModuleLoader__.load({
       '.ddp-modeCurrent{background:var(--dsw-alias-bg-layer-3,var(--dsw-alias-interactive-bg-hover));color:var(--dsw-alias-label-primary);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--dsw-alias-label-primary) 22%,transparent)}',
       '.ddp-modeCurrent{background:color-mix(in srgb,var(--dsw-alias-label-primary) 14%,transparent)}',
       '.ddp-modeCurrent:hover{background:color-mix(in srgb,var(--dsw-alias-label-primary) 20%,transparent);color:var(--dsw-alias-label-primary)}',
+      // 0.18.0: the Activate button shares the chip geometry but never joins the
+      // narrow-screen rule — an uninitialized project must keep its only action.
+      '.ddp-activate{border:0;background:0 0;padding:1px 8px;border-radius:999px;cursor:pointer;font-family:inherit;font-size:11px;color:var(--dsw-alias-label-primary);line-height:1.6;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--dsw-alias-label-primary) 22%,transparent)}',
+      '.ddp-activate:hover{background:var(--dsw-alias-interactive-bg-hover)}',
+      '.ddp-activate:disabled{cursor:default;opacity:.55}',
       '.ddp-notice{color:var(--dsw-alias-state-warn-label)}',
       // Narrow screens keep only the current mode on screen (spec §3.2).
       '@media (max-width:640px){.ddp-mode{display:none}.ddp-modeCurrent{display:inline-block}}',
@@ -185,39 +204,67 @@ window.__ModuleLoader__.load({
       return 'unknown'
     }
 
+    /**
+     * Project one `workspaceFiles.read` outcome into the dock state (0.18.0).
+     *
+     * - a readable marker (bad JSON included) means the project was initialized;
+     *   the mode falls back to `auto` exactly like `lib/project.mjs` does;
+     * - `workspace-file/not-found` means "no marker": the Host still runs the
+     *   `auto` fallback, but the dock renders 未激活 + an Activate button instead
+     *   of the mode chips (the project never opted in);
+     * - every other outcome keeps the 0.14 "未知" behaviour and carries a detail.
+     * @param result - the RemoteResult from `workspaceFiles.read`.
+     * @returns `{ initialized, mode?, detail? }`.
+     */
+    function dockStateOf(result) {
+      if (result === null || typeof result !== 'object') {
+        return { initialized: undefined, mode: undefined, detail: 'unknown' }
+      }
+      if (result.ok === true) {
+        const value = result.value
+        return { initialized: true, mode: modeOfText(typeof value?.text === 'string' ? value.text : undefined) }
+      }
+      const code = result?.error?.code
+      const message = result?.error?.message
+      if (code === 'workspace-file/not-found') return { initialized: false, mode: undefined }
+      const detail = [code, message].filter((part) => typeof part === 'string' && part !== '').join(': ')
+      return { initialized: undefined, mode: undefined, detail: detail === '' ? 'unknown' : detail }
+    }
+
     // --- services -----------------------------------------------------------
 
-    /** Marker read result: `mode` is undefined when the read failed. */
+    /**
+     * Read the marker file once and hand the outcome to `dockStateOf`.
+     * `initialized:false` means the default marker does not exist; other read
+     * failures stay `undefined` so the dock keeps showing 未知 without offering
+     * a write action it cannot verify.
+     * @param ctx - the plugin context.
+     * @param sessionId - the SessionId the dock belongs to.
+     * @returns `{ initialized, mode?, detail? }` (see `dockStateOf`).
+     */
     function readModeOf(ctx, sessionId) {
       return (async () => {
         try {
           // Declared above in `inject`: resolved statically, not via `ctx.get`.
           const files = ctx.remote.workspaceFiles
           if (files === undefined || files === null || typeof files.read !== 'function') {
-            return { mode: undefined, detail: 'no-remote' }
+            return { initialized: undefined, mode: undefined, detail: 'no-remote' }
           }
-          const result = await files.read(sessionId, MARKER_PATH, {})
-          if (result === null || typeof result !== 'object' || result.ok !== true) {
-            const code = result?.error?.code
-            const message = result?.error?.message
-            // No marker in this workspace root: the Host's default is auto (0.16.0).
-            if (code === 'workspace-file/not-found') return { mode: 'auto' }
-            const detail = [code, message].filter((part) => typeof part === 'string' && part !== '').join(': ')
-            return { mode: undefined, detail: detail === '' ? 'unknown' : detail }
-          }
-          const value = result.value
-          return { mode: modeOfText(typeof value?.text === 'string' ? value.text : undefined) }
+          return dockStateOf(await files.read(sessionId, MARKER_PATH, {}))
         } catch (error) {
-          return { mode: undefined, detail: String(error?.message ?? error) }
+          return { initialized: undefined, mode: undefined, detail: String(error?.message ?? error) }
         }
       })()
     }
 
     /**
-     * Write one mode through the Host command, the same admission path the `/`
-     * menu uses. Returns `{ ok: true }` or `{ ok: false, reason, detail? }`.
+     * Run one Host command through the same admission path the `/` menu uses.
+     * Returns `{ ok: true }` or `{ ok: false, reason, detail? }`; never throws.
+     * @param ctx - the plugin context.
+     * @param sessionId - the SessionId the command targets.
+     * @param line - the command line, e.g. `/dispatch full`.
      */
-    function switchModeOf(ctx, sessionId, mode) {
+    function commandOf(ctx, sessionId, line) {
       return (async () => {
         try {
           // Same rule as the read path: the dotted face is a declared injection.
@@ -225,7 +272,7 @@ window.__ModuleLoader__.load({
           if (commands === undefined || commands === null || typeof commands.execute !== 'function') {
             return { ok: false, reason: 'unsupported' }
           }
-          const result = await commands.execute(sessionId, '/dispatch ' + mode, [])
+          const result = await commands.execute(sessionId, line, [])
           if (result === null || typeof result !== 'object' || result.ok !== true) {
             const code = result?.error?.code
             const message = result?.error?.message
@@ -245,12 +292,29 @@ window.__ModuleLoader__.load({
       })()
     }
 
+    /** Switch to one mode through `/dispatch <mode>` (same Host entry as the `/` menu). */
+    function switchModeOf(ctx, sessionId, mode) {
+      return commandOf(ctx, sessionId, '/dispatch ' + mode)
+    }
+
+    /**
+     * Initialize this project through `/dispatch init` (0.18.0): the Host scans
+     * the project, writes `dispatch/protocol.json` with `mode:"full"`, the
+     * detected preset and the allowlist, and refuses to overwrite an existing
+     * file. The client never writes the marker itself.
+     * @param ctx - the plugin context.
+     * @param sessionId - the SessionId the activation belongs to.
+     */
+    function activateProjectOf(ctx, sessionId) {
+      return commandOf(ctx, sessionId, '/dispatch init')
+    }
+
     // --- renderer -----------------------------------------------------------
 
     function DispatchDock(props) {
       const t = typeof props.t === 'function' ? props.t : (key) => key
       const sessionId = props.sessionId
-      const [view, setView] = useState({ mode: undefined, detail: undefined })
+      const [view, setView] = useState({ initialized: undefined, mode: undefined, detail: undefined })
       // `busy` (state) only drives the disabled look: two clicks in the same tick
       // both read the old state, so the ref is the actual synchronous gate.
       const [busy, setBusy] = useState(false)
@@ -265,10 +329,12 @@ window.__ModuleLoader__.load({
         const token = ++revision.current
         Promise.resolve(props.readMode(sessionId)).then((next) => {
           if (!mounted.current || token !== revision.current) return
-          setView(next === null || typeof next !== 'object' ? { mode: undefined, detail: 'unknown' } : next)
+          setView(next === null || typeof next !== 'object'
+            ? { initialized: undefined, mode: undefined, detail: 'unknown' }
+            : next)
         }, (error) => {
           if (!mounted.current || token !== revision.current) return
-          setView({ mode: undefined, detail: String(error?.message ?? error) })
+          setView({ initialized: undefined, mode: undefined, detail: String(error?.message ?? error) })
         })
       }
       loadRef.current = load
@@ -304,6 +370,13 @@ window.__ModuleLoader__.load({
         }
       }, [sessionId])
 
+      /** Readable cause for a refused switch/activation. */
+      const failureDetail = (result) => {
+        if (result?.reason === 'unsupported') return t('unsupported')
+        const detail = detailOf(result)
+        return detail === 'unknown' ? t('unreadable') : detail
+      }
+
       const choose = (mode) => {
         if (busyRef.current) return
         busyRef.current = true
@@ -317,9 +390,7 @@ window.__ModuleLoader__.load({
             loadRef.current()
             return
           }
-          const reason = result?.reason
-          const detail = reason === 'unsupported' ? t('unsupported') : (detailOf(result) === 'unknown' ? t('unreadable') : detailOf(result))
-          setNotice(t('writeFailed', { detail }))
+          setNotice(t('writeFailed', { detail: failureDetail(result) }))
         }, (error) => {
           busyRef.current = false
           if (!mounted.current) return
@@ -328,11 +399,79 @@ window.__ModuleLoader__.load({
         })
       }
 
+      /**
+       * Activate an uninitialized project: run `/dispatch init` through the Host
+       * and re-read afterwards. The Host refuses to overwrite an existing marker,
+       * so a failure is re-checked once — a concurrent activation means "now
+       * initialized", not "activation failed" (spec 2026-11-18 §3.3).
+       */
+      const activate = () => {
+        if (busyRef.current) return
+        if (typeof props.activate !== 'function') {
+          setNotice(t('activateFailed', { detail: t('unsupported') }))
+          return
+        }
+        busyRef.current = true
+        setBusy(true)
+        setNotice(undefined)
+        Promise.resolve(props.activate(sessionId)).then((result) => {
+          busyRef.current = false
+          if (!mounted.current) return
+          setBusy(false)
+          if (result !== null && typeof result === 'object' && result.ok === true) {
+            loadRef.current()
+            return
+          }
+          // Another Session may have initialized the project between the read
+          // and the click; the Host's "already exists" error then means success.
+          Promise.resolve(props.readMode(sessionId)).then((next) => {
+            if (!mounted.current) return
+            if (next !== null && typeof next === 'object' && next.initialized === true) {
+              loadRef.current()
+              return
+            }
+            setNotice(t('activateFailed', { detail: failureDetail(result) }))
+          }, () => {
+            if (!mounted.current) return
+            setNotice(t('activateFailed', { detail: failureDetail(result) }))
+          })
+        }, (error) => {
+          busyRef.current = false
+          if (!mounted.current) return
+          setBusy(false)
+          setNotice(t('activateFailed', { detail: String(error?.message ?? error) }))
+        })
+      }
+
+      const initialized = view !== null && typeof view === 'object' ? view.initialized : undefined
       const mode = view !== null && typeof view === 'object' ? view.mode : undefined
       const known = MODES.includes(mode)
       const detail = view !== null && typeof view === 'object' && typeof view.detail === 'string' ? view.detail : undefined
       const valueText = known ? mode : t('modeUnknown')
       const valueTitle = known ? undefined : t('unknownHint', { detail: detail === undefined ? t('unreadable') : detail })
+      const noticeNode = notice === undefined ? null : h('span', { className: 'ddp-notice', role: 'status' }, notice)
+
+      // `.ddp-frame` mirrors the host composer root (side padding + centered
+      // items); `.ddp-dock` mirrors the card (100%, capped by the card width).
+      const frame = (children) => h('div', { className: 'ddp-frame' },
+        h('div', { className: 'ddp-dock', role: 'group', 'aria-label': t('title') }, children))
+
+      if (initialized === false) {
+        // No marker yet: the Host still runs its `auto` fallback, but the dock
+        // must not show mode chips for a project that never opted in (0.18.0).
+        return frame([
+          h('span', { className: 'ddp-label' }, t('title')),
+          h('span', { className: 'ddp-value ddp-valueUnknown', title: t('activateHint') }, t('inactive')),
+          h('button', {
+            type: 'button',
+            className: 'ddp-activate',
+            disabled: busy,
+            title: t('activateHint'),
+            onClick: activate,
+          }, t('activate')),
+          noticeNode,
+        ])
+      }
 
       const buttons = MODES.map((candidate) => {
         const className = 'ddp-mode' + (candidate === mode ? ' ddp-modeCurrent' : '')
@@ -347,17 +486,15 @@ window.__ModuleLoader__.load({
         }, candidate)
       })
 
-      // `.ddp-frame` mirrors the host composer root (side padding + centered
-      // items); `.ddp-dock` mirrors the card (100%, capped by the card width).
-      return h('div', { className: 'ddp-frame' },
-        h('div', { className: 'ddp-dock', role: 'group', 'aria-label': t('title') },
-          h('span', { className: 'ddp-label' }, t('title')),
-          h('span', {
-            className: known ? 'ddp-value' : 'ddp-value ddp-valueUnknown',
-            title: valueTitle,
-          }, valueText),
-          h('span', { className: 'ddp-modes' }, buttons),
-          notice === undefined ? null : h('span', { className: 'ddp-notice', role: 'status' }, notice)))
+      return frame([
+        h('span', { className: 'ddp-label' }, t('title')),
+        h('span', {
+          className: known ? 'ddp-value' : 'ddp-value ddp-valueUnknown',
+          title: valueTitle,
+        }, valueText),
+        h('span', { className: 'ddp-modes' }, buttons),
+        noticeNode,
+      ])
     }
 
     // --- plugin -------------------------------------------------------------
@@ -395,6 +532,7 @@ window.__ModuleLoader__.load({
         notify,
         readMode: (sessionId) => readModeOf(ctx, sessionId),
         switchMode: (sessionId, mode) => switchModeOf(ctx, sessionId, mode),
+        activate: (sessionId) => activateProjectOf(ctx, sessionId),
         subscribe: (listener) => {
           if (typeof listener !== 'function') return undefined
           listeners.add(listener)
@@ -418,6 +556,7 @@ window.__ModuleLoader__.load({
           sessionId,
           readMode: api.readMode,
           switchMode: api.switchMode,
+          activate: api.activate,
           subscribe: api.subscribe,
         }),
       }, DispatchDock)), 'dispatch-protocol: input dock')
@@ -428,7 +567,7 @@ window.__ModuleLoader__.load({
     exports.inject = inject
     // Exposed for the offline regression: locale/*.json must mirror these.
     exports.dictionaries = { zh, en }
-    exports.pure = { modeOfText, modeLabelKey, detailOf, MARKER_PATH, MODES }
+    exports.pure = { modeOfText, modeLabelKey, detailOf, dockStateOf, MARKER_PATH, MODES }
     return module.exports
   },
 })
