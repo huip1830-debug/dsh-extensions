@@ -1,6 +1,6 @@
 // dispatch-protocol — always-on dispatch discipline for DSH sessions.
 //
-// Four mechanisms, all DSH-only:
+// Three mechanisms, all DSH-only:
 //   1. One system-prompt section, so every request (main agent and every
 //      subagent) carries the six dispatch rules. Independent of which skills
 //      the model chose to load.
@@ -17,13 +17,15 @@
 //      Delivery waits for the parent's next turn-stopping, so a parent that
 //      already acted on the report is skipped instead of re-reminded.
 //      Static rules alone get skipped; a timed reminder does not.
-//   4. 状态闸门（0.6.0/0.7.0）：WaitGate（等待期只读轮询）、VerifyGate（验证后
-//      又改却准备 present/commit）、ContractGate（有子代理在跑时改写契约文件）、
-//      ReviewGate（只读评审后改动工作区）与 HandoffGate（空回合兜底）各提醒一次。
-//      它们排在 checkpoint 之后，每回合最多一条；判据只读已提交事件，
-//      不拦截任何工具调用。证据 session-92f462d1：66 次状态查询轮询；最终 diff
-//      在最后一次集成命令（事件 1112）之后又被改却准备收口；契约在线改写、评审
-//      后未重开、空回合中断也是同一会话的形态。
+//
+// 0.17.0 removed the five turn-end state gates（Wait / Verify / Contract /
+// Review / Handoff）. They were checkable reminders about the turn just closed,
+// and in real sessions they almost never changed the next action: each one cost
+// an extra model step in the same turn, added a message the user had to read,
+// and the evidence they recited was already in the observation row and the
+// decision log. The write guard (before the action) and the checkpoint (after a
+// child settles) are the two corrections that demonstrably worked; the rest was
+// narration.
 //
 // Every guard decision that is not a control-plane write — allowed by override,
 // denied, or denied in shadow mode — is appended to one shared decision log, so
@@ -52,18 +54,13 @@
 //     `turn`, `name` and JSON `arguments`.
 import { randomBytes, randomUUID } from 'node:crypto'
 import {
-  appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { AUTO_TEXT, resolveConfig, resolveRulesPreset } from './lib/config.mjs'
 import { DEFAULT_PROJECT_SWITCH, PROJECT_MODES, readProjectMode, readProjectPolicy, writeProjectMode } from './lib/project.mjs'
 import { callTouchesFile, summarizeTurn } from './lib/tool-calls.mjs'
 import { evaluateWritePolicy, normalizePath, renderDenyText, toCwdRelative } from './lib/write-policy.mjs'
-import {
-  evaluateContractGate, evaluateHandoffGate, evaluateReviewGate,
-  evaluateVerifyGate, evaluateWaitGate,
-  renderContractGate, renderHandoffGate, renderReviewGate, renderVerifyGate, renderWaitGate,
-} from './lib/gates.mjs'
 
 export const name = 'dispatch-protocol'
 export const inject = ['systemPrompt', 'agents', 'tools']
@@ -72,63 +69,25 @@ export const inject = ['systemPrompt', 'agents', 'tools']
 // 0.15.0 项目策略文件（spec `2026-11-17-project-policy-design.md` §2.3）：把
 // `dispatch/protocol.json` 里出现的字段投影到「本次判定」的配置副本上。
 //
-// 三个投影点共用一条口径：字段缺省即回落 profile 的原值；只读、不缓存判定结果
+// 两个投影点共用一条口径：字段缺省即回落 profile 的原值；只读、不缓存判定结果
 // （策略文件按 `(路径, mtime)` 记忆化在 `lib/project.mjs` 里），且返回的必须是
-// 新对象——profile 配置是进程级共享的，就地改 `config.gates` / `config.writePolicy`
-// 会让一个项目的策略泄漏到其它项目。
-
-/**
- * 把策略字段并入一次闸门判定用的 gates（§2.3 五闸门一行）。
- *
- * `verify.commands` / `contract.patterns` 逐字段覆盖；`docs.patterns` 与
- * `controlPlanePatterns` 同时挂到 verify 与 review——0.12 起 review 复用
- * verify.docPatterns，两处不同源会让评审闸门按另一套口径判定（spec §2.3 明示
- * 「保持同源」）。
- * @param gates - 已解析的 `gates` 段（profile 值）。
- * @param policy - `readProjectPolicy` 的返回值；缺字段即回落。
- * @returns 供本次判定使用的新 gates 对象；`gates` 本身不被修改。
- */
-function applyPolicyToGates(gates, policy) {
-  if (policy === undefined || policy === null) return gates
-  return {
-    ...gates,
-    verify: {
-      ...gates.verify,
-      ...(policy.verifyCommands === undefined ? {} : { commands: policy.verifyCommands }),
-      ...(policy.docsPatterns === undefined ? {} : { docPatterns: policy.docsPatterns }),
-      ...(policy.controlPlanePatterns === undefined ? {} : { controlPlanePatterns: policy.controlPlanePatterns }),
-    },
-    contract: {
-      ...gates.contract,
-      ...(policy.contractPatterns === undefined ? {} : { patterns: policy.contractPatterns }),
-    },
-    review: {
-      ...gates.review,
-      ...(policy.docsPatterns === undefined ? {} : { docPatterns: policy.docsPatterns }),
-      ...(policy.controlPlanePatterns === undefined ? {} : { controlPlanePatterns: policy.controlPlanePatterns }),
-    },
-  }
-}
+// 新对象——profile 配置是进程级共享的，就地改 `config.writePolicy` 会让一个
+// 项目的策略泄漏到其它项目。
 
 /**
  * 把策略字段并入一次写入判定用的 writePolicy 副本（§2.3 写入守卫一行）。
  *
- * `controlPlanePatterns` 一并带上：`evaluateWritePolicy` 目前不消费它，但判定的
- * 配置面上要能回答「这个项目把哪些路径算控制面」——后续机制读同一份副本即可，
- * 不必再各读一次策略文件。
+ * 0.17.0 起项目策略只剩 `mode` / `rules` / `allowlist` 三个字段：原先给五个
+ * 收尾闸门用的 `controlPlanePatterns` / `verify.commands` / `contract.patterns`
+ * / `docs.patterns` 随闸门一并删除。
  * @param writePolicy - 已解析的 `writePolicy` 段（profile 值）。
  * @param policy - `readProjectPolicy` 的返回值；缺字段即回落。
  * @returns 供本次判定使用的新 writePolicy 对象；`writePolicy` 本身不被修改。
  */
 function applyPolicyToWritePolicy(writePolicy, policy) {
   const allowlist = policy?.allowlist
-  const controlPlanePatterns = policy?.controlPlanePatterns
-  if (allowlist === undefined && controlPlanePatterns === undefined) return writePolicy
-  return {
-    ...writePolicy,
-    ...(allowlist === undefined ? {} : { allowlist }),
-    ...(controlPlanePatterns === undefined ? {} : { controlPlanePatterns }),
-  }
+  if (allowlist === undefined) return writePolicy
+  return { ...writePolicy, allowlist }
 }
 
 /**
@@ -261,57 +220,18 @@ function isPlainRecord(value) {
 /**
  * 扫描项目并生成 `dispatch/protocol.json` 的内容（§2.5，全部 best-effort）。
  *
- * 每一段检测独立回落：读不到 `package.json`、目录不可列、没有锁文件都只是少
- * 写一个字段，绝不抛错。检测到的字段才写进文件——空数组在读取侧是非法字段
- * （`readProjectPolicy` 会丢掉它），写进文件只会造成误导。
+ * 0.17.0 起策略只剩 `mode` / `rules` / `allowlist`：五个收尾闸门删除后，
+ * 它们的验证命令 / 契约面 / 文档口径字段一并删除。检测失败只回落默认值，绝不
+ * 抛错。
  * @param cwd - 会话工作目录。
  * @returns the policy document to write.
  */
 function detectProjectPolicy(cwd) {
-  const has = (relative) => existsSync(join(cwd, ...relative.split('/')))
-  let entries = []
-  try {
-    entries = readdirSync(cwd)
-  } catch {
-    entries = []
-  }
-  const lowerEntries = entries.map(entry => entry.toLowerCase())
-  const hasEntry = (name) => lowerEntries.includes(name.toLowerCase())
-  const hasSuffix = (suffix) => lowerEntries.some(entry => entry.endsWith(suffix))
-
   const packageJson = readJsonFile(join(cwd, 'package.json'))
   const hasPackageJson = isPlainRecord(packageJson)
-  const scripts = hasPackageJson && isPlainRecord(packageJson.scripts) ? packageJson.scripts : {}
 
-  // 包管理器：锁文件优先（spec §2.5 的顺序）；有 package.json 但没有锁文件时按
-  // npm（npm 是基线，缺锁文件的检出仍能跑起来）。
-  const manager = hasEntry('pnpm-lock.yaml') ? 'pnpm'
-    : hasEntry('yarn.lock') ? 'yarn'
-      : hasEntry('package-lock.json') ? 'npm'
-        : hasPackageJson ? 'npm' : undefined
-
-  const commands = []
-  for (const name of ['test', 'typecheck', 'build']) {
-    const script = scripts[name]
-    if (typeof script !== 'string' || script.trim() === '') continue
-    commands.push(name === 'test'
-      ? `${manager} test`
-      : manager === 'npm' ? `npm run ${name}` : `${manager} ${name}`)
-  }
-  if (hasEntry('uv.lock') || hasEntry('pyproject.toml')) commands.push('uv run pytest')
-  if (hasSuffix('.csproj') || hasSuffix('.sln')) commands.push('dotnet test')
-
-  // 文档目录：存在 docs/ 时把整棵目录纳入主控白名单与文档判定。
-  const hasDocs = has('docs')
-  const allowlist = hasDocs ? ['dispatch/', 'docs/'] : ['dispatch/']
-  const docsPatterns = hasDocs ? ['.md', 'docs/'] : ['.md']
-
-  const contractPatterns = []
-  if (has('src/types')) contractPatterns.push('src/types/')
-  if (has('prisma/schema.prisma')) contractPatterns.push('prisma/schema.prisma')
-  for (const name of ['openapi.yaml', 'openapi.yml', 'openapi.json']) {
-    if (hasEntry(name)) contractPatterns.push(name)
-  }
+  // 文档目录：存在 docs/ 时把整棵目录纳入主控白名单。
+  const allowlist = existsSync(join(cwd, 'docs')) ? ['dispatch/', 'docs/'] : ['dispatch/']
 
   // 预设：DSH 插件（package.json#dsh.bundle / dsh.client）用 plugin 规则，其余
   // 项目用精简的 business 规则（spec §2.5 第 1 步）。
@@ -322,10 +242,6 @@ function detectProjectPolicy(cwd) {
     mode: 'full',
     rules,
     allowlist,
-    controlPlanePatterns: allowlist.slice(),
-    ...(commands.length === 0 ? {} : { verify: { commands } }),
-    ...(contractPatterns.length === 0 ? {} : { contract: { patterns: contractPatterns } }),
-    docs: { patterns: docsPatterns },
   }
 }
 
@@ -347,11 +263,9 @@ function runInit(cwd, projectSwitch) {
     }
     const document = detectProjectPolicy(cwd)
     writeJsonAtomically(resolved.file, document)
-    const commandCount = document.verify?.commands?.length ?? 0
-    const contractCount = document.contract?.patterns?.length ?? 0
     return {
       kind: 'success',
-      text: `已生成 ${resolved.relative}（preset: ${document.rules}，命令 ${commandCount} 条，契约面 ${contractCount} 个）；随时 /dispatch off|auto|shadow|full 切档`,
+      text: `已生成 ${resolved.relative}（preset: ${document.rules}，白名单 ${document.allowlist.length} 项）；随时 /dispatch off|auto|shadow|full 切档`,
     }
   } catch (error) {
     const detail = error?.message === undefined ? '' : `（${error.message}）`
@@ -428,7 +342,7 @@ function steerText(agent, text) {
  * a full disk or a bad path must never close a turn.
  * @param log - the resolved decision-log path, or false when logging is off.
  * @param agent - the agent the decision belongs to.
- * @param payload - `{ turn, kind, decision, reason?, childId?, label?, writes?, files?, delegations?, gate?, observations?, changes?, lastVerify?, emptyTurns?, tool?, file?, mode? }`.
+ * @param payload - `{ turn, kind, decision, reason?, childId?, label?, writes?, files?, delegations?, tool?, file?, mode? }`.
  */
 function recordDecision(log, agent, payload) {
   if (log === false) return
@@ -445,17 +359,6 @@ function recordDecision(log, agent, payload) {
       ...(payload.writes === undefined ? {} : { writes: payload.writes }),
       ...(payload.files === undefined ? {} : { files: payload.files }),
       ...(payload.delegations === undefined ? {} : { delegations: payload.delegations }),
-      // 0.6.0 状态闸门：与 checkpoint、写入守卫共用同一份决定日志。`gate` 区分
-      // wait/verify；`observations` 与 `changes`/`lastVerify` 是各自的事实字段。
-      ...(payload.gate === undefined ? {} : { gate: payload.gate }),
-      ...(payload.observations === undefined ? {} : { observations: payload.observations }),
-      ...(payload.changes === undefined ? {} : { changes: payload.changes }),
-      ...(payload.lastVerify === undefined ? {} : { lastVerify: payload.lastVerify }),
-      // 0.10.0 C4：ReviewGate 记录「这批脏改动是不是纯文档/控制面」，日志里能
-      // 区分「换了文案的提醒」与「真的重开代码切片」。
-      ...(payload.docOnly === undefined ? {} : { docOnly: payload.docOnly }),
-      // 0.7.0 HandoffGate：连续空回合数，供日志回答「到底空了多久」。
-      ...(payload.emptyTurns === undefined ? {} : { emptyTurns: payload.emptyTurns }),
       // 0.9.0 写入守卫：`tool`/`file` 是被放行或被拦下的具体调用，`mode` 区分
       // enforce 与 shadow（shadow 只记日志、绝不拦）。守卫的记录没有回合，`turn`
       // 落成 null。
@@ -599,7 +502,7 @@ const COMMAND_USAGE = '用法：/dispatch [off|auto|shadow|full|init]（无参=�
  * 命令是「文件唯一真相」的第二个写入口：无参读 `readProjectMode`，带参写
  * `writeProjectMode`（0.15.0 起走 `mergeModeIntoPolicyFile`，只替换 mode 并保留
  * 策略字段），`init` 生成一份项目策略文件（spec §2.5），和 UI 控件读写同一个
- * 标记文件。不写决定日志——日志只记守卫/闸门/检查点的判定，命令是用户显式
+ * 标记文件。不写决定日志——日志只记守卫/检查点的判定，命令是用户显式
  * 动作，不需要记账。
  *
  * 注册用可选服务注入 `ctx.inject(['commands'], …)`，而不是插件顶层的 `inject`
@@ -748,7 +651,7 @@ export function apply(ctx, rawConfig) {
 
   // 0.9.0：顶层 `enabled` 是**总开关**。0.8.x 里它只关提示词 section，写入守卫与
   // 收尾提醒照旧注册——插件页上「关闭」和实际行为不一致（守卫仍在拦、提醒仍在
-  // 发）。关闭即什么都不注册：无 section、无写入守卫、无 checkpoint/观测/闸门。
+  // 发）。关闭即什么都不注册：无 section、无写入守卫、无 checkpoint/观测。
   if (!config.enabled) return
 
   // 0.13.0 项目级开关（spec §3.3）：`text` 从定值改成函数，每次 assemble 按会话
@@ -799,21 +702,19 @@ export function apply(ctx, rawConfig) {
 /**
  * Run the reminders from one turn-stopping handler per agent.
  *
- * The completion checkpoint is judged first and a delivered checkpoint owns the
- * turn, so a gate never shares a turn with it — no dependence on subscription
- * order, and only one `steer` per turn. 0.6.0 inserts the event gates after the
- * checkpoint; 0.7.0 extends the gate order to Wait → Verify → Contract → Review
- * → Handoff. 0.9.0 removes the missed-dispatch nudge entirely: the write guard
- * (see `makeGuard`) now owns that constraint at the tool boundary, so this
- * function only accounts for checkpoint / observation / gate decisions. Turn
- * state is keyed by parent id.
+ * The completion checkpoint is judged at the parent's first turn-stopping after
+ * the child settles, and a delivered checkpoint owns the turn — only one
+ * `steer` per turn. 0.9.0 removed the missed-dispatch nudge (the write guard
+ * owns that constraint at the tool boundary). 0.17.0 removed the five turn-end
+ * state gates, so this function now accounts for checkpoint and observation
+ * decisions only. Turn state is keyed by parent id.
  * @param ctx - the plugin context.
- * @param config - the resolved plugin config (`log`, `writePolicy`, `checkpoint`,
- *   `observation`, `gates` are read here).
+ * @param config - the resolved plugin config (`log`, `writePolicy`, `checkpoint`
+ *   and `observation` are read here).
  */
 function registerReminders(ctx, config) {
-  const { log, writePolicy, checkpoint, observation, gates } = config
-  if (!checkpoint.enabled && !observation.enabled && !gates.enabled) return
+  const { log, writePolicy, checkpoint, observation } = config
+  if (!checkpoint.enabled && !observation.enabled) return
 
   /** childId → `{ parentId, label, agent }` for settlement lookup. */
   const children = new Map()
@@ -824,34 +725,11 @@ function registerReminders(ctx, config) {
   const watched = new Set()
 
   // One log for every mechanism: the top-level `log` key (0.9.0; it replaced
-  // `nudge.log`), `false` silences checkpoint, write-guard and state-gate
-  // decisions too.
+  // `nudge.log`), `false` silences checkpoint and write-guard decisions too.
   const decisionLog = log
 
-  const lastDeliveredTurn = new Map()
   /** parentId → last turn number that already produced one observation row (0.4.1). */
   const lastObservedTurn = new Map()
-  /** parentId → last turn number that already produced one gate message (0.6.0). */
-  const lastGateTurn = new Map()
-  /**
-   * parentId → Map<childId, `{ label, ended }`>（0.7.0 ContractGate）。
-   * 不删除已结束项：收尾判定要区分「有活跃子代理」与「本轮有过子代理」，
-   * 删除会让刚结束的子代理看起来从未存在。
-   */
-  const activeChildren = new Map()
-  /**
-   * parentId → `{ pending, warned, since }`（0.7.0 ReviewGate）。
-   * `since` 是评审完成时父事件的长度，即「此后的写入才算评审后改动」的边界；
-   * `dirty` 不落状态，判定时从 `since` 往后扫，避免在每次 tool 事件上记账。
-   */
-  const reviewState = new Map()
-  /**
-   * parentId → Set<childId>（契约 §12-B）：已处理过 completed 的评审子代理。
-   * 重复 settle 若再次建立基线，会把 warned 重置成 false，让同一轮评审多提醒
-   * 一次；与 checkpoint 的 `reported` 同思路，只认第一次。新评审 child 的 id
-   * 不同，仍会正常建立新基线。
-   */
-  const reviewSettled = new Map()
 
   const render = (record, childId) => checkpoint.text
     .replaceAll('{childId}', childId)
@@ -959,103 +837,6 @@ function registerReminders(ctx, config) {
     return result
   }
 
-  /** label 是否命中只读评审前缀（0.7.0 ReviewGate）。 */
-  const isReviewLabel = (label) => typeof label === 'string'
-    && gates.review.labelPrefixes.some(prefix => label.startsWith(prefix))
-
-  /** 该 parent 下收尾时刻仍未结束的子代理数（0.7.0 ContractGate）。 */
-  const activeChildCount = (parentId) => {
-    const map = activeChildren.get(parentId)
-    if (map === undefined) return 0
-    let count = 0
-    for (const record of map.values()) if (record.ended !== true) count += 1
-    return count
-  }
-
-  /**
-   * 判定并投递本回合的状态闸门（0.6.0/0.7.0，契约 §3-§6）。
-   *
-   * 顺序固定 Wait → Verify → Contract → Review → Handoff：一个回合最多一条
-   * 闸门消息（`lastGateTurn` 去重），投递后设 `lastDeliveredTurn`，本回合不再投
-   * 第二条提醒（0.9.0 起收尾只剩闸门与 checkpoint 两个候选）。
-   * 只对根代理生效：子代理不能再派发，它们的写入也已经记在父回合里，提醒子
-   * 代理只会多一条噪音。全程 try/catch——闸门读的是宿主日志，解析失败或宿主
-   * 接口变动都不该让回合失败（与 observation 的防御口径一致）。
-   * @param target - 正在收尾的代理。
-   * @param parentId - 该代理的会话 id。
-   * @param turn - 正在收尾的回合。
-   * @param isRootAgent - 是否根代理。
-   * @returns true 表示本回合投递了一条闸门消息。
-   */
-  const evaluateGates = (target, parentId, turn, isRootAgent) => {
-    if (!gates.enabled || !isRootAgent) return false
-    // 同回合已经投递过任何提醒（checkpoint/闸门）就不再投闸门：那条
-    // steer 已让本回合多跑一步，第二次收尾再发就是同回合两条 steer。契约
-    // §11-A 的硬边界；`lastGateTurn` 只防闸门自己重复。
-    if (!Number.isInteger(turn)
-      || lastGateTurn.get(parentId) === turn
-      || lastDeliveredTurn.get(parentId) === turn) return false
-    try {
-      const events = target?.session?.snapshotEvents?.() ?? []
-      // 0.11.0 D2：闸门用的 cwd 与写入守卫同源（`session.cwd ?? header.cwd`）；
-      // 分类器靠它把绝对路径相对化，取不到时按保守口径把写入当代码。
-      const cwd = target?.session?.cwd ?? target?.session?.header?.cwd
-      // 0.13.0 项目级开关（spec §3.3）：`off` 的项目不投递任何状态闸门；0.16.0
-      // 的 `auto` 是默认档，同样不投递（闸门只在 full/shadow 生效）。判定放在
-      // cwd 之后、任何 `deliver` 之前，本回合继续走观测与收尾。
-      // 0.15.0（spec §2.3）：一次读取带回策略字段，构造本回合的 `effectiveGates`
-      // ——纯函数返回新对象，不改 `config.gates`；闸门文案仍取 profile 的值。
-      const projectPolicy = readProjectPolicy(cwd, config.projectSwitch)
-      if (projectPolicy.mode === 'off' || projectPolicy.mode === 'auto') return false
-      const effectiveGates = applyPolicyToGates(gates, projectPolicy)
-      /** 投递一条闸门消息：steer + 决定日志 + 本回合去重。 */
-      const deliver = (text, payload) => {
-        steerText(target, text)
-        recordDecision(decisionLog, target, { turn, kind: 'gate', decision: 'delivered', ...payload })
-        lastGateTurn.set(parentId, turn)
-        lastDeliveredTurn.set(parentId, turn)
-        return true
-      }
-      // 派发工具名复用写入守卫的解析结果：两套名单若各写一份，配置改了其中
-      // 一处就会出现「守卫认为派发过、闸门认为干等」的矛盾（spec §3）。
-      const wait = evaluateWaitGate(events, turn, effectiveGates, writePolicy.delegationTools)
-      if (wait !== null) return deliver(renderWaitGate(gates.wait.text, wait), { gate: 'wait', observations: wait.count })
-
-      const verify = evaluateVerifyGate(events, turn, effectiveGates, cwd)
-      if (verify !== null) {
-        return deliver(renderVerifyGate(gates.verify.text, verify),
-          { gate: 'verify', changes: verify.changes, lastVerify: verify.lastVerify })
-      }
-
-      const contract = evaluateContractGate(events, turn, effectiveGates, activeChildCount(parentId))
-      if (contract !== null) {
-        return deliver(renderContractGate(gates.contract.text, contract), { gate: 'contract', files: contract.files })
-      }
-
-      const review = evaluateReviewGate(events, effectiveGates, reviewState.get(parentId), cwd)
-      if (review !== null) {
-        // 0.11.0 D4：文案模型统一——`renderReviewGate` 按 `docOnly` 自己选
-        // `{action}`（文档/控制面改动只提示机器校验，混合代码时重开受影响切片）。
-        const delivered = deliver(renderReviewGate(gates.review.text, review),
-          { gate: 'review', files: review.files, docOnly: review.docOnly })
-        // 同一轮评审只提醒一次；下一轮评审 created 或任一评审 completed 时重置
-        // （契约 §4/§11-B/§12-B）。
-        const state = reviewState.get(parentId)
-        if (state !== undefined) state.warned = true
-        return delivered
-      }
-
-      const handoff = evaluateHandoffGate(events, turn, effectiveGates)
-      if (handoff !== null) {
-        return deliver(renderHandoffGate(gates.handoff.text, handoff), { gate: 'handoff', emptyTurns: handoff.emptyTurns })
-      }
-      return false
-    } catch {
-      // 提醒是建议性的：判定失败时保持静默，绝不阻断回合。
-      return false
-    }
-  }
-
   /**
    * Append one observation row for a root-agent turn that wrote or delegated
    * (0.4.0, G1/G7 evidence floor).
@@ -1131,22 +912,9 @@ function registerReminders(ctx, config) {
     const handle = ({ agent: scopedAgent, turn } = {}) => {
       try {
         const target = scopedAgent ?? agent
-        const verdict = checkpoint.enabled
-          ? drain(parentId, target, turn)
-          : { delivered: false, handled: false, readOnly: false, empty: true }
-        if (verdict.delivered) {
-          if (Number.isInteger(turn)) lastDeliveredTurn.set(parentId, turn)
-          observeTurn(target, parentId, turn, isRootAgent)
-          return
-        }
-        // 0.6.0：闸门排在 checkpoint 之后（契约 §5）。checkpoint 已投递会直接
-        // return，所以这里只在它让位时执行。闸门投递后设 `lastDeliveredTurn`，
-        // 但仍补一条观测行保持语义。0.9.0 之后本回合不再有第二个提醒候选——
-        // 漏派发约束已前移到工具边界（`makeGuard`），收尾只做观测。
-        if (evaluateGates(target, parentId, turn, isRootAgent)) {
-          observeTurn(target, parentId, turn, isRootAgent)
-          return
-        }
+        // 0.17.0：收尾只有一个提醒候选（checkpoint）；五个状态闸门已删除，
+        // 本回合不再因为「刚发生的事实」多跑一步。
+        if (checkpoint.enabled) drain(parentId, target, turn)
         observeTurn(target, parentId, turn, isRootAgent)
       } catch {
         // Observation is advisory: never fail a turn on it.
@@ -1164,17 +932,6 @@ function registerReminders(ctx, config) {
       const parentId = header.parentSession
       const label = readLabel(agent) ?? '未命名'
       children.set(agent.id, { parentId, label, agent })
-      // 0.7.0 ContractGate：登记 active child；已结束项不删除，收尾判定看
-      // `ended` 标记，而不是「有没有登记过」。
-      let active = activeChildren.get(parentId)
-      if (active === undefined) {
-        active = new Map()
-        activeChildren.set(parentId, active)
-      }
-      active.set(agent.id, { label, ended: false })
-      // 0.7.0 ReviewGate：新一轮只读评审开始就覆盖上一轮的 pending/dirty/warned，
-      // 因为上一轮评审的结论已被这次评审取代（契约 §4）。
-      if (isReviewLabel(label)) reviewState.set(parentId, { pending: false, warned: false, since: undefined })
     }
     attach(agent)
   })
@@ -1183,41 +940,6 @@ function registerReminders(ctx, config) {
     const childId = info?.childId ?? info?.id
     const record = childId === undefined ? undefined : children.get(childId)
     const stopReason = info?.stopReason ?? info?.outcome ?? info?.terminal?.stopReason
-
-    // 0.7.0：先更新闸门状态，再走 checkpoint 的早退（契约 §6）。checkpoint
-    // 的行为与文案不变；即使 checkpoint 关闭，闸门仍需要 ended/pending。
-    if (record !== undefined) {
-      const active = activeChildren.get(record.parentId)?.get(childId)
-      if (active !== undefined) active.ended = true
-      if (isReviewLabel(record.label) && stopReason === 'completed') {
-        let settled = reviewSettled.get(record.parentId)
-        if (settled === undefined) {
-          settled = new Set()
-          reviewSettled.set(record.parentId, settled)
-        }
-        // 重复 settle 直接跳过：否则会把 warned 重置，同一轮评审再提醒一次。
-        if (!settled.has(childId)) {
-          settled.add(childId)
-          const parent = ctx.agents?.get?.(record.parentId)
-          let since = 0
-          try {
-            since = parent?.session?.snapshotEvents?.()?.length ?? 0
-          } catch {
-            since = 0
-          }
-          const state = reviewState.get(record.parentId) ?? { pending: false, warned: false, since: undefined }
-          // 契约 §11-B：任一评审子代理完成都建立新基线——pending 置真、`since`
-          // 取 max(旧值, 当前父事件长度)（并行切片晚完成时基线只前进不倒退）、
-          // warned 重置。否则第二个评审完成后的写入会被旧 warned 永久静音。
-          const oldSince = Number.isInteger(state.since) ? state.since : 0
-          reviewState.set(record.parentId, {
-            pending: true,
-            warned: false,
-            since: Math.max(oldSince, since),
-          })
-        }
-      }
-    }
 
     if (!checkpoint.enabled) return
     if (record === undefined || reported.has(childId)) return

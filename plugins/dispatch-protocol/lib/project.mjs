@@ -9,10 +9,13 @@
 //
 // 0.15.0：标记文件升级成「项目策略文件」（spec
 // `2026-11-17-project-policy-design.md` §2.1/§2.2）。`readProjectPolicy` 返回
-// `{ mode, rules?, allowlist?, controlPlanePatterns?, verifyCommands?,
-// contractPatterns?, docsPatterns? }`，只带「文件里有效出现的字段」；缺省字段
+// `{ mode, rules?, allowlist? }`，只带「文件里有效出现的字段」；缺省字段
 // 不出现，由调用方回落 profile 配置。`readProjectMode` 保留为
 // `readProjectPolicy(...).mode` 的薄封装（0.13 调用面不断裂）。
+//
+// 0.17.0：五个收尾闸门删除后，只有闸门消费的 `controlPlanePatterns` /
+// `verify.commands` / `contract.patterns` / `docs.patterns` 一并删除；策略文件
+// 里写这些字段不再有效果（读取侧忽略，不报错）。
 //
 // 0.16.0：默认档从 `full` 改为 `auto`（spec
 // `2026-11-18-dispatch-auto-mode-design.md` §2.1）——没有标记文件的项目只注入
@@ -96,20 +99,6 @@ function validStringList(value) {
 }
 
 /**
- * 秒读一个 `{ key: string[] }` 子段（`verify.commands` / `contract.patterns` /
- * `docs.patterns`）。子段缺失或不是 plain object 都返回 undefined。
- * @param document - 策略文件解析结果。
- * @param section - 子段名（`verify` / `contract` / `docs`）。
- * @param key - 子段里的数组字段名（`commands` / `patterns`）。
- * @returns 非空字符串数组的副本，或 undefined。
- */
-function readNestedList(document, section, key) {
-  const group = document[section]
-  if (!isPlainObject(group)) return undefined
-  return validStringList(group[key])
-}
-
-/**
  * `mode` / `enabled` 的判定（0.16.0：文档为空或只有策略字段时回落 auto）：
  * `mode` 命中四档优先，其次 `enabled: false → 'off'`、`enabled: true → 'full'`，
  * 其余 `'auto'`。
@@ -136,14 +125,6 @@ function buildPolicy(document) {
   if (RULE_PRESETS.includes(document.rules)) policy.rules = document.rules
   const allowlist = validStringList(document.allowlist)
   if (allowlist !== undefined) policy.allowlist = allowlist
-  const controlPlanePatterns = validStringList(document.controlPlanePatterns)
-  if (controlPlanePatterns !== undefined) policy.controlPlanePatterns = controlPlanePatterns
-  const verifyCommands = readNestedList(document, 'verify', 'commands')
-  if (verifyCommands !== undefined) policy.verifyCommands = verifyCommands
-  const contractPatterns = readNestedList(document, 'contract', 'patterns')
-  if (contractPatterns !== undefined) policy.contractPatterns = contractPatterns
-  const docsPatterns = readNestedList(document, 'docs', 'patterns')
-  if (docsPatterns !== undefined) policy.docsPatterns = docsPatterns
 
   return policy
 }
@@ -182,7 +163,7 @@ function readPolicyDocument(file) {
  * 仍是 `full`）。永不抛错。
  * @param cwd - 会话工作目录（`session.cwd ?? session.header.cwd`）。
  * @param projectSwitch - 已解析的 `projectSwitch` 段；缺省用默认值。
- * @returns `{ mode, rules?, allowlist?, controlPlanePatterns?, verifyCommands?, contractPatterns?, docsPatterns? }`。
+ * @returns `{ mode, rules?, allowlist? }`。
  */
 export function readProjectPolicy(cwd, projectSwitch) {
   try {

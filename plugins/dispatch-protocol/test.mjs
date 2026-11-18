@@ -6,7 +6,7 @@
 //   - `ctx.systemPrompt.section(section)` (the system-prompt registry)
 //   - `ctx.tools.guard(fn)` (0.9.0 write guard; `h.guard(exec)` replays a call)
 //   - `agent/created` / `subagent/end` (root event bus)
-//   - `agent.ctx.on('agent/turn-stopping')` + `agent.steer` (checkpoint and gates)
+//   - `agent.ctx.on('agent/turn-stopping')` + `agent.steer` (checkpoint)
 //   - `session.snapshotEvents()` (committed `tool/call` records)
 //   - `session.cwd` / `session.createdAt` (write-policy path and freshness)
 import test from 'node:test'
@@ -23,16 +23,12 @@ import {
   DEFAULT_PROJECT_SWITCH, PROJECT_MODES, readProjectMode, readProjectPolicy, writeProjectMode,
 } from './lib/project.mjs'
 import {
-  ARTIFACT, callTouchesFile, classifyPath, controlPlaneOnlyShellWrite, DEFAULT_CONTROL_PLANE_PATTERNS,
-  DEFAULT_PWSH_MUTATION_PATTERN, DEFAULT_PWSH_SHELL_PATTERN, readWorkdir, summarizeTurn,
+  ARTIFACT, callTouchesFile, classifyPath, DEFAULT_CONTROL_PLANE_PATTERNS,
+  DEFAULT_DOC_PATTERNS, DEFAULT_PWSH_MUTATION_PATTERN, DEFAULT_PWSH_SHELL_PATTERN, readWorkdir, summarizeTurn,
 } from './lib/tool-calls.mjs'
 import {
   DEFAULT_ALLOWLIST, DEFAULT_OVERRIDE_PATH, DEFAULT_WRITE_POLICY_MODE, resolveWritePolicy,
 } from './lib/write-policy.mjs'
-import {
-  analyzeVerification, DEFAULT_DOC_PATTERNS, evaluateReviewGate, evaluateVerifyGate, isRestoreCommand,
-  matchesVerifyCommand, renderGateText, renderReviewGate, renderVerifyGate, resolveGates,
-} from './lib/gates.mjs'
 
 // Reminder behaviour is asserted from the harness messages. Decision logging
 // stays off so a test run never appends to the real `%TEMP%` decision log; the
@@ -187,11 +183,9 @@ test('2026-11-12: discipline text gaps', () => {
   // D4 (C)：多包仓库按端各一条集成命令，每端仍只跑一次。
   assert.match(text, /同一条命令全系统只跑一次，不重复付费（多包仓库按端各一条，每端只跑一次）。/,
     'D4: a multi-package repo gets one integrated command per side, each run once')
-  // D5：闸门文案同步「仓库无此脚本则记一行台账」。
-  const gates = resolveGates({})
-  const gateText = renderReviewGate(gates.review.text, { files: ['AGENTS.md'], docOnly: true })
-  assert.match(gateText, /跑 docs-check（仓库无此脚本则记一行台账），并按规则 1\/4 交「断言 → 代码位置」表/,
-    'D5: the doc-only review action carries the ledger-line fallback')
+  // D5：规则正文同步「仓库无此脚本则记一行台账」。
+  assert.match(text, /无此脚本的仓库记一行台账、不新建脚本/,
+    'D5: the doc-only rule carries the ledger-line fallback')
 })
 
 test('0.12.0 D6: review rhythm is one package per change set, not one per batch', () => {
@@ -433,9 +427,8 @@ test('a mid-run report does not suppress the reminder once the child settles', (
 
 test('a read-only survey child does not trigger a checkpoint', () => {
   const h = harness()
-  // 0.7.0 HandoffGate 默认开启；本用例的父回合没有工具/正文，只验证 checkpoint
-  // 对只读子代理的跳过，因此隔离新闸门，断言保持 0.3.3 原样。
-  plugin.apply(h.ctx, { ...quiet, gates: { handoff: { enabled: false } } })
+  // 本用例只验证 checkpoint 对只读子代理的跳过，断言保持 0.3.3 原样。
+  plugin.apply(h.ctx, { ...quiet })
 
   const parent = h.main('parent-4', [splice('child-12')])
   const child = h.child('child-12', 'parent-4', '勘察 Task 12', [
@@ -455,7 +448,7 @@ test('a read-only survey child does not trigger a checkpoint', () => {
 
 test('a child that called no tools at all does not trigger a checkpoint', () => {
   const h = harness()
-  plugin.apply(h.ctx, { ...quiet, gates: { handoff: { enabled: false } } })
+  plugin.apply(h.ctx, { ...quiet })
 
   const parent = h.main('parent-5', [splice('child-13')])
   h.created(h.child('child-13', 'parent-5', '零工具子代理'))
@@ -469,7 +462,7 @@ test('a child that called no tools at all does not trigger a checkpoint', () => 
 
 test('a skipped read-only child stays deduplicated across repeated settlement events', () => {
   const h = harness()
-  plugin.apply(h.ctx, { ...quiet, gates: { handoff: { enabled: false } } })
+  plugin.apply(h.ctx, { ...quiet })
 
   const parent = h.main('parent-6', [splice('child-14')])
   const child = h.child('child-14', 'parent-6', '勘察 Task 14', [call(1, 'read', { file_path: 'a.ts' })])
@@ -510,7 +503,7 @@ test('a checkpoint registered before the parent read the report cannot race the 
 
 test('a drained checkpoint is not delivered again on a later turn-stopping', () => {
   const h = harness()
-  plugin.apply(h.ctx, { ...quiet, gates: { handoff: { enabled: false } } })
+  plugin.apply(h.ctx, { ...quiet })
 
   const parent = h.main('parent-16', [splice('child-16')])
   h.created(h.child('child-16', 'parent-16', '实现 Task 16', [
@@ -582,7 +575,7 @@ test('D1: a settle notice followed by a parent tool call is already handled', ()
   try {
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
-    plugin.apply(h.ctx, { log, gates: { handoff: { enabled: false } } })
+    plugin.apply(h.ctx, { log })
 
     // A closing-message child produces a splice without the marker; the runtime-
     // owned settle notice is the report the parent can see. The parent then acts
@@ -606,7 +599,7 @@ test('D1: a settle notice followed by a parent tool call is already handled', ()
 
 test('D1: a settle notice with no parent action still delivers the checkpoint', () => {
   const h = harness()
-  plugin.apply(h.ctx, { log: false, gates: { handoff: { enabled: false } } })
+  plugin.apply(h.ctx, { log: false })
 
   const parent = h.main('parent-82', [settleNotice('child-82')])
   h.created(h.child('child-82', 'parent-82', '实现 Task 82', [call(1, 'write', { file_path: 'a.ts' })]))
@@ -625,7 +618,7 @@ test('D1: a send_message report with no settle notice still counts as handled', 
   try {
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
-    plugin.apply(h.ctx, { log, gates: { handoff: { enabled: false } } })
+    plugin.apply(h.ctx, { log })
 
     const parent = h.main('parent-83', [
       splice('child-83'),
@@ -720,113 +713,7 @@ test('a child whose pwsh work was read-only stays a read-only survey', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 0.12.2 D2（设计反转）— 封闭形状：只有能证明是记账写入时才豁免
-
-const SHELL_CWD = 'G:\\repo'
-
-test('D2-1: a ledger append is a control-plane write and its content is never classified', () => {
-  // The corpus case: the ledger body routinely names source files. Content is
-  // outside the closed shape, so it can never become a classified target.
-  assert.equal(controlPlaneOnlyShellWrite(
-    'Add-Content dispatch\\ledger\\x.md "- 改了 server/src/a.ts"', { cwd: SHELL_CWD }), true)
-})
-
-test('D2-2: -Path and -FilePath name the single target', () => {
-  assert.equal(controlPlaneOnlyShellWrite(
-    'Set-Content -Path dispatch\\ledger\\x.md "y"', { cwd: SHELL_CWD }), true)
-  assert.equal(controlPlaneOnlyShellWrite(
-    'Out-File -FilePath dispatch\\review\\x.log "y"', { cwd: SHELL_CWD }), true)
-})
-
-test('D2-3: New-Item with -ItemType and -Force is a control-plane shape', () => {
-  assert.equal(controlPlaneOnlyShellWrite(
-    'New-Item -ItemType Directory -Force dispatch/review', { cwd: SHELL_CWD }), true)
-})
-
-test('D2-4: git diff with a redirect to a control-plane path is a control-plane shape', () => {
-  assert.equal(controlPlaneOnlyShellWrite(
-    'git diff --stat > dispatch/review/x.diff', { cwd: SHELL_CWD }), true)
-})
-
-test('D2-5: no closed shape matches a comma-array command → false', () => {
-  // Review L1: either spacing form used to smuggle the code element through.
-  assert.equal(controlPlaneOnlyShellWrite(
-    'Remove-Item dispatch\\a.md,server\\src\\a.ts', { cwd: SHELL_CWD }), false)
-  assert.equal(controlPlaneOnlyShellWrite(
-    'Remove-Item dispatch\\a.md , server\\src\\a.ts', { cwd: SHELL_CWD }), false)
-})
-
-test('D2-6: aliases and Copy-Item are outside the closed shapes', () => {
-  // Review L2: the pattern sees these verbs, the shape list must not.
-  for (const command of [
-    'ac server\\src\\a.ts "x"',
-    'del server\\src\\a.ts',
-    'copy a b',
-    'ni dispatch\\x',
-  ]) assert.equal(controlPlaneOnlyShellWrite(command, { cwd: SHELL_CWD }), false, command)
-})
-
-test('D2-7: no closed shape matches a single-& command → false', () => {
-  // Review L3: only `;`/newline split; any bare `&` rejects the command.
-  assert.equal(controlPlaneOnlyShellWrite(
-    'Set-Content server\\src\\a.ts "x" & Copy-Item -Path dispatch\\x.md dispatch\\y.md',
-    { cwd: SHELL_CWD }), false)
-})
-
-test('D2-8: no closed shape matches an iex/cmd quoted payload → false', () => {
-  // Review L4: `iex`/`cmd /c` with a quoted script must never be classified by
-  // the redirect beside it.
-  assert.equal(controlPlaneOnlyShellWrite(
-    'iex "Remove-Item server/src/a.ts" > dispatch/run.log', { cwd: SHELL_CWD }), false)
-  assert.equal(controlPlaneOnlyShellWrite(
-    'cmd /c "copy a b" > dispatch/calls.log', { cwd: SHELL_CWD }), false)
-})
-
-test('D2-9: -Destination and Tee-Object are not control-plane shapes', () => {
-  assert.equal(controlPlaneOnlyShellWrite(
-    'Copy-Item -Path dispatch\\p.txt -Destination server\\src\\a.ts', { cwd: SHELL_CWD }), false)
-  assert.equal(controlPlaneOnlyShellWrite('Tee-Object dispatch\\x.log', { cwd: SHELL_CWD }), false)
-})
-
-test('D2-10a: the gate is silent when only a shape-A ledger append follows the verification', () => {
-  const gates = resolveGates({})
-  const events = [
-    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-    resultWithText(1, 'verify-1', 'exit code: 0'),
-    call(2, 'pwsh', { command: 'Add-Content dispatch\\ledger\\x.md "y"' }, 'ledger-1'),
-    result(2, 'ledger-1', false),
-    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-  ]
-  assert.equal(evaluateVerifyGate(events, 2, gates, SHELL_CWD), null,
-    'the ledger body names no code path and the target is the control plane')
-  assert.equal(analyzeVerification(events, gates.verify, SHELL_CWD).changes, 0)
-})
-
-test('D2-10b: the gate delivers for an alias write with <shell> and 未知', () => {
-  const gates = resolveGates({})
-  const events = [
-    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-    resultWithText(1, 'verify-1', 'exit code: 0'),
-    call(2, 'pwsh', { command: 'del server\\src\\a.ts' }, 'write-1'),
-    result(2, 'write-1', false),
-    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-  ]
-  const state = evaluateVerifyGate(events, 2, gates, SHELL_CWD)
-  assert.notEqual(state, null, 'an alias write matches the pattern and is not a closed shape')
-  assert.deepEqual(state.files, ['<shell>'])
-  assert.match(renderVerifyGate(gates.verify.text, state), /<shell>（未知改动）/)
-})
-
-test('D2-11: no closed shape matches a git commit → false', () => {
-  assert.equal(controlPlaneOnlyShellWrite('git commit -m "x"', { cwd: SHELL_CWD }), false)
-})
-
-test('D2-12: no closed shape matches a read-only command → false', () => {
-  assert.equal(controlPlaneOnlyShellWrite('echo hi', { cwd: SHELL_CWD }), false)
-})
-
-// ---------------------------------------------------------------------------
-// 0.12.2 复审 — 调用点修复：`pwsh` 的 `workdir` 决定落点，不能只按会话 cwd 判控制面
+// 工具调用口径：workdir 解析、候选路径
 
 test('readWorkdir: absolute and relative pass through, missing is undefined, unusable is null', () => {
   const args = value => JSON.stringify(value)
@@ -843,56 +730,6 @@ test('readWorkdir: absolute and relative pass through, missing is undefined, unu
   assert.equal(readWorkdir(args({ command: 'x', workdir: 5 })), null)
   assert.equal(readWorkdir(args({ command: 'x', workdir: '' })), null)
 })
-
-test('0.12.2 review: a ledger append under any explicit workdir is dirty', () => {
-  const gates = resolveGates({})
-  const events = [
-    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-    resultWithText(1, 'verify-1', 'exit code: 0'),
-    call(2, 'pwsh', {
-      command: 'Add-Content dispatch\\ledger\\x.md "y"',
-      workdir: `${SHELL_CWD}\\server\\src`,
-    }, 'ledger-1'),
-    result(2, 'ledger-1', false),
-  ]
-  const state = analyzeVerification(events, gates.verify, SHELL_CWD)
-  assert.equal(state.dirty, true, 'the target really lands in <cwd>/server/src/dispatch/ledger')
-  assert.ok(state.files.includes('<shell>'))
-
-  // 简化后：任何显式 `workdir`（含等于会话 cwd 的）都判脏，不存在 ==cwd 豁免。
-  const sameCwd = [
-    call(1, 'pwsh', { command: 'npm test' }, 'verify-2'),
-    resultWithText(1, 'verify-2', 'exit code: 0'),
-    call(2, 'pwsh', {
-      command: 'Add-Content dispatch\\ledger\\x.md "y"',
-      workdir: SHELL_CWD,
-    }, 'ledger-2'),
-    result(2, 'ledger-2', false),
-  ]
-  const sameCwdState = analyzeVerification(sameCwd, gates.verify, SHELL_CWD)
-  assert.equal(sameCwdState.dirty, true,
-    'an explicit workdir equal to the session cwd is still dirty: the landing point cannot be proven')
-  assert.ok(sameCwdState.files.includes('<shell>'))
-})
-
-test('0.12.2 review: a New-Item under a code workdir is dirty', () => {
-  const gates = resolveGates({})
-  const events = [
-    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-    resultWithText(1, 'verify-1', 'exit code: 0'),
-    call(2, 'pwsh', {
-      command: 'New-Item -ItemType Directory -Force dispatch/review',
-      workdir: `${SHELL_CWD}\\server\\src`,
-    }, 'mkdir-1'),
-    result(2, 'mkdir-1', false),
-  ]
-  const state = analyzeVerification(events, gates.verify, SHELL_CWD)
-  assert.equal(state.dirty, true)
-  assert.deepEqual(state.files, ['<shell>'])
-})
-
-// ---------------------------------------------------------------------------
-// 0.4.0 — one checkpoint message per wave, one decision line per child
 
 test('a wave of finished children earns one aggregated checkpoint message', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-wave-'))
@@ -1035,933 +872,7 @@ test('a commit-only turn leaves no observation row', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 0.6.0 — 状态闸门：WaitGate + VerifyGate（契约 §7）
-
-test('session-92f462d1 replay: six status polls with no write, dispatch or verify earn one wait gate', () => {
-  // 92f462d1 的轮询形态：一回合 66 次状态查询，子代理状态没变，主控却为每次
-  // 查询付了一整步模型步进。这里用 6 次 list_agents 复现最小形状。
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-wait-'))
-  try {
-    const log = join(dir, 'decisions.jsonl')
-    const h = harness()
-    plugin.apply(h.ctx, { log })
-
-    const parent = h.main('session-92f462d1', [
-      call(1, 'list_agents', {}, 'poll-1'),
-      call(1, 'list_agents', {}, 'poll-2'),
-      call(1, 'list_agents', {}, 'poll-3'),
-      call(1, 'list_agents', {}, 'poll-4'),
-      call(1, 'list_agents', {}, 'poll-5'),
-      call(1, 'list_agents', {}, 'poll-6'),
-    ])
-    h.created(parent)
-    h.turnStopping(parent, 1)
-    h.turnStopping(parent, 1) // steer 后同回合再收尾一次，闸门仍只发一条
-
-    assert.equal(parent.messages.length, 1, 'one gate message per turn')
-    assert.match(parent.messages[0].text, /本回合 6 次状态查询/)
-    assert.match(parent.messages[0].text, /list_agents/)
-    assert.match(parent.messages[0].text, /结束回合等完成事件/)
-
-    const rows = readRows(log).filter(row => row.kind === 'gate')
-    assert.equal(rows.length, 1)
-    assert.equal(rows[0].gate, 'wait')
-    assert.equal(rows[0].decision, 'delivered')
-    assert.equal(rows[0].observations, 6)
-    assert.equal(rows[0].turn, 1)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('a writing turn is not a waiting turn: six polls plus one write stay silent', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false })
-
-  const parent = h.main('session-gate-write', [
-    call(1, 'list_agents', {}, 'poll-1'),
-    call(1, 'list_agents', {}, 'poll-2'),
-    call(1, 'list_agents', {}, 'poll-3'),
-    call(1, 'list_agents', {}, 'poll-4'),
-    call(1, 'list_agents', {}, 'poll-5'),
-    call(1, 'list_agents', {}, 'poll-6'),
-    call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
-  ])
-  h.created(parent)
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 0, 'a turn that wrote produced evidence and is not polling')
-})
-
-test('status polls below the threshold stay silent', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false })
-
-  const parent = h.main('session-gate-below', [
-    call(1, 'list_agents', {}, 'poll-1'),
-    call(1, 'job_list', {}, 'poll-2'),
-  ])
-  h.created(parent)
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 0)
-})
-
-test('session-92f462d1 replay: a write after the last successful verification and before present earns one verify gate', () => {
-  // 92f462d1 的收口形态：最后一次集成命令（事件 1112）之后 diff 又被写入，
-  // 主控却已经准备 present。验证状态来自整个 session 的事件序，不看单回合。
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-verify-'))
-  try {
-    const log = join(dir, 'decisions.jsonl')
-    const h = harness()
-    plugin.apply(h.ctx, { log })
-
-    const parent = h.main('session-92f462d1-verify', [
-      call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-      resultWithText(1, 'verify-1', 'Tests 79 passed\nexit code: 0'),
-      call(2, 'write', { file_path: 'gates.mjs' }, 'write-1'),
-      result(2, 'write-1', false),
-      call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-    ])
-    h.created(parent)
-
-    h.turnStopping(parent, 1)
-    assert.equal(parent.messages.length, 0, 'the verification turn itself is not a closure')
-
-    h.turnStopping(parent, 2)
-    assert.equal(parent.messages.length, 1, 'the dirty closure turn earns exactly one gate')
-    assert.match(parent.messages[0].text, /准备 present\/commit/)
-    assert.match(parent.messages[0].text, /先跑一次集成命令并留存退出码/)
-
-    const rows = readRows(log).filter(row => row.kind === 'gate')
-    assert.equal(rows.length, 1)
-    assert.equal(rows[0].gate, 'verify')
-    assert.equal(rows[0].decision, 'delivered')
-    assert.equal(rows[0].changes, 1)
-    assert.equal(rows[0].lastVerify, 'npm test')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('a verification that is the last write keeps present silent', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false })
-
-  const parent = h.main('session-gate-clean', [
-    call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
-    call(2, 'pwsh', { command: 'npm test' }, 'verify-1'),
-    resultWithText(2, 'verify-1', 'exit code: 0'),
-    call(3, 'present', { file_path: 'report.md' }, 'present-1'),
-  ])
-  h.created(parent)
-  h.turnStopping(parent, 1)
-  h.turnStopping(parent, 2)
-  h.turnStopping(parent, 3)
-
-  assert.equal(parent.messages.length, 0, 'the diff is clean after the last successful verification')
-})
-
-test('present with no successful verification ever earns the verify gate', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false })
-
-  // 契约 §11-A：必须至少有一次写入，否则纯只读 present 不算「有 diff 可验」。
-  const parent = h.main('session-gate-never', [
-    call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
-    result(1, 'write-1', false),
-    call(1, 'present', { file_path: 'report.md' }, 'present-1'),
-  ])
-  h.created(parent)
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 1)
-  assert.match(parent.messages[0].text, /（或从未跑过）/)
-})
-
-test('a read-only present with no writes is not gated', () => {
-  // 契约 §11-A：present 一份报告/计划、整会话零写入时没有 diff 可验，
-  // 提醒只会让模型为空命令多花一步。
-  const h = harness()
-  plugin.apply(h.ctx, { log: false })
-
-  const parent = h.main('session-gate-read-only-present', [
-    call(1, 'present', { file_path: 'report.md' }, 'present-1'),
-  ])
-  h.created(parent)
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 0)
-})
-
-test('a failed verification does not count, so a later write plus present is gated', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-failed-'))
-  try {
-    const log = join(dir, 'decisions.jsonl')
-    const h = harness()
-    plugin.apply(h.ctx, { log })
-
-    const parent = h.main('session-gate-failed', [
-      call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-      resultWithText(1, 'verify-1', '1 failing\nexit code: 1'),
-      call(2, 'write', { file_path: 'a.ts' }, 'write-1'),
-      call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-    ])
-    h.created(parent)
-    h.turnStopping(parent, 1)
-    h.turnStopping(parent, 2)
-
-    assert.equal(parent.messages.length, 1, 'a red verification is not a verification')
-    const verifyRow = readRows(log).find(row => row.kind === 'gate')
-    assert.equal(verifyRow.lastVerify, null)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('a git commit with no successful verification earns the verify gate', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-commit-'))
-  try {
-    const log = join(dir, 'decisions.jsonl')
-    const h = harness()
-    plugin.apply(h.ctx, { log })
-
-    const parent = h.main('session-gate-commit', [
-      call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
-      result(1, 'write-1', false),
-      call(2, 'pwsh', { command: 'git commit -m "收口"' }, 'commit-1'),
-      result(2, 'commit-1', false),
-    ])
-    h.created(parent)
-    h.turnStopping(parent, 1)
-    h.turnStopping(parent, 2)
-
-    assert.equal(parent.messages.length, 1, 'commit is a closure action too')
-    assert.match(parent.messages[0].text, /准备 present\/commit/)
-    const verifyRow = readRows(log).find(row => row.kind === 'gate')
-    assert.equal(verifyRow.gate, 'verify')
-    assert.equal(verifyRow.lastVerify, null)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('gates can be disabled wholesale, and wait can be disabled alone', () => {
-  const off = harness()
-  plugin.apply(off.ctx, { log: false, gates: { enabled: false } })
-  const quietParent = off.main('session-gate-off', [
-    call(1, 'list_agents', {}, 'poll-1'),
-    call(1, 'list_agents', {}, 'poll-2'),
-    call(1, 'list_agents', {}, 'poll-3'),
-  ])
-  off.created(quietParent)
-  off.turnStopping(quietParent, 1)
-  assert.equal(quietParent.messages.length, 0, 'gates.enabled:false silences both gates')
-
-  const waitOff = harness()
-  plugin.apply(waitOff.ctx, { log: false, gates: { wait: { enabled: false } } })
-  const parent = waitOff.main('session-gate-wait-off', [
-    call(1, 'list_agents', {}, 'poll-1'),
-    call(1, 'list_agents', {}, 'poll-2'),
-    call(1, 'list_agents', {}, 'poll-3'),
-    // 契约 §11-A 之后纯只读 present 不再触发 verify，这里补一次写入让
-    // 「只关 wait、verify 仍开」的断言继续成立。
-    call(2, 'write', { file_path: 'a.ts' }, 'write-1'),
-    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-  ])
-  waitOff.created(parent)
-  waitOff.turnStopping(parent, 1)
-  assert.equal(parent.messages.length, 0, 'gates.wait.enabled:false leaves the wait turn alone')
-  waitOff.turnStopping(parent, 2)
-  assert.equal(parent.messages.length, 1, 'the verify gate is still on')
-  assert.match(parent.messages[0].text, /准备 present\/commit/)
-})
-
-test('a delivered checkpoint keeps the same turn to itself, so no gate fires', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false })
-
-  const parent = h.main('parent-gate-checkpoint', [
-    call(1, 'list_agents', {}, 'poll-1'),
-    call(1, 'list_agents', {}, 'poll-2'),
-    call(1, 'list_agents', {}, 'poll-3'),
-  ])
-  h.created(parent)
-  h.created(h.child('child-gate-checkpoint', 'parent-gate-checkpoint', '实现 Task', [
-    call(1, 'write', { file_path: 'a.ts' }),
-  ]))
-  h.ended({ childId: 'child-gate-checkpoint', stopReason: 'completed' })
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 1)
-  assert.match(parent.messages[0].text, /已完成/)
-  assert.doesNotMatch(parent.messages[0].text, /状态查询/, 'checkpoint owns the turn, the gate yields')
-})
-
-test('gates config rejects values that would silently never fire', () => {
-  assert.throws(() => resolveConfig({ gates: { wait: { threshold: 0 } } }), /gates\.wait\.threshold/)
-  assert.throws(() => resolveConfig({ gates: { wait: { tools: [] } } }), /gates\.wait\.tools/)
-  assert.throws(() => resolveConfig({ gates: { verify: { commands: [] } } }), /gates\.verify\.commands/)
-  assert.throws(() => resolveConfig({ gates: { verify: { commitPattern: '(' } } }), /gates\.verify\.commitPattern/)
-  assert.throws(() => resolveConfig({ gates: { wait: { text: '' } } }), /gates\.wait\.text/)
-  assert.throws(() => resolveConfig({ gates: { verify: { text: '' } } }), /gates\.verify\.text/)
-  assert.throws(() => resolveConfig({ gates: 42 }), /dispatch-protocol: gates/)
-
-  const gates = resolveConfig({}).gates
-  assert.equal(gates.enabled, true)
-  assert.equal(gates.wait.threshold, 3)
-  assert.deepEqual(gates.wait.tools, ['list_agents', 'job_list', 'schedule_list', 'get_goal'])
-  assert.deepEqual(gates.verify.commands,
-    ['npm test', 'npm run build', 'dotnet test', 'jest', 'tsc', 'prisma migrate deploy', 'node test', 'test.mjs'])
-  assert.equal(gates.verify.commitRegExp.test('git -C "G:\\repo" commit -m x'), true)
-  assert.equal(gates.verify.commitRegExp.test('git status --short'), false)
-})
-
-test('verify commands recognise node <path>/test.mjs invocations', () => {
-  const commands = resolveConfig({}).gates.verify.commands
-
-  // 仓库根带路径、`& $node` 变量拼装、无路径三种写法都算跑过集成命令。
-  for (const command of [
-    'node test.mjs',
-    'node plugins/dispatch-protocol/test.mjs',
-    '& $node plugins/x/test.mjs',
-  ]) {
-    assert.equal(matchesVerifyCommand(command, commands), true, command)
-  }
-
-  // 反例：窄跑一个 spec 文件不该被新增的 `test.mjs` 片段误命中。注意整表仍会命中，
-  // 因为既有的 `node test` 片段本就覆盖 `node tests/...`（旧口径，本次不动）。
-  assert.equal(matchesVerifyCommand('node tests/foo.spec.ts', commands.filter(f => f === 'test.mjs')), false)
-  // 整表反例：普通脚本不是集成命令。
-  assert.equal(matchesVerifyCommand('node scripts/seed.ts', commands), false)
-})
-
-test('gates only judge root-agent turns', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false })
-
-  // 子代理自己的写操作已经记在父回合里，且它不能再派发/提交；若闸门对子代理
-  // 生效，只会重复父回合的提醒（契约 §5）。
-  const child = h.main('session-gate-child', [
-    call(1, 'list_agents', {}, 'poll-1'),
-    call(1, 'list_agents', {}, 'poll-2'),
-    call(1, 'list_agents', {}, 'poll-3'),
-    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-  ], { origin: 'subagent', parentSession: 'parent-gate-root' })
-  h.created(child)
-
-  h.turnStopping(child, 1)
-  h.turnStopping(child, 2)
-  assert.equal(child.messages.length, 0)
-})
-
-// ---------------------------------------------------------------------------
-// 0.6.0 amendment（契约 §11-E）：边界、让位与去重
-
-test('exactly threshold status polls already trigger the wait gate', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false })
-
-  const parent = h.main('session-gate-boundary', [
-    call(1, 'list_agents', {}, 'poll-1'),
-    call(1, 'list_agents', {}, 'poll-2'),
-    call(1, 'list_agents', {}, 'poll-3'),
-  ])
-  h.created(parent)
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 1, 'threshold is inclusive')
-  assert.match(parent.messages[0].text, /本回合 3 次状态查询/)
-})
-
-test('a delivered gate owns the turn, so a write turn gets one reminder', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false })
-
-  const parent = h.main('session-gate-yield', [
-    call(1, 'list_agents', {}, 'poll-1'),
-    call(1, 'list_agents', {}, 'poll-2'),
-    call(1, 'list_agents', {}, 'poll-3'),
-    call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
-    call(1, 'write', { file_path: 'b.ts' }, 'write-2'),
-    call(1, 'present', { file_path: 'report.md' }, 'present-1'),
-  ])
-  h.created(parent)
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 1, 'the gate owns the turn')
-  assert.match(parent.messages[0].text, /准备 present\/commit/)
-})
-
-test('send_message and dispatch calls are not waiting', () => {
-  const withMessage = harness()
-  plugin.apply(withMessage.ctx, { log: false })
-  const messageParent = withMessage.main('session-gate-send-message', [
-    call(1, 'list_agents', {}, 'poll-1'),
-    call(1, 'list_agents', {}, 'poll-2'),
-    call(1, 'list_agents', {}, 'poll-3'),
-    call(1, 'list_agents', {}, 'poll-4'),
-    call(1, 'list_agents', {}, 'poll-5'),
-    call(1, 'list_agents', {}, 'poll-6'),
-    call(1, 'send_message', { agent_id: 'child-1' }, 'send-1'),
-  ])
-  withMessage.created(messageParent)
-  withMessage.turnStopping(messageParent, 1)
-  assert.equal(messageParent.messages.length, 0, 'a delivered message is an action')
-
-  const withDispatch = harness()
-  plugin.apply(withDispatch.ctx, { log: false })
-  const dispatchParent = withDispatch.main('session-gate-dispatch', [
-    call(1, 'list_agents', {}, 'poll-1'),
-    call(1, 'list_agents', {}, 'poll-2'),
-    call(1, 'list_agents', {}, 'poll-3'),
-    call(1, 'list_agents', {}, 'poll-4'),
-    call(1, 'list_agents', {}, 'poll-5'),
-    call(1, 'list_agents', {}, 'poll-6'),
-    call(1, 'subagent', { description: '实现 X' }, 'dispatch-1'),
-  ])
-  withDispatch.created(dispatchParent)
-  withDispatch.turnStopping(dispatchParent, 1)
-  assert.equal(dispatchParent.messages.length, 0, 'a dispatch is an action')
-})
-
-test('gates validation still runs when the gates are disabled', () => {
-  assert.throws(() => resolveConfig({ gates: { enabled: false, wait: { threshold: 0 } } }),
-    /gates\.wait\.threshold/, 'a typo must fail at load time even when disabled')
-})
-
-test('wait gate deduplicates tool names and joins them with commas', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false })
-
-  const parent = h.main('session-gate-dedupe', [
-    call(1, 'list_agents', {}, 'poll-1'),
-    call(1, 'list_agents', {}, 'poll-2'),
-    call(1, 'list_agents', {}, 'poll-3'),
-    call(1, 'job_list', {}, 'poll-4'),
-    call(1, 'job_list', {}, 'poll-5'),
-    call(1, 'job_list', {}, 'poll-6'),
-  ])
-  h.created(parent)
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 1)
-  assert.match(parent.messages[0].text, /（list_agents, job_list）/)
-})
-
-// ---------------------------------------------------------------------------
-// 0.7.0 — ContractGate / ReviewGate / HandoffGate（契约 §8）
-
-test('contract gate fires when a contract file is written while a child is active', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-contract-'))
-  try {
-    const log = join(dir, 'decisions.jsonl')
-    const h = harness()
-    plugin.apply(h.ctx, { log, checkpoint: { enabled: false } })
-
-    const parent = h.main('session-contract-active', [
-      call(1, 'write', { file_path: 'tmp/fix-contract.md' }, 'write-1'),
-    ])
-    h.created(parent)
-    h.created(h.child('child-contract-active', 'session-contract-active', '实现 A'))
-    h.turnStopping(parent, 1)
-
-    assert.equal(parent.messages.length, 1)
-    assert.match(parent.messages[0].text, /契约文件/)
-    assert.match(parent.messages[0].text, /tmp\/fix-contract\.md/)
-    const row = readRows(log).find(entry => entry.kind === 'gate')
-    assert.equal(row.gate, 'contract')
-    assert.deepEqual(row.files, ['tmp/fix-contract.md'])
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('contract gate stays silent when no child is active', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false, checkpoint: { enabled: false } })
-
-  const parent = h.main('session-contract-idle', [
-    call(1, 'write', { file_path: 'fix-contract.md' }, 'write-1'),
-  ])
-  h.created(parent)
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 0)
-})
-
-test('contract gate stays silent after the child has ended', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false, checkpoint: { enabled: false } })
-
-  const parent = h.main('session-contract-ended', [
-    call(1, 'write', { file_path: 'fix-contract.md' }, 'write-1'),
-  ])
-  h.created(parent)
-  h.created(h.child('child-contract-ended', 'session-contract-ended', '实现 B'))
-  h.ended({ childId: 'child-contract-ended', stopReason: 'completed' })
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 0, 'the active set is judged at turn close')
-})
-
-test('contract gate ignores non-contract files', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false, checkpoint: { enabled: false } })
-
-  const parent = h.main('session-contract-other', [
-    call(1, 'write', { file_path: 'src/a.ts' }, 'write-1'),
-  ])
-  h.created(parent)
-  h.created(h.child('child-contract-other', 'session-contract-other', '实现 C'))
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 0)
-})
-
-test('contract gate stays silent when an active child exists but nothing was written', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false, checkpoint: { enabled: false } })
-
-  const parent = h.main('session-contract-read', [
-    call(1, 'read', { file_path: 'fix-contract.md' }, 'read-1'),
-  ])
-  h.created(parent)
-  h.created(h.child('child-contract-read', 'session-contract-read', '实现 D'))
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 0)
-})
-
-test('review gate fires when the parent writes after a completed read-only review', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-review-'))
-  try {
-    const log = join(dir, 'decisions.jsonl')
-    const events = []
-    const h = harness()
-    plugin.apply(h.ctx, {
-      log, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
-    })
-
-    const parent = h.main('session-review-write', events)
-    h.created(parent)
-    h.created(h.child('review-1', 'session-review-write', '只读评审：diff'))
-    h.ended({ childId: 'review-1', stopReason: 'completed' })
-    events.push(
-      call(2, 'write', { file_path: 'src/a.ts' }, 'write-1'),
-      result(2, 'write-1', false),
-    )
-    h.turnStopping(parent, 2)
-
-    assert.equal(parent.messages.length, 1)
-    assert.match(parent.messages[0].text, /只读评审之后又改动了工作区/)
-    assert.match(parent.messages[0].text, /src\/a\.ts/)
-    const row = readRows(log).find(entry => entry.kind === 'gate')
-    assert.equal(row.gate, 'review')
-    assert.deepEqual(row.files, ['src/a.ts'])
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('review gate warns only once in the same review round', () => {
-  const events = []
-  const h = harness()
-  plugin.apply(h.ctx, {
-    log: false, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
-  })
-
-  const parent = h.main('session-review-once', events)
-  h.created(parent)
-  h.created(h.child('review-2', 'session-review-once', '只读评审：diff'))
-  h.ended({ childId: 'review-2', stopReason: 'completed' })
-  events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-1'), result(2, 'write-1', false))
-  h.turnStopping(parent, 2)
-  assert.equal(parent.messages.length, 1)
-
-  events.push(call(3, 'write', { file_path: 'src/b.ts' }, 'write-2'), result(3, 'write-2', false))
-  h.turnStopping(parent, 3)
-  assert.equal(parent.messages.length, 1, 'warned=true until a new review round starts')
-})
-
-test('review gate fires again after a new read-only review starts', () => {
-  const events = []
-  const h = harness()
-  plugin.apply(h.ctx, {
-    log: false, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
-  })
-
-  const parent = h.main('session-review-rounds', events)
-  h.created(parent)
-  h.created(h.child('review-3', 'session-review-rounds', '只读评审：round 1'))
-  h.ended({ childId: 'review-3', stopReason: 'completed' })
-  events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-1'), result(2, 'write-1', false))
-  h.turnStopping(parent, 2)
-  assert.equal(parent.messages.length, 1)
-
-  h.created(h.child('review-4', 'session-review-rounds', '只读评审：round 2'))
-  h.ended({ childId: 'review-4', stopReason: 'completed' })
-  events.push(call(4, 'write', { file_path: 'src/c.ts' }, 'write-2'), result(4, 'write-2', false))
-  h.turnStopping(parent, 4)
-  assert.equal(parent.messages.length, 2, 'a new review round resets warned')
-  assert.match(parent.messages[1].text, /src\/c\.ts/)
-})
-
-test('non-review child completion does not arm the review gate', () => {
-  const events = []
-  const h = harness()
-  plugin.apply(h.ctx, {
-    log: false, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
-  })
-
-  const parent = h.main('session-review-impl', events)
-  h.created(parent)
-  h.created(h.child('impl-1', 'session-review-impl', '实现 Task 1'))
-  h.ended({ childId: 'impl-1', stopReason: 'completed' })
-  events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-1'), result(2, 'write-1', false))
-  h.turnStopping(parent, 2)
-
-  assert.equal(parent.messages.length, 0)
-})
-
-test('review gate stays silent when nothing was written after the review', () => {
-  const h = harness()
-  plugin.apply(h.ctx, {
-    log: false, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
-  })
-
-  const parent = h.main('session-review-clean', [])
-  h.created(parent)
-  h.created(h.child('review-5', 'session-review-clean', '只读评审：diff'))
-  h.ended({ childId: 'review-5', stopReason: 'completed' })
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 0)
-})
-
-test('handoff gate fires on the first empty turn by default', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-handoff-'))
-  try {
-    const log = join(dir, 'decisions.jsonl')
-    const h = harness()
-    plugin.apply(h.ctx, { log })
-
-    const parent = h.main('session-handoff-default', [])
-    h.created(parent)
-    h.turnStopping(parent, 1)
-
-    assert.equal(parent.messages.length, 1)
-    assert.match(parent.messages[0].text, /没有任何产出/)
-    assert.match(parent.messages[0].text, /dispatch\/state\/<需求>\.md/,
-      '0.9.1: the handoff text names the per-requirement ledger')
-    const row = readRows(log).find(entry => entry.kind === 'gate')
-    assert.equal(row.gate, 'handoff')
-    assert.equal(row.emptyTurns, 1)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('handoff gate ignores a turn that has text', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false })
-
-  const parent = h.main('session-handoff-text', [assistantMessage(1, '正在处理，稍后汇报。')])
-  h.created(parent)
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 0)
-})
-
-test('handoff gate with emptyTurns:2 waits for the second consecutive empty turn', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false, gates: { handoff: { emptyTurns: 2 } } })
-
-  const parent = h.main('session-handoff-two', [])
-  h.created(parent)
-
-  h.turnStopping(parent, 1)
-  assert.equal(parent.messages.length, 0, 'one empty turn is below the configured threshold')
-  h.turnStopping(parent, 2)
-  assert.equal(parent.messages.length, 1)
-  assert.match(parent.messages[0].text, /没有任何产出/)
-})
-
-test('handoff gate never fires for a subagent turn', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false })
-
-  const child = h.main('session-handoff-child', [], { origin: 'subagent', parentSession: 'parent-handoff' })
-  h.created(child)
-  h.turnStopping(child, 1)
-
-  assert.equal(child.messages.length, 0)
-})
-
-test('new gate config rejects values that would silently never fire', () => {
-  assert.throws(() => resolveConfig({ gates: { contract: { patterns: [] } } }), /gates\.contract\.patterns/)
-  assert.throws(() => resolveConfig({ gates: { review: { labelPrefixes: [] } } }), /gates\.review\.labelPrefixes/)
-  assert.throws(() => resolveConfig({ gates: { handoff: { emptyTurns: 0 } } }), /gates\.handoff\.emptyTurns/)
-  assert.throws(() => resolveConfig({ gates: { contract: { text: '' } } }), /gates\.contract\.text/)
-  assert.throws(() => resolveConfig({ gates: { review: { text: '' } } }), /gates\.review\.text/)
-  assert.throws(() => resolveConfig({ gates: { handoff: { text: '' } } }), /gates\.handoff\.text/)
-  assert.throws(() => resolveConfig({ gates: { contract: 42 } }), /gates\.contract must be an object/)
-  assert.throws(() => resolveConfig({ gates: { review: [] } }), /gates\.review must be an object/)
-  assert.throws(() => resolveConfig({ gates: { handoff: 'x' } }), /gates\.handoff must be an object/)
-})
-
-test('new gate defaults are the documented ones', () => {
-  const gates = resolveConfig({}).gates
-  assert.deepEqual(gates.contract.patterns, ['contract'])
-  assert.deepEqual(gates.review.labelPrefixes, ['只读评审', '只读复审'])
-  assert.equal(gates.handoff.emptyTurns, 1)
-  assert.equal(gates.contract.enabled, true)
-  assert.equal(gates.review.enabled, true)
-  assert.equal(gates.handoff.enabled, true)
-})
-
-// ---------------------------------------------------------------------------
-// 0.7.0 amendment（契约 §11-A/B/E）
-
-test('a turn that already delivered a checkpoint cannot also deliver a gate', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-single-steer-'))
-  try {
-    const log = join(dir, 'decisions.jsonl')
-    const h = harness()
-    plugin.apply(h.ctx, { log })
-
-    const parent = h.main('session-single-steer', [
-      call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
-    ])
-    h.created(parent)
-    h.created(h.child('child-single-steer', 'session-single-steer', '实现 Task', [
-      call(1, 'write', { file_path: 'b.ts' }),
-    ]))
-    h.ended({ childId: 'child-single-steer', stopReason: 'completed' })
-
-    h.turnStopping(parent, 1)
-    assert.equal(parent.messages.length, 1)
-    assert.match(parent.messages[0].text, /已完成/, 'close#1 delivers the checkpoint')
-
-    // 同一回合追加 present：若不检查 lastDeliveredTurn，第二次收尾会再发 verify。
-    parent.session.snapshotEvents().push(call(1, 'present', { file_path: 'report.md' }, 'present-1'))
-    h.turnStopping(parent, 1)
-
-    assert.equal(parent.messages.length, 1, 'one steer per turn, including across close#1/close#2')
-    assert.equal(readRows(log).filter(row => row.kind === 'gate').length, 0)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('a second completed review slice re-arms the gate with a new baseline', () => {
-  const events = []
-  const h = harness()
-  plugin.apply(h.ctx, {
-    log: false, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
-  })
-
-  const parent = h.main('session-review-parallel', events)
-  h.created(parent)
-  h.created(h.child('review-a', 'session-review-parallel', '只读评审：A'))
-  h.created(h.child('review-b', 'session-review-parallel', '只读评审：B'))
-
-  h.ended({ childId: 'review-a', stopReason: 'completed' })
-  events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-1'), result(2, 'write-1', false))
-  h.turnStopping(parent, 2)
-  assert.equal(parent.messages.length, 1)
-
-  // 第二个评审切片完成：基线推进到当前父事件长度，且 warned 被重置。
-  h.ended({ childId: 'review-b', stopReason: 'completed' })
-  events.push(call(3, 'write', { file_path: 'src/b.ts' }, 'write-2'), result(3, 'write-2', false))
-  h.turnStopping(parent, 3)
-  assert.equal(parent.messages.length, 2, 'a later completed review re-arms the warning')
-  assert.match(parent.messages[1].text, /src\/b\.ts/)
-  assert.doesNotMatch(parent.messages[1].text, /src\/a\.ts/, 'since advanced past the first slice write')
-})
-
-test('a duplicate settle of the same review child does not re-arm the gate', () => {
-  const events = []
-  const h = harness()
-  plugin.apply(h.ctx, {
-    log: false, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
-  })
-
-  const parent = h.main('session-review-duplicate', events)
-  h.created(parent)
-  h.created(h.child('review-dup', 'session-review-duplicate', '只读评审：dup'))
-  h.ended({ childId: 'review-dup', stopReason: 'completed' })
-  events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-1'), result(2, 'write-1', false))
-  h.turnStopping(parent, 2)
-  assert.equal(parent.messages.length, 1)
-
-  // 同一 childId 的重复 settle 不应把 warned 重置成 false（契约 §12-B）。
-  h.ended({ childId: 'review-dup', stopReason: 'completed' })
-  events.push(call(3, 'write', { file_path: 'src/b.ts' }, 'write-2'), result(3, 'write-2', false))
-  h.turnStopping(parent, 3)
-  assert.equal(parent.messages.length, 1, 'a duplicate settle must not re-arm the warning')
-})
-
-test('writes before a review completes are not dirty', () => {
-  const events = [
-    call(1, 'write', { file_path: 'src/old.ts' }, 'write-1'),
-    result(1, 'write-1', false),
-  ]
-  const h = harness()
-  plugin.apply(h.ctx, {
-    log: false,
-    checkpoint: { enabled: false },
-    gates: { verify: { enabled: false }, handoff: { enabled: false } },
-  })
-
-  const parent = h.main('session-review-before', events)
-  h.created(parent)
-  h.created(h.child('review-before', 'session-review-before', '只读评审：x'))
-  h.ended({ childId: 'review-before', stopReason: 'completed' })
-  events.push(call(2, 'present', { file_path: 'report.md' }, 'present-1'))
-  h.turnStopping(parent, 2)
-
-  assert.equal(parent.messages.length, 0, 'only writes after `since` count as review-dirty')
-})
-
-test('contract gate lists at most three files', () => {
-  const h = harness()
-  plugin.apply(h.ctx, { log: false, checkpoint: { enabled: false } })
-
-  const parent = h.main('session-contract-three', [
-    call(1, 'write', { file_path: 'fix-contract.md' }, 'write-1'),
-    call(1, 'write', { file_path: 'a-contract-b.ts' }, 'write-2'),
-    call(1, 'write', { file_path: 'contract-c.md' }, 'write-3'),
-    call(1, 'write', { file_path: 'src/contracts.ts' }, 'write-4'),
-  ])
-  h.created(parent)
-  h.created(h.child('child-contract-three', 'session-contract-three', '实现 E'))
-  h.turnStopping(parent, 1)
-
-  assert.equal(parent.messages.length, 1)
-  assert.match(parent.messages[0].text, /fix-contract\.md, a-contract-b\.ts, contract-c\.md/)
-  assert.doesNotMatch(parent.messages[0].text, /src\/contracts\.ts/, '{files} caps at three paths')
-})
-
-// ---------------------------------------------------------------------------
-// 0.9.0 — 计数工具复用写入守卫口径（原 0.8.2 控制面豁免）
-
-test('control-plane writes are not execution work in the shared counter', () => {
-  const events = [
-    call(1, 'write', { file_path: 'dispatch/ledger/x.md' }),
-    call(1, 'write', { file_path: 'docs/superpowers/specs/y.md' }),
-    call(1, 'write', { file_path: 'src/a.ts' }),
-    call(1, 'edit', { file_path: 'src/b.ts' }, 'call-b'),
-    result(1, 'call-b', true),
-    call(1, 'subagent', { description: '实现 X' }),
-  ]
-
-  const summary = summarizeTurn(events, 1, {
-    writeTools: ['write', 'edit'],
-    delegationTools: ['subagent', 'subagent_fork', 'workflow'],
-    controlPlanePatterns: DEFAULT_ALLOWLIST,
-    cwd: 'G:\\repo',
-  })
-  assert.equal(summary.writes, 1, '0.9.0: the counter uses the write-policy allowlist')
-  assert.deepEqual(summary.files, ['src/a.ts'], 'only the source file is execution work')
-  assert.equal(summary.failedWrites, 1, 'a refused write is counted as failed, not as a write')
-  assert.equal(summary.delegations, 1)
-
-  const second = summarizeTurn([...events, call(1, 'write', { file_path: 'src/c.ts' })], 1, { cwd: 'G:\\repo' })
-  assert.deepEqual(second.files, ['src/a.ts', 'src/c.ts'],
-    'the default control-plane patterns still drop dispatch/ and spec files')
-  assert.equal(second.writes, 2)
-
-  // 0.11.0 D1-6：没有 cwd 时控制面判定失败，写入按执行工作计数（保守方向）。
-  const noCwd = summarizeTurn(events, 1, {})
-  assert.equal(noCwd.writes, 3, 'without cwd the control-plane writes count as execution work')
-
-  const nullOptions = summarizeTurn([
-    call(1, 'write', { file_path: 'src/a.ts' }),
-    call(1, 'subagent', { description: '实现 X' }),
-  ], 1, null)
-  assert.equal(nullOptions.writes, 1, 'null options fall back to the defaults instead of throwing')
-  assert.equal(nullOptions.delegations, 1)
-})
-
-test('a control-plane edit after a successful verification leaves the verify gate silent', () => {
-  const gates = resolveGates({})
-  const cwd = 'G:\\repo'
-  const events = [
-    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-    resultWithText(1, 'verify-1', 'exit code: 0'),
-    call(2, 'edit', { file_path: 'dispatch/ledger/x.md' }, 'edit-1'),
-  ]
-
-  assert.equal(evaluateVerifyGate(events, 2, gates, cwd), null,
-    '0.8.2: a control-plane write is not a dirty working-tree change')
-
-  // 0.9.1: 新台账目录（dispatch/state/<需求>.md）同样不计脏改动。
-  events.push(call(2, 'edit', { file_path: 'dispatch/state/x.md' }, 'edit-state-dir'))
-  events.push(call(2, 'present', { file_path: 'report.md' }, 'present-1'))
-  assert.equal(evaluateVerifyGate(events, 2, gates, cwd), null,
-    '0.9.1: writing dispatch/state/<需求>.md after the verification does not gate')
-
-  const dirtyEvents = [
-    ...events.slice(0, 4),
-    call(2, 'edit', { file_path: 'src/a.ts' }, 'edit-2'),
-    events[4],
-  ]
-  const dirty = evaluateVerifyGate(dirtyEvents, 2, gates, cwd)
-  assert.notEqual(dirty, null, 'a source edit after the verification still gates')
-  assert.equal(dirty.changes, 1)
-  assert.equal(dirty.lastVerify, 'npm test')
-})
-
-test('a control-plane write after a review does not invalidate it', () => {
-  const gates = resolveGates({})
-  const cwd = 'G:\\repo'
-  const state = { pending: true, warned: false, since: 0 }
-  const events = [
-    call(2, 'write', { file_path: 'dispatch/ledger/x.md' }, 'write-1'),
-    call(2, 'write', { file_path: 'dispatch/state/x.md' }, 'write-2'),
-    call(2, 'edit', { file_path: 'dispatch/state.md' }, 'write-3'),
-  ]
-
-  assert.equal(evaluateReviewGate(events, gates, state, cwd), null,
-    '0.8.2/0.9.1: replaying a ledger file is a legal control-plane action')
-
-  events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-4'))
-  const review = evaluateReviewGate(events, gates, state, cwd)
-  assert.notEqual(review, null)
-  assert.deepEqual(review.files, ['src/a.ts'], 'the ledger path is not listed as a review-dirty file')
-})
-
-test('controlPlanePatterns is configurable on the gate sections and validated', () => {
-  const gates = resolveGates({ controlPlanePatterns: ['dispatch/notes/'] })
-  assert.deepEqual(gates.controlPlanePatterns, ['dispatch/notes/'])
-  assert.deepEqual(gates.verify.controlPlanePatterns, ['dispatch/notes/'], 'verify carries the same list')
-  assert.deepEqual(gates.review.controlPlanePatterns, ['dispatch/notes/'], 'review carries the same list')
-
-  const cwd = 'G:\\repo'
-  const state = { pending: true, warned: false, since: 0 }
-  const reviewEvents = [call(2, 'edit', { file_path: 'dispatch/notes/y.md' }, 'write-1')]
-  assert.equal(evaluateReviewGate(reviewEvents, gates, state, cwd), null, 'the custom fragment is exempt')
-  reviewEvents.push(call(2, 'edit', { file_path: 'src/a.ts' }, 'write-2'))
-  assert.notEqual(evaluateReviewGate(reviewEvents, gates, state, cwd), null, 'other paths still count')
-
-  assert.equal(classifyPath('dispatch\\ledger\\x.md', { cwd }), ARTIFACT.CONTROL,
-    'backslashes are normalized')
-  assert.equal(classifyPath('src\\a.ts', { cwd }), ARTIFACT.CODE)
-  assert.equal(classifyPath('dispatch/state/x.md', { cwd }), ARTIFACT.CONTROL,
-    '0.9.1: the per-requirement ledger directory is the control plane')
-  assert.equal(classifyPath('dispatch/state.md', { cwd }), ARTIFACT.CONTROL,
-    '0.9.1: the legacy single-file ledger stays control plane (read-only)')
-  assert.equal(classifyPath('src/app/dispatch/state.ts', { cwd }), ARTIFACT.CODE,
-    '0.11.0 A1: a same-named source path is code, not control plane')
-  assert.deepEqual(DEFAULT_CONTROL_PLANE_PATTERNS,
-    ['dispatch/', 'docs/superpowers/specs/'], '0.10.0 C1: aligned with the write-policy allowlist')
-  assert.deepEqual(DEFAULT_CONTROL_PLANE_PATTERNS, DEFAULT_ALLOWLIST,
-    '0.10.0 C1: the gate list and the write-guard list are the same value')
-
-  assert.throws(() => resolveGates({ controlPlanePatterns: [] }), /dispatch-protocol: gates\.controlPlanePatterns/)
-  assert.throws(() => resolveGates({ controlPlanePatterns: ['ok', null] }), /dispatch-protocol: gates\.controlPlanePatterns/)
-})
+// 规则正文与提示词段
 
 test('the injected rules name the light-batch review exception and the ledger carrier', () => {
   const h = harness()
@@ -2370,6 +1281,46 @@ test('the removed nudge section fails at load time with a migration hint', () =>
   assert.throws(() => resolveConfig({ nudge: { log: false } }), /nudge/)
 })
 
+test('0.17.0: the removed gates section fails at load time with a migration hint', () => {
+  assert.throws(() => resolveConfig({ gates: {} }), (error) => {
+    assert.match(error.message, /gates/)
+    assert.match(error.message, /0\.17\.0/)
+    assert.match(error.message, /迁移/)
+    assert.match(error.message, /dispatch\/runs/)
+    return true
+  })
+  assert.throws(() => resolveConfig({ gates: { enabled: false } }), /gates/)
+})
+
+test('0.17.0: a closing turn never steers; the observation row is the only evidence left', () => {
+  // 用户裁决（2026-11-18）：收尾的可核对提醒几乎没有价值，还多一次模型步进。
+  // 本用例同时喂「等待期轮询」和「未验证就 present」两种旧闸门形态，断言一条
+  // 提醒都不发，而观测行照写。
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-no-gates-'))
+  try {
+    const h = harness()
+    plugin.apply(h.ctx, quiet)
+    const cwd = fullProject(dir)
+    const parent = h.main('parent-no-gates', [
+      call(1, 'list_agents', {}, 'poll-1'),
+      call(1, 'list_agents', {}, 'poll-2'),
+      call(1, 'list_agents', {}, 'poll-3'),
+      call(1, 'list_agents', {}, 'poll-4'),
+      call(1, 'write', { file_path: 'a.ts' }, 'write-1'),
+      call(1, 'present', {}, 'present-1'),
+    ], {}, 'session-no-gates', cwd)
+    h.created(parent)
+    h.turnStopping(parent, 1)
+
+    assert.equal(parent.messages.length, 0, '0.17.0: closing the turn adds no reminder message')
+    const rows = readRows(join(cwd, 'dispatch', 'runs', 'session-no-gates.jsonl'))
+    assert.equal(rows.length, 1, 'the observation row still records the turn')
+    assert.equal(rows[0].writes, 1)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('rule 1 names the override file and carries no nudge prose', () => {
   const h = harness()
   plugin.apply(h.ctx, {})
@@ -2410,248 +1361,7 @@ test('the observation shell tier drops git commit while the mutation tier keeps 
 })
 
 // ---------------------------------------------------------------------------
-// 0.10.0 — 守卫按改动类型分级（spec §2 C1–C5 / §4 断言 1–6）
-
-test('C1: dispatch/ subtree writes after a successful verification do not gate', () => {
-  const gates = resolveGates({})
-  const cwd = 'G:\\repo'
-  const events = [
-    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-    resultWithText(1, 'verify-1', 'exit code: 0'),
-    call(2, 'write', { file_path: 'dispatch/override.json' }, 'write-1'),
-    result(2, 'write-1', false),
-    call(2, 'write', { file_path: 'dispatch/recon/a.md' }, 'write-2'),
-    result(2, 'write-2', false),
-    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-  ]
-
-  assert.equal(evaluateVerifyGate(events, 2, gates, cwd), null,
-    'C1: dispatch/override.json and dispatch/recon/* are control-plane writes')
-  assert.equal(analyzeVerification(events, gates.verify, cwd).changes, 0,
-    'C1: control-plane writes are not counted as dirty changes')
-})
-
-test('C2: a docs-only change after the last verification skips the gate, code still gates', () => {
-  const gates = resolveGates({})
-  const cwd = 'G:\\repo'
-  const prefix = [
-    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-    resultWithText(1, 'verify-1', 'exit code: 0'),
-  ]
-  const docs = [
-    ...prefix,
-    call(2, 'write', { file_path: 'AGENTS.md' }, 'write-1'),
-    result(2, 'write-1', false),
-    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-  ]
-  assert.equal(evaluateVerifyGate(docs, 2, gates, cwd), null, 'C2: AGENTS.md is documentation')
-
-  const code = [
-    ...docs.slice(0, 2),
-    call(2, 'write', { file_path: 'server/src/x.ts' }, 'write-1'),
-    result(2, 'write-1', false),
-    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-  ]
-  const state = evaluateVerifyGate(code, 2, gates, cwd)
-  assert.notEqual(state, null, 'C2: a code write still gates')
-  assert.equal(state.docOnly, false)
-  const text = renderVerifyGate(gates.verify.text, state)
-  assert.match(text, /server\/src\/x\.ts/, 'C5: the text names the dirty file')
-  assert.match(text, /代码改动/, 'C5: the text names the change kind')
-
-  // C2：「从未跑过」分支同样适用——只有文档时静默。
-  const never = [
-    call(1, 'write', { file_path: 'AGENTS.md' }, 'write-1'),
-    result(1, 'write-1', false),
-    call(1, 'present', { file_path: 'report.md' }, 'present-1'),
-  ]
-  assert.equal(evaluateVerifyGate(never, 1, gates, cwd), null,
-    'C2: the never-verified branch exempts documentation too')
-})
-
-test('C2 boundary: a write without a path is not documentation and still gates', () => {
-  const gates = resolveGates({})
-  const events = [
-    call(1, 'write', {}, 'write-1'),
-    result(1, 'write-1', false),
-    call(1, 'present', { file_path: 'report.md' }, 'present-1'),
-  ]
-
-  const state = evaluateVerifyGate(events, 1, gates)
-  assert.notEqual(state, null, 'C2: a path-less write cannot be proven documentation')
-  assert.equal(state.docOnly, false)
-  assert.deepEqual(state.files, ['<shell>'], 'C2: an unlocatable dirty entry is <shell>')
-})
-
-test('C3: restoring the working tree to HEAD is not a dirty change', () => {
-  assert.equal(isRestoreCommand('git checkout -- a.ts'), true)
-  assert.equal(isRestoreCommand('git -C "G:\\repo" checkout -- a.ts b.ts'), true, 'git -C is skipped')
-  assert.equal(isRestoreCommand('git restore x'), true)
-  assert.equal(isRestoreCommand('git restore src/a.ts docs/b.md'), true)
-
-  assert.equal(isRestoreCommand('git checkout main'), false)
-  assert.equal(isRestoreCommand('git checkout -b y'), false)
-  assert.equal(isRestoreCommand('git restore --source=HEAD~1 a.ts'), false)
-  assert.equal(isRestoreCommand('git restore -s HEAD~1 a.ts'), false, 'the -s shorthand switches the tree')
-  assert.equal(isRestoreCommand('git checkout --'), false, 'no path means nothing was restored')
-  assert.equal(isRestoreCommand('git checkout -q -- a.ts'), false, 'an unmodelled option stays dirty')
-  assert.equal(isRestoreCommand('git checkout -- a.ts; Remove-Item b.ts'), false,
-    'a chained mutation is not a restore')
-  assert.equal(isRestoreCommand('git status --short'), false)
-  assert.equal(isRestoreCommand(''), false)
-  assert.equal(isRestoreCommand(undefined), false)
-
-  // 0.10.0 C3a：还原段 + 中性只读段（上游真实误报场景）不再按脏处理。
-  assert.equal(isRestoreCommand('git checkout -- a.ts; git status --porcelain'), true,
-    'C3a: a restore followed by a status self-check is still a restore')
-  assert.equal(isRestoreCommand('git -C repo restore src/a.ts && git diff --stat'), true,
-    'C3a: git -C restore plus a read-only diff is still a restore')
-  assert.equal(isRestoreCommand('git checkout -- a.ts; git log --oneline -3'), true,
-    'C3a: a read-only log segment is neutral')
-  assert.equal(isRestoreCommand('git checkout -- a.ts > out.txt'), false,
-    'C3a: a redirect may write to disk')
-  assert.equal(isRestoreCommand('git checkout -- a.ts; git add -A'), false,
-    'C3a: a non-neutral segment keeps the whole command dirty')
-  assert.equal(isRestoreCommand('git status'), false,
-    'C3a: read-only segments alone never make a restore')
-  assert.equal(isRestoreCommand('git checkout -- a.ts; git status; git diff --stat'), true,
-    'C3a: several neutral segments after a restore stay neutral')
-
-  const gates = resolveGates({})
-  const cwd = 'G:\\repo'
-  const events = [
-    call(1, 'write', { file_path: 'src/a.ts' }, 'write-1'),
-    result(1, 'write-1', false),
-    call(2, 'pwsh', { command: 'git checkout -- src/a.ts' }, 'restore-1'),
-    result(2, 'restore-1', false),
-    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-  ]
-  const state = evaluateVerifyGate(events, 2, gates, cwd)
-  assert.notEqual(state, null, 'the earlier code write still gates')
-  assert.equal(state.changes, 1, 'C3: the restore adds no dirty change')
-  assert.equal(state.files.includes('<shell>'), false, 'C3: the restore is not listed as a shell change')
-
-  // C3a 端到端：`checkout -- …; status` 作为 pwsh 事件也不得算脏。
-  const afterVerify = [
-    call(1, 'write', { file_path: 'src/a.ts' }, 'write-2'),
-    result(1, 'write-2', false),
-    call(1, 'pwsh', { command: 'npm test' }, 'verify-2'),
-    resultWithText(1, 'verify-2', 'exit code: 0'),
-    call(2, 'pwsh', { command: 'git checkout -- src/a.ts; git status --porcelain' }, 'restore-2'),
-    result(2, 'restore-2', false),
-  ]
-  const c3a = analyzeVerification(afterVerify, gates.verify, cwd)
-  assert.equal(c3a.changes, 0, 'C3a: the restore-plus-status call adds no dirty change')
-  assert.equal(c3a.files.includes('<shell>'), false, 'C3a: it is not listed as a shell change')
-  assert.equal(c3a.dirty, false, 'C3a: a successful verification is still the latest state')
-})
-
-test('C4: a docs-only write after the review renders the doc-only action', () => {
-  const gates = resolveGates({})
-  const cwd = 'G:\\repo'
-  const state = { pending: true, warned: false, since: 0 }
-  const events = [
-    call(2, 'write', { file_path: 'README.md' }, 'write-1'),
-    call(2, 'edit', { file_path: 'dispatch/ledger/x.md' }, 'write-2'),
-  ]
-  const review = evaluateReviewGate(events, gates, state, cwd)
-  assert.notEqual(review, null)
-  assert.equal(review.docOnly, true, 'C4: markdown plus a control-plane ledger is documentation')
-  assert.deepEqual(review.files, ['README.md'], 'the control-plane write is not listed')
-  const text = renderReviewGate(gates.review.text, review)
-  assert.match(text, /不必重开代码评审/, 'C4: the doc-only action is chosen')
-  assert.doesNotMatch(text, /重开受影响切片/, 'C4: the code action must not leak into a doc-only change')
-  assert.match(text, /README\.md/, 'C5: the doc-only text names the file')
-
-  events.push(call(2, 'write', { file_path: 'src/a.ts' }, 'write-3'))
-  const mixed = evaluateReviewGate(events, gates, state, cwd)
-  assert.equal(mixed.docOnly, false, 'C4: a mixed batch is not doc-only')
-  const mixedText = renderReviewGate(gates.review.text, mixed)
-  assert.match(mixedText, /src\/a\.ts/,
-    'C4/C5: the original text keeps the {files} placeholder filled')
-  assert.match(mixedText, /重开受影响切片/, 'C4: a mixed batch asks for a re-review')
-})
-
-test('C4: the plugin picks the doc-only review text and logs docOnly', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-review-doc-'))
-  try {
-    const log = join(dir, 'decisions.jsonl')
-    const events = []
-    const h = harness()
-    plugin.apply(h.ctx, {
-      log, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
-    })
-
-    const parent = h.main('session-review-doc', events, {}, 'session-review-doc', fullProject(dir))
-    h.created(parent)
-    h.created(h.child('review-doc', 'session-review-doc', '只读评审：diff'))
-    h.ended({ childId: 'review-doc', stopReason: 'completed' })
-    events.push(call(2, 'write', { file_path: 'docs/agent/notes.md' }, 'write-1'), result(2, 'write-1', false))
-    h.turnStopping(parent, 2)
-
-    assert.equal(parent.messages.length, 1)
-    assert.match(parent.messages[0].text, /不必重开代码评审/)
-    assert.doesNotMatch(parent.messages[0].text, /重开受影响切片/)
-    assert.match(parent.messages[0].text, /docs\/agent\/notes\.md/)
-    const row = readRows(log).find(entry => entry.kind === 'gate')
-    assert.equal(row.gate, 'review')
-    assert.equal(row.docOnly, true, 'C4: the decision log carries docOnly')
-    assert.deepEqual(row.files, ['docs/agent/notes.md'])
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('C5: the gate text caps files at three, counts the rest and names the kind', () => {
-  const gates = resolveGates({})
-  const info = {
-    changes: 5,
-    lastVerify: null,
-    dirty: true,
-    docOnly: false,
-    files: ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts', 'src/e.ts'],
-  }
-  const text = renderVerifyGate(gates.verify.text, info)
-  assert.match(text, /src\/a\.ts, src\/b\.ts, src\/c\.ts 等 5 个/, 'C5: three paths plus the total')
-  assert.doesNotMatch(text, /src\/d\.ts/, 'C5: only three paths are shown')
-  assert.match(text, /代码改动/)
-
-  assert.equal(renderVerifyGate('{files}（{kind}）', { changes: 1, lastVerify: null, files: ['<shell>'] }),
-    '<shell>（未知）', 'C5: a shell-only change is unknown, not code')
-  assert.equal(renderVerifyGate('{files}', { changes: 0, lastVerify: null, files: [] }), '工作区',
-    'C5: no path falls back to 工作区')
-  assert.equal(renderVerifyGate('{changes}/{lastVerify}', { changes: 2, lastVerify: 'npm test' }), '2/npm test',
-    'C5: the old placeholders still render')
-  assert.equal(renderReviewGate('{files}', { files: [] }), '工作区')
-})
-
-test('0.10.0 §4-6: the new gate settings are validated and the old config still loads', () => {
-  assert.throws(() => resolveGates({ verify: { docPatterns: [] } }),
-    /dispatch-protocol: gates\.verify\.docPatterns/)
-  assert.throws(() => resolveGates({ verify: { docPatterns: ['ok', 42] } }),
-    /dispatch-protocol: gates\.verify\.docPatterns/)
-
-  const gates = resolveGates({})
-  assert.deepEqual(gates.verify.docPatterns,
-    ['.md', '.mdx', 'docs/', 'dispatch/', 'LICENSE', '.gitignore', '.gitattributes'])
-  assert.deepEqual(gates.review.docPatterns, gates.verify.docPatterns, 'review reuses the same doc list')
-  assert.match(gates.review.text, /\{action\}/, '0.11.0 D4: review has a single {action} template')
-  assert.equal('textDocOnly' in gates.review, false, '0.11.0 D3: the textDocOnly key is gone')
-  assert.match(gates.verify.text, /\{files\}/)
-  assert.match(gates.verify.text, /\{kind\}/)
-  assert.match(gates.verify.text, /\{action\}/)
-
-  // 旧配置（没有新键）仍加载，旧自定义文案不被新占位破坏。
-  const legacy = resolveGates({
-    verify: { text: '旧文案 {changes}/{lastVerify}' },
-    review: { text: '旧文案 {files}' },
-  })
-  assert.equal(renderVerifyGate(legacy.verify.text, { changes: 1, lastVerify: null }), '旧文案 1/从未验证')
-  assert.equal(renderReviewGate(legacy.review.text, { files: ['a.md'] }), '旧文案 a.md')
-})
-
-// ---------------------------------------------------------------------------
-// 0.11.0 — 产物分类器（spec D1–D3）：一个分类器，闸门/观测只消费它的结果
+// 0.11.0 — 路径分类器（classifyPath）：观测与控制面判定共用同一套口径
 
 test('D1: the classifier maps paths to control-plane, doc, code and unknown', () => {
   const cwd = 'G:\\repo'
@@ -2711,174 +1421,6 @@ test('D1-2a(f): repeated slashes produce dropped segments', () => {
   assert.equal(classifyPath('dispatch//x.md', { cwd: 'G:\\repo', docPatterns: DEFAULT_DOC_PATTERNS }),
     ARTIFACT.CONTROL, 'the empty segment is dropped and dispatch/x.md stays control plane')
 })
-
-test('D1-2a(g): a traversal write cannot bypass the verify gate', () => {
-  const gates = resolveGates({})
-  const cwd = 'G:\\repo'
-  const events = [
-    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-    resultWithText(1, 'verify-1', 'exit code: 0'),
-    call(2, 'write', { file_path: 'dispatch/../src/x.ts' }, 'write-1'),
-    result(2, 'write-1', false),
-    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-  ]
-  const state = evaluateVerifyGate(events, 2, gates, cwd)
-  assert.notEqual(state, null, 'the folded src path is dirty code, so the gate fires')
-  assert.equal(state.docOnly, false, 'the traversal path is not documentation/control plane')
-  assert.deepEqual(state.files, ['dispatch/../src/x.ts'], 'the raw path is shown, but classified as code')
-})
-
-test('D2/D3: the verify gate consumes the classifier with the session cwd', () => {
-  const gates = resolveGates({})
-  const cwd = 'G:\\repo'
-  const prefix = [
-    call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-    resultWithText(1, 'verify-1', 'exit code: 0'),
-  ]
-  const docs = [
-    ...prefix,
-    call(2, 'write', { file_path: 'AGENTS.md' }, 'write-1'),
-    result(2, 'write-1', false),
-    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-  ]
-  assert.equal(analyzeVerification(docs, gates.verify, cwd).docOnly, true,
-    'D3: AGENTS.md is documentation when cwd is known')
-  assert.equal(evaluateVerifyGate(docs, 2, gates, cwd), null,
-    'D2: a docs-only change after the verification is silent with cwd')
-
-  // A1 回归（0.11.0 最重要的一条）：0.10.0 的子串口径把 src/**/dispatch/**
-  // 连带豁免，本批起必须触发。
-  const code = [
-    ...prefix,
-    call(2, 'write', { file_path: 'src/app/dispatch/x.ts' }, 'write-2'),
-    result(2, 'write-2', false),
-    call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-  ]
-  const state = evaluateVerifyGate(code, 2, gates, cwd)
-  assert.notEqual(state, null, 'A1: src/app/dispatch/x.ts must trigger the verify gate')
-  assert.equal(state.docOnly, false, 'A1: the dirty entry is code, not documentation')
-  assert.deepEqual(state.files, ['src/app/dispatch/x.ts'])
-
-  // D1-6 / spec §2.4：没有 cwd 时分类退化为代码 —— 文档也要触发（保守）。
-  assert.equal(analyzeVerification(docs, gates.verify).docOnly, false,
-    'D1-6: without cwd even AGENTS.md is not proven documentation')
-  assert.notEqual(evaluateVerifyGate(docs, 2, gates), null,
-    'D1-6: without cwd the gate stays conservative and triggers')
-})
-
-test('D3: the review gate treats src/**/dispatch/** as code and docs as documentation', () => {
-  const gates = resolveGates({})
-  const cwd = 'G:\\repo'
-  const state = { pending: true, warned: false, since: 0 }
-
-  const docReview = evaluateReviewGate(
-    [call(2, 'write', { file_path: 'AGENTS.md' }, 'write-1')], gates, state, cwd,
-  )
-  assert.equal(docReview.docOnly, true, 'D3: a doc write after the review is documentation')
-  assert.deepEqual(docReview.files, ['AGENTS.md'])
-
-  const codeReview = evaluateReviewGate(
-    [call(2, 'write', { file_path: 'src/app/dispatch/x.ts' }, 'write-2')], gates, state, cwd,
-  )
-  assert.equal(codeReview.docOnly, false, 'A1: a same-named source path invalidates the review')
-
-  assert.equal(evaluateReviewGate(
-    [call(2, 'write', { file_path: 'dispatch/ledger/x.md' }, 'write-3')], gates, state, cwd,
-  ), null, 'D3: control-plane writes still do not invalidate the review')
-})
-
-test('D2: the plugin passes the session cwd to the verify gate (A1 end-to-end)', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-gate-cwd-'))
-  try {
-    const events = []
-    const h = harness()
-    plugin.apply(h.ctx, { log: false, checkpoint: { enabled: false } })
-    const parent = h.main('session-gate-cwd', events, {}, 'session-gate-cwd', fullProject(dir))
-    h.created(parent)
-
-    events.push(
-      call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-      resultWithText(1, 'verify-1', 'exit code: 0'),
-    )
-    events.push(
-      call(2, 'write', { file_path: 'AGENTS.md' }, 'write-doc'),
-      result(2, 'write-doc', false),
-      call(2, 'present', { file_path: 'report.md' }, 'present-doc'),
-    )
-    h.turnStopping(parent, 2)
-    assert.equal(parent.messages.length, 0, 'a docs-only closure is silent when the session cwd is known')
-
-    events.push(
-      call(3, 'write', { file_path: 'src/app/dispatch/x.ts' }, 'write-code'),
-      result(3, 'write-code', false),
-      call(3, 'present', { file_path: 'report.md' }, 'present-code'),
-    )
-    h.turnStopping(parent, 3)
-    assert.equal(parent.messages.length, 1, 'A1: the plugin still gates a src/**/dispatch/** change')
-    assert.match(parent.messages[0].text, /src\/app\/dispatch\/x\.ts/)
-    assert.match(parent.messages[0].text, /先跑一次集成命令并留存退出码/)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-// ---------------------------------------------------------------------------
-// 0.11.0 — 单一文案模型（spec D4）：一个模板 + 一个闸门给定的 {action}
-
-test('D4-1: the verify default ends in {action} and renders the integration action', () => {
-  const gates = resolveGates({})
-  assert.match(gates.verify.text, /\{action\}$/, 'the default template ends in the action placeholder')
-  const text = renderVerifyGate(gates.verify.text, {
-    changes: 1, dirty: true, docOnly: false, lastVerify: null, files: ['src/a.ts'],
-  })
-  assert.match(text, /src\/a\.ts（代码改动）/, 'the file and kind placeholders still render')
-  assert.match(text, /先跑一次集成命令并留存退出码，再收口。/,
-    'D4: the verify action is the fixed integration command')
-})
-
-test('D4-2: a doc-only review renders the docs-check action, never the re-review one', () => {
-  const gates = resolveGates({})
-  assert.match(gates.review.text, /\{action\}$/, 'the default template ends in the action placeholder')
-  const text = renderReviewGate(gates.review.text, { files: ['AGENTS.md'], docOnly: true })
-  assert.match(text, /不必重开代码评审/, 'D4: a doc-only change does not invalidate the code slice')
-  assert.match(text, /docs-check/, 'D4: a doc-only change points at the deterministic checker')
-  assert.match(text, /断言 → 代码位置/, 'D4: it asks for the assertion → code-location table')
-  assert.match(text, /1 次有界评审/, 'D4: a non-empty table buys one bounded review')
-  assert.doesNotMatch(text, /重开受影响切片/, 'D4: the code action must not leak in')
-  assert.match(text, /AGENTS\.md/)
-})
-
-test('D4-3: a code review renders the re-review action, never the machine-check one', () => {
-  const gates = resolveGates({})
-  const text = renderReviewGate(gates.review.text, { files: ['src/a.ts'], docOnly: false })
-  assert.match(text, /评审已失效：重开受影响切片再收口。/, 'D4: code changes re-open the affected slice')
-  assert.doesNotMatch(text, /不必重开代码评审/, 'D4: the doc-only action must not leak in')
-})
-
-test('D4-4: a custom template may place {action}; old and unknown placeholders survive', () => {
-  const gates = resolveGates({
-    verify: { text: 'V：{files}（{kind}）{action} [changes={changes}; last={lastVerify}]' },
-    review: { text: 'R：{files} {action}' },
-  })
-  assert.equal(renderVerifyGate(gates.verify.text, {
-    changes: 2, lastVerify: 'npm test', files: ['src/a.ts'],
-  }), 'V：src/a.ts（代码）先跑一次集成命令并留存退出码，再收口。 [changes=2; last=npm test]',
-  'D4: {action}, {changes} and {lastVerify} render in a custom template')
-  assert.equal(renderReviewGate(gates.review.text, { files: ['a.md'], docOnly: true }),
-    'R：a.md 这类改动不使代码切片失效：跑 docs-check（仓库无此脚本则记一行台账），并按规则 1/4 交「断言 → 代码位置」表（表非空再由派发方派 1 次有界评审）即可，不必重开代码评审。',
-    'D4: the doc-only action fills {action} in a custom review template')
-
-  // 未知占位原样保留；没注入 action 时 {action} 不被抹掉。
-  assert.equal(renderGateText('{files} {oops}', { files: ['a.ts'] }), 'a.ts {oops}')
-  assert.equal(renderGateText('{action}', {}), '{action}')
-  assert.equal(renderGateText('{action}', { action: 'X' }), 'X')
-})
-
-// ---------------------------------------------------------------------------
-// 0.13.0 — 项目级开关（spec `2026-11-17-project-switch.md` §5）
-//
-// 每个用例用独立 cwd：开关按 `(绝对路径, mtimeMs)` 记忆化，同一目录里改写标记
-// 文件不保证 mtime 变化，独立目录才测得到「每个 cwd 各自解析」。
 
 test('0.13.0: projectSwitch defaults and rejects silent breakage', () => {
   // §5-1
@@ -2987,33 +1529,6 @@ test('0.13.0: a project shadow mode logs project-shadow and never blocks', () =>
     assert.equal(rows[0].reason, 'project-shadow')
     assert.equal(rows[0].mode, 'shadow')
     assert.equal(rows[0].file, 'server/src/x.ts')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('0.13.0: a project off mode silences the state gates', () => {
-  // §5-5
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-project-gate-'))
-  try {
-    const cwd = join(dir, 'project')
-    mkdirSync(cwd, { recursive: true })
-    writeProjectMarker(cwd, '{"mode":"off"}')
-
-    const h = harness()
-    plugin.apply(h.ctx, { log: false })
-    const parent = h.main('session-project-gate', [
-      call(1, 'list_agents', {}, 'poll-1'),
-      call(1, 'list_agents', {}, 'poll-2'),
-      call(1, 'list_agents', {}, 'poll-3'),
-      call(1, 'list_agents', {}, 'poll-4'),
-      call(1, 'list_agents', {}, 'poll-5'),
-      call(1, 'list_agents', {}, 'poll-6'),
-    ], {}, 'session-project-gate', cwd)
-    h.created(parent)
-    h.turnStopping(parent, 1)
-
-    assert.equal(parent.messages.length, 0, 'off mode delivers no wait gate')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -3562,7 +2077,8 @@ test('0.15.0: readProjectPolicy returns only the fields the file validly carries
       { mode: 'off', rules: 'business' },
       'mode and rules are independent fields')
 
-    // 全部字段有效时逐字段投影，数组形状与文件一致。
+    // 全部字段有效时逐字段投影，数组形状与文件一致；0.17.0 删除的闸门字段
+    // （controlPlanePatterns / verify / contract / docs）出现在文件里也只是忽略。
     const full = {
       mode: 'shadow',
       enabled: true,
@@ -3577,11 +2093,7 @@ test('0.15.0: readProjectPolicy returns only the fields the file validly carries
       mode: 'shadow',
       rules: 'business',
       allowlist: ['dispatch/', 'docs/design/'],
-      controlPlanePatterns: ['dispatch/', 'docs/design/'],
-      verifyCommands: ['pnpm -w test', 'pnpm -w typecheck'],
-      contractPatterns: ['src/types/', 'prisma/schema.prisma'],
-      docsPatterns: ['.md', 'docs/'],
-    }, 'nested verify/contract/docs flatten to verifyCommands/contractPatterns/docsPatterns')
+    }, '0.17.0: only mode/rules/allowlist are read; gate-only fields are ignored')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -3598,23 +2110,16 @@ test('0.15.0: an invalid policy field falls back alone, keeping the other fields
       writeProjectMarker(cwd, body)
       return cwd
     }
+    // 0.17.0：策略只剩 mode / rules / allowlist；闸门字段无论写什么都读不到。
     const base = {
       mode: 'shadow',
       rules: 'business',
       allowlist: ['dispatch/'],
-      controlPlanePatterns: ['dispatch/'],
-      verify: { commands: ['pnpm test'] },
-      contract: { patterns: ['src/types/'] },
-      docs: { patterns: ['.md'] },
     }
     const expected = {
       mode: 'shadow',
       rules: 'business',
       allowlist: ['dispatch/'],
-      controlPlanePatterns: ['dispatch/'],
-      verifyCommands: ['pnpm test'],
-      contractPatterns: ['src/types/'],
-      docsPatterns: ['.md'],
     }
     const without = (...dropped) => {
       const policy = structuredClone(expected)
@@ -3630,13 +2135,13 @@ test('0.15.0: an invalid policy field falls back alone, keeping the other fields
     assert.deepEqual(policyOf('allowlist-string', { allowlist: 'a' }), without('allowlist'))
     assert.deepEqual(policyOf('allowlist-number-item', { allowlist: ['a', 2] }), without('allowlist'))
     assert.deepEqual(policyOf('allowlist-empty-item', { allowlist: ['a', ''] }), without('allowlist'))
-    assert.deepEqual(policyOf('control-plane-empty', { controlPlanePatterns: [] }), without('controlPlanePatterns'))
-    assert.deepEqual(policyOf('verify-empty', { verify: { commands: [] } }), without('verifyCommands'))
-    assert.deepEqual(policyOf('verify-not-list', { verify: { commands: 'a' } }), without('verifyCommands'))
-    assert.deepEqual(policyOf('verify-not-object', { verify: 'x' }), without('verifyCommands'))
-    assert.deepEqual(policyOf('contract-number-item', { contract: { patterns: [1] } }), without('contractPatterns'))
-    assert.deepEqual(policyOf('contract-empty', { contract: { patterns: [] } }), without('contractPatterns'))
-    assert.deepEqual(policyOf('docs-empty', { docs: { patterns: [] } }), without('docsPatterns'))
+    // 0.17.0 回归：旧闸门字段即使写得完整也不改变返回对象。
+    assert.deepEqual(policyOf('legacy-gates', {
+      controlPlanePatterns: ['src/notes/'],
+      verify: { commands: ['pnpm test'] },
+      contract: { patterns: ['src/types/'] },
+      docs: { patterns: ['.md'] },
+    }), expected, '0.17.0: gate-only fields are ignored, not projected')
 
     // 缓存里只有解析结果，返回的数组不与缓存共享：改返回值不影响下一次读取。
     const isolation = project('isolation', JSON.stringify(base))
@@ -3806,197 +2311,6 @@ test('0.15.0: the write guard uses the project allowlist and still honours the o
   }
 })
 
-test('0.15.0: the verify gate uses the project verify.commands', () => {
-  // §2.3 五闸门行 / §5-B：策略里的命令才算验证，profile 的默认命令不再算。
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-verify-'))
-  try {
-    const cwd = join(dir, 'project')
-    mkdirSync(cwd, { recursive: true })
-    writeProjectMarker(cwd, JSON.stringify({ mode: 'full', verify: { commands: ['pnpm -w test'] } }))
-
-    const verified = harness()
-    plugin.apply(verified.ctx, quiet)
-    const clean = verified.main('session-policy-verify-ok', [
-      call(1, 'write', { file_path: 'src/a.ts' }, 'write-1'),
-      result(1, 'write-1', false),
-      call(2, 'pwsh', { command: 'pnpm -w test' }, 'verify-1'),
-      resultWithText(2, 'verify-1', 'exit code: 0'),
-      call(3, 'present', { file_path: 'report.md' }, 'present-1'),
-    ], {}, 'session-policy-verify-ok', cwd)
-    verified.created(clean)
-    verified.turnStopping(clean, 1)
-    verified.turnStopping(clean, 2)
-    verified.turnStopping(clean, 3)
-    assert.equal(clean.messages.length, 0, 'the project command counts as the verification')
-
-    const profileOnly = harness()
-    plugin.apply(profileOnly.ctx, quiet)
-    const dirty = profileOnly.main('session-policy-verify-default', [
-      call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-      resultWithText(1, 'verify-1', 'exit code: 0'),
-      call(2, 'write', { file_path: 'src/a.ts' }, 'write-1'),
-      result(2, 'write-1', false),
-      call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-    ], {}, 'session-policy-verify-default', cwd)
-    profileOnly.created(dirty)
-    profileOnly.turnStopping(dirty, 1)
-    profileOnly.turnStopping(dirty, 2)
-    assert.equal(dirty.messages.length, 1,
-      'a profile-default command is not a verification once the project supplies its own list')
-    assert.match(dirty.messages[0].text, /准备 present\/commit/)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('0.15.0: the contract gate uses the project contract.patterns', () => {
-  // §2.3 五闸门行 / §5-B：契约面只由策略决定。
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-contract-'))
-  try {
-    const cwd = join(dir, 'project')
-    mkdirSync(cwd, { recursive: true })
-    writeProjectMarker(cwd, JSON.stringify({ mode: 'full', contract: { patterns: ['schema/'] } }))
-
-    const h = harness()
-    plugin.apply(h.ctx, { log: false, checkpoint: { enabled: false } })
-    const parent = h.main('session-policy-contract', [
-      call(1, 'write', { file_path: 'schema/user.json' }, 'write-1'),
-    ], {}, 'session-policy-contract', cwd)
-    h.created(parent)
-    h.created(h.child('child-policy-contract', 'session-policy-contract', '实现 A'))
-    h.turnStopping(parent, 1)
-    assert.equal(parent.messages.length, 1, 'the project contract pattern fires the gate')
-    assert.match(parent.messages[0].text, /schema\/user\.json/)
-
-    // 默认片段 "contract" 已被策略替换：同名文件不再触发。
-    const replaced = harness()
-    plugin.apply(replaced.ctx, { log: false, checkpoint: { enabled: false } })
-    const quietParent = replaced.main('session-policy-contract-default', [
-      call(1, 'write', { file_path: 'tmp/fix-contract.md' }, 'write-1'),
-    ], {}, 'session-policy-contract-default', cwd)
-    replaced.created(quietParent)
-    replaced.created(replaced.child('child-contract-default', 'session-policy-contract-default', '实现 B'))
-    replaced.turnStopping(quietParent, 1)
-    assert.equal(quietParent.messages.length, 0,
-      'the profile pattern is replaced by the project list')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('0.15.0: the docs patterns flow into both verify and review', () => {
-  // §2.3 五闸门行 / §5-B：verify.docPatterns 与 review.docPatterns 同源覆盖。
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-docs-'))
-  try {
-    const cwd = join(dir, 'project')
-    mkdirSync(cwd, { recursive: true })
-    writeProjectMarker(cwd, JSON.stringify({ mode: 'full', docs: { patterns: ['.txt'] } }))
-
-    // verify：策略认 .txt 是文档，收口静默；.md 不再是文档，收口触发。
-    const docOnly = harness()
-    plugin.apply(docOnly.ctx, quiet)
-    const clean = docOnly.main('session-policy-docs-verify', [
-      call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-      resultWithText(1, 'verify-1', 'exit code: 0'),
-      call(2, 'write', { file_path: 'notes.txt' }, 'write-1'),
-      result(2, 'write-1', false),
-      call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-    ], {}, 'session-policy-docs-verify', cwd)
-    docOnly.created(clean)
-    docOnly.turnStopping(clean, 1)
-    docOnly.turnStopping(clean, 2)
-    assert.equal(clean.messages.length, 0, 'the project treats .txt as documentation, so no verify gate')
-
-    const codeChange = harness()
-    plugin.apply(codeChange.ctx, quiet)
-    const dirty = codeChange.main('session-policy-docs-code', [
-      call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-      resultWithText(1, 'verify-1', 'exit code: 0'),
-      call(2, 'write', { file_path: 'notes.md' }, 'write-1'),
-      result(2, 'write-1', false),
-      call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-    ], {}, 'session-policy-docs-code', cwd)
-    codeChange.created(dirty)
-    codeChange.turnStopping(dirty, 1)
-    codeChange.turnStopping(dirty, 2)
-    assert.equal(dirty.messages.length, 1, 'a .md write is code under the project doc patterns')
-
-    // review：同一份策略让评审闸门按文档口径选文案。
-    const events = []
-    const reviewHarness = harness()
-    plugin.apply(reviewHarness.ctx, {
-      log: false, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
-    })
-    const parent = reviewHarness.main('session-policy-docs-review', events, {}, 'session-policy-docs-review', cwd)
-    reviewHarness.created(parent)
-    reviewHarness.created(reviewHarness.child('review-policy-docs', 'session-policy-docs-review', '只读评审：diff'))
-    reviewHarness.ended({ childId: 'review-policy-docs', stopReason: 'completed' })
-    events.push(call(2, 'write', { file_path: 'notes.txt' }, 'write-1'), result(2, 'write-1', false))
-    reviewHarness.turnStopping(parent, 2)
-    assert.equal(parent.messages.length, 1, 'the review gate sees the write')
-    assert.match(parent.messages[0].text, /不必重开代码评审/,
-      'review.docPatterns reuses the project docs list')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('0.15.0: the gates use the project controlPlanePatterns', () => {
-  // §2.3 五闸门行 / §5-B：控制面豁免也按项目策略，verify 与 review 同源。
-  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-control-'))
-  try {
-    const cwd = join(dir, 'project')
-    mkdirSync(cwd, { recursive: true })
-    writeProjectMarker(cwd, JSON.stringify({ mode: 'full', controlPlanePatterns: ['src/notes/'] }))
-
-    const controlHarness = harness()
-    plugin.apply(controlHarness.ctx, quiet)
-    const clean = controlHarness.main('session-policy-control-verify', [
-      call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-      resultWithText(1, 'verify-1', 'exit code: 0'),
-      call(2, 'write', { file_path: 'src/notes/x.md' }, 'write-1'),
-      result(2, 'write-1', false),
-      call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-    ], {}, 'session-policy-control-verify', cwd)
-    controlHarness.created(clean)
-    controlHarness.turnStopping(clean, 1)
-    controlHarness.turnStopping(clean, 2)
-    assert.equal(clean.messages.length, 0,
-      'a write under the project control plane is not a dirty change')
-
-    const codeHarness = harness()
-    plugin.apply(codeHarness.ctx, quiet)
-    const dirty = codeHarness.main('session-policy-control-code', [
-      call(1, 'pwsh', { command: 'npm test' }, 'verify-1'),
-      resultWithText(1, 'verify-1', 'exit code: 0'),
-      call(2, 'write', { file_path: 'src/other/x.ts' }, 'write-1'),
-      result(2, 'write-1', false),
-      call(2, 'present', { file_path: 'report.md' }, 'present-1'),
-    ], {}, 'session-policy-control-code', cwd)
-    codeHarness.created(dirty)
-    codeHarness.turnStopping(dirty, 1)
-    codeHarness.turnStopping(dirty, 2)
-    assert.equal(dirty.messages.length, 1, 'a code write outside the project control plane still gates')
-
-    // review 复用同一份 controlPlanePatterns：src/notes/ 下的写入不让评审失效。
-    const events = []
-    const reviewHarness = harness()
-    plugin.apply(reviewHarness.ctx, {
-      log: false, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
-    })
-    const parent = reviewHarness.main('session-policy-control-review', events, {}, 'session-policy-control-review', cwd)
-    reviewHarness.created(parent)
-    reviewHarness.created(reviewHarness.child('review-policy-control', 'session-policy-control-review', '只读评审：diff'))
-    reviewHarness.ended({ childId: 'review-policy-control', stopReason: 'completed' })
-    events.push(call(2, 'write', { file_path: 'src/notes/x.md' }, 'write-1'), result(2, 'write-1', false))
-    reviewHarness.turnStopping(parent, 2)
-    assert.equal(parent.messages.length, 0,
-      'the project control plane keeps the review valid')
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
 test('0.15.0: the prompt section switches to the business preset by rules', () => {
   // §2.3 提示词段行 / §5-B：business 文本出现、plugin 文本不出现，off 仍旧为空。
   const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-policy-prompt-'))
@@ -4058,12 +2372,9 @@ test('0.15.0: /dispatch init writes the detected policy and never overwrites', (
       scripts: { test: 'node test.mjs', typecheck: 'tsc --noEmit', build: 'vite build' },
       dsh: { bundle: { id: 'some-dsh-plugin' } },
     }))
-    writeFileSync(join(cwd, 'pnpm-lock.yaml'), '')
     mkdirSync(join(cwd, 'docs'))
     mkdirSync(join(cwd, 'src', 'types'), { recursive: true })
-    mkdirSync(join(cwd, 'prisma'), { recursive: true })
-    writeFileSync(join(cwd, 'prisma', 'schema.prisma'), '')
-    writeFileSync(join(cwd, 'openapi.json'), '{}')
+    writeFileSync(join(cwd, 'prisma-schema-placeholder.txt'), '')
 
     const h = harness()
     plugin.apply(h.ctx, quiet)
@@ -4076,15 +2387,10 @@ test('0.15.0: /dispatch init writes the detected policy and never overwrites', (
       mode: 'full',
       rules: 'plugin',
       allowlist: ['dispatch/', 'docs/'],
-      controlPlanePatterns: ['dispatch/', 'docs/'],
-      verify: { commands: ['pnpm test', 'pnpm typecheck', 'pnpm build'] },
-      contract: { patterns: ['src/types/', 'prisma/schema.prisma', 'openapi.json'] },
-      docs: { patterns: ['.md', 'docs/'] },
-    }, 'the generated file carries the detected fields')
+    }, '0.17.0: the generated file carries mode/rules/allowlist only')
     assert.match(result.text, /dispatch\/protocol\.json/)
     assert.match(result.text, /preset: plugin/)
-    assert.match(result.text, /命令 3 条/)
-    assert.match(result.text, /契约面 3 个/)
+    assert.match(result.text, /白名单 2 项/)
     assert.match(result.text, /\/dispatch off\|auto\|shadow\|full/)
 
     // 已存在不覆盖：返回错误文案且文件逐字节不变。
@@ -4100,7 +2406,9 @@ test('0.15.0: /dispatch init writes the detected policy and never overwrites', (
 })
 
 test('0.15.0: /dispatch init defaults to the business preset and reads other ecosystems', () => {
-  // §2.5 第 1 步：无 dsh.bundle/client → business；python/dotnet 各给一条命令。
+  // §2.5 第 1 步：无 dsh.bundle/client → business；文档目录决定 allowlist。
+  // 0.17.0：验证命令 / 契约面 / 文档口径随五个收尾闸门删除，生成文件只剩
+  // mode / rules / allowlist。
   const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-init-business-'))
   try {
     const cwd = join(dir, 'business-project')
@@ -4115,21 +2423,16 @@ test('0.15.0: /dispatch init defaults to the business preset and reads other eco
 
     assert.equal(result.kind, 'success', result.text)
     const written = JSON.parse(readFileSync(join(cwd, 'dispatch', 'protocol.json'), 'utf8'))
-    assert.equal(written.mode, 'full')
-    assert.equal(written.rules, 'business', 'a project without dsh.bundle/client gets the business preset')
-    assert.deepEqual(written.allowlist, ['dispatch/'], 'without docs/ the allowlist stays dispatch/ only')
-    assert.deepEqual(written.controlPlanePatterns, written.allowlist)
-    assert.deepEqual(written.docs, { patterns: ['.md'] })
-    assert.deepEqual(written.verify.commands, ['npm run build', 'uv run pytest'],
-      'npm scripts use npm run, python adds uv run pytest')
-    assert.equal('contract' in written, false, 'undetected contract surfaces are omitted, not written empty')
+    assert.deepEqual(written, {
+      mode: 'full',
+      rules: 'business',
+      allowlist: ['dispatch/'],
+    }, '0.17.0: a project without dsh.bundle/client gets the business preset and no gate fields')
     assert.match(result.text, /preset: business/)
 
     // 检测到的文件必须能被 readProjectPolicy 原样读回（字段形状合法）。
     const policy = readProjectPolicy(cwd, resolveConfig({}).projectSwitch)
-    assert.equal(policy.rules, 'business')
-    assert.deepEqual(policy.verifyCommands, ['npm run build', 'uv run pytest'])
-    assert.deepEqual(policy.allowlist, ['dispatch/'])
+    assert.deepEqual(policy, { mode: 'full', rules: 'business', allowlist: ['dispatch/'] })
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -4248,7 +2551,7 @@ test('0.16.0: a project with no marker defaults to auto and does not enforce', (
   }
 })
 
-test('0.16.0: auto silences the checkpoint, the gates and the observation rows', () => {
+test('0.16.0: auto silences the checkpoint and the observation rows', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-auto-silent-'))
   try {
     const h = harness()
@@ -4271,7 +2574,7 @@ test('0.16.0: auto silences the checkpoint, the gates and the observation rows',
     h.turnStopping(parent, 1)
     h.turnStopping(parent, 2)
 
-    assert.equal(parent.messages.length, 0, 'no checkpoint and no gate in auto')
+    assert.equal(parent.messages.length, 0, 'no checkpoint in auto')
     assert.equal(existsSync(join(cwd, 'dispatch', 'runs')), false,
       'auto writes no observation row and creates no runs directory')
   } finally {
@@ -4368,17 +2671,6 @@ function result(turn, callId, isError) {
   return { type: 'tool/result', data: { turn, step: 1, message: { isError, toolCallId: callId, content: [] } } }
 }
 
-/**
- * One `tool/result` record carrying text — the exit code a verification call
- * reports lives in the result content (0.6.0 gate tests).
- */
-function resultWithText(turn, callId, text, isError = false) {
-  return {
-    type: 'tool/result',
-    data: { turn, step: 1, message: { isError, toolCallId: callId, content: [{ type: 'text', text }] } },
-  }
-}
-
 /** 0.13.0: write `<cwd>/dispatch/protocol.json` (the project-switch marker). */
 function writeProjectMarker(cwd, body) {
   mkdirSync(join(cwd, 'dispatch'), { recursive: true })
@@ -4387,7 +2679,7 @@ function writeProjectMarker(cwd, body) {
 
 /**
  * 0.16.0: opt a fixture cwd into the full discipline. Since 0.16.0 a cwd with no
- * marker resolves to `auto`, so every case that asserts full-mode guard/gate/
+ * marker resolves to `auto`, so every case that asserts full-mode guard or
  * observation behaviour must say so explicitly.
  * @param cwd - the fixture working directory.
  * @returns the same cwd, for use inline in `h.main(...)`.
@@ -4397,7 +2689,7 @@ function fullProject(cwd) {
   return cwd
 }
 
-/** Read a decision log as parsed rows (0.6.0 gate assertions). */
+/** Read a decision log as parsed rows. */
 function readRows(path) {
   return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(row => JSON.parse(row))
 }

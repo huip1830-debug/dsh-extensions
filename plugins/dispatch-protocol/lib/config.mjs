@@ -50,23 +50,15 @@
 // (`BUSINESS_RULES` / `BUSINESS_FOOTER`) and selected by `resolveRulesPreset`;
 // `resolveConfig`'s own return object is unchanged (the profile's rules/footer
 // still render `text`), so a project without a policy file is byte-identical.
+//
+// 0.17.0: the five turn-end state gates (wait/verify/contract/review/handoff)
+// are gone. Their defaults went with them; a `gates` section in a profile is a
+// load-time error with a migration hint rather than a silently ignored config.
 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveWritePolicy } from './write-policy.mjs'
-import { resolveGates } from './gates.mjs'
 import { DEFAULT_PROJECT_SWITCH } from './project.mjs'
-
-// 0.6.0/0.7.0 状态闸门的默认值统一从 config.mjs 导出（契约 §7）：默认值只有
-// 这一个入口，实现与加载期校验放在 lib/gates.mjs，避免「文档里的默认值」和
-// 「代码里的默认值」各写一份。
-export {
-  DEFAULT_CONTRACT_PATTERNS, DEFAULT_CONTRACT_TEXT,
-  DEFAULT_HANDOFF_EMPTY_TURNS, DEFAULT_HANDOFF_TEXT,
-  DEFAULT_REVIEW_LABEL_PREFIXES, DEFAULT_REVIEW_TEXT,
-  DEFAULT_VERIFY_COMMANDS, DEFAULT_VERIFY_COMMIT_PATTERN, DEFAULT_VERIFY_TEXT,
-  DEFAULT_WAIT_TEXT, DEFAULT_WAIT_THRESHOLD, DEFAULT_WAIT_TOOLS,
-} from './gates.mjs'
 
 // 0.9.0 写入守卫的默认值同样从这里转出：README/配置表与测试都只认这一个入口。
 export {
@@ -80,7 +72,7 @@ export {
   DEFAULT_PROJECT_SWITCH, PROJECT_MODES, readProjectMode,
 } from './project.mjs'
 
-/** 决策日志默认路径（checkpoint + 写入守卫 + 状态闸门共用一份）。 */
+/** 决策日志默认路径（checkpoint + 写入守卫共用一份）。 */
 export const DEFAULT_LOG = join(tmpdir(), 'dispatch-protocol-decisions.jsonl')
 
 /** The six non-negotiable rules; overridable through `config.rules`. */
@@ -246,7 +238,7 @@ export function resolveConfig(config = {}) {
     throw new Error('dispatch-protocol: `nudge` 段已在 0.9.0 移除（漏派发提醒换成写入守卫 writePolicy）。迁移：nudge.log → log；nudge.delegationTools → writePolicy.delegationTools；nudge.justifiedPatterns 废弃，豁免改由 dispatch/override.json 承载；nudge.enabled/threshold/text/writeTools/controlPlanePatterns 删除（writeTools → writePolicy.tools，controlPlanePatterns → writePolicy.allowlist）')
   }
 
-  // `log` 取代 `nudge.log`：checkpoint、写入守卫与状态闸门共用一份决策日志，
+  // `log` 取代 `nudge.log`：checkpoint 与写入守卫共用一份决策日志，
   // false 关闭全部日志。加载期校验，避免路径拼错时静默不写；空串按非法处理
   // （回落默认路径会让 README 的「non-empty path」承诺与实现不一致）。
   if (source.log !== undefined && source.log !== false
@@ -259,10 +251,11 @@ export function resolveConfig(config = {}) {
   // 守卫会「永远放行」或「永远不拦」，和「配置正确但没命中」在日志里无法区分。
   const writePolicy = resolveWritePolicy(source.writePolicy)
 
-  // 0.6.0 状态闸门同样在加载期校验（契约 §6）：`threshold: 0` 或一条无法编译的
-  // commitPattern 若静默降级，闸门会「永远不触发」，和「配置正确但没命中」
-  // 在日志里无法区分。即使 gates.enabled 为 false 也照样校验。
-  const gates = resolveGates(source.gates)
+  // 0.17.0：`gates` 段随五个收尾闸门一起删除。出现即加载期抛错——静默忽略会
+  // 让旧配置以为提醒仍在生效，实际一条都不会发。
+  if (source.gates !== undefined) {
+    throw new Error('dispatch-protocol: `gates` 段已在 0.17.0 移除（五个收尾闸门删除：收尾不再逐回合提醒）。迁移：删除 gates 段；未验证就收口 / 评审后改动 / 等待期轮询 / 空回合 / 契约冻结这些事实改看 dispatch/runs/*.jsonl 与决定日志')
+  }
 
   // 0.13.0 项目级开关（spec §3.1）：`path` 拼错或 `enabled` 写成字符串若静默
   // 降级，会表现为「标记文件放了但不生效」，与「项目本来就没标记」在行为上
@@ -283,5 +276,5 @@ export function resolveConfig(config = {}) {
   }
   const projectSwitch = { enabled: projectSwitchEnabled, path: projectSwitchPath }
 
-  return { enabled: source.enabled !== false, order, rules, footer, text, checkpoint, observation, writePolicy, log, gates, projectSwitch }
+  return { enabled: source.enabled !== false, order, rules, footer, text, checkpoint, observation, writePolicy, log, projectSwitch }
 }

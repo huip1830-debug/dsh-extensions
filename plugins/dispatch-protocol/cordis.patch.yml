@@ -10,48 +10,26 @@
         order: 500            # ordering within the system prompt (lower runs earlier)
         # rules: []           # override the six defaults; non-empty string array
         # footer: ''          # override the closing paragraph (cost + exemption); '' drops it
-        # log: false          # shared decision log (checkpoint + write-policy + gates); default %TEMP%/dispatch-protocol-decisions.jsonl, false disables all
+        # log: false          # shared decision log (checkpoint + write-policy); default %TEMP%/dispatch-protocol-decisions.jsonl, false disables all
         writePolicy:          # 0.9.0 write guard: blocks a root agent's direct write to the execution plane at the tool boundary
           enabled: true       # master switch; the guard is registered through ctx.tools.guard
           mode: enforce       # enforce | shadow (shadow logs the denial and lets the call through)
           # allowlist: ['dispatch/', 'docs/superpowers/specs/']   # control-plane prefixes, cwd-relative, case-insensitive, word-boundary matched
           # overridePath: 'dispatch/override.json'                # the only exemption artifact: {"reason": "..."} written in this session
           # tools: ['write', 'edit']                              # tools the guard inspects (default write, edit)
-          # delegationTools: ['subagent', 'subagent_fork', 'workflow']   # shared with observation rows and WaitGate
+          # delegationTools: ['subagent', 'subagent_fork', 'workflow']   # shared with observation rows
         checkpoint:
           enabled: true       # remind the parent when a child completes (judged at the parent's next turn-stopping)
           # text: ''          # overrides DEFAULT_CHECKPOINT; supports {childId} and {label}
         # projectSwitch:        # 0.13.0 per-project switch: {"mode":"off"|"auto"|"shadow"|"full"} in a marker file
         #   enabled: true       # master switch; false restores 0.12.3 behavior (the marker file is never read)
         #   path: 'dispatch/protocol.json'   # marker file, session-cwd relative; missing/bad file falls back to auto (0.16.0)
-        #   # 0.15.0: the same file is a project policy — optional rules/allowlist/controlPlanePatterns/
-        #   # verify.commands/contract.patterns/docs.patterns override the profile per field; an invalid field
-        #   # falls back alone, missing/bad JSON falls back entirely. rules: 'business' (~1.1K) trims the
-        #   # default ~3.8K text; `/dispatch init` writes a detected policy file, never overwriting an existing one.
-        #   # 0.16.0: the default is auto (a ~470-char escalation hint, no guard/gates/checkpoints). The root
+        #   # 0.15.0: the same file is a project policy — optional rules/allowlist override the
+        #   # profile per field; an invalid field falls back alone, missing/bad JSON falls back
+        #   # entirely. rules: 'business' (~1.1K) trims the default ~3.8K text; `/dispatch init`
+        #   # writes a detected policy file, never overwriting an existing one. 0.17.0: the
+        #   # gate-only fields (controlPlanePatterns / verify.commands / contract.patterns /
+        #   # docs.patterns) were removed with the five turn-end gates.
+        #   # 0.16.0: the default is auto (a ~470-char escalation hint, no guard/checkpoints). The root
         #   # agent may ask; after the user confirms it calls `dispatch_upgrade_full`, visible only in auto, which
         #   # writes mode:"full" atomically and preserves the other policy fields. Downgrades stay user-only.
-        # gates:                # 0.6.0/0.7.0 event gates: Wait + Verify + Contract + Review + Handoff
-        #   enabled: true       # master switch for all five gates; judged at the root agent's turn-stopping
-        #   wait:
-        #     enabled: true
-        #     threshold: 3      # >= this many status-query calls and no write/dispatch/verify in the turn
-        #     tools: ['list_agents', 'job_list', 'schedule_list', 'get_goal']
-        #     # text: ''        # overrides DEFAULT_WAIT_TEXT; supports {count} {tools}
-        #   verify:
-        #     enabled: true
-        #     commands: ['npm test', 'npm run build', 'dotnet test', 'jest', 'tsc', 'prisma migrate deploy', 'node test', 'test.mjs']
-        #     # commitPattern: '\bgit\s+(commit|push)\b'  # YAML single-quoted regex; full default is DEFAULT_VERIFY_COMMIT_PATTERN in lib/gates.mjs
-        #     # text: ''        # overrides DEFAULT_VERIFY_TEXT; supports {files} {kind} {action}; legacy {changes} {lastVerify}
-        #   contract:             # 0.7.0 ContractGate: contract files edited while a child is still running
-        #     enabled: true
-        #     patterns: ['contract']          # case-insensitive path substrings; supports {files}
-        #     # text: ''        # overrides DEFAULT_CONTRACT_TEXT
-        #   review:               # 0.7.0 ReviewGate: parent writes after a read-only review completed
-        #     enabled: true
-        #     labelPrefixes: ['只读评审', '只读复审']
-        #     # text: ''        # overrides DEFAULT_REVIEW_TEXT; supports {files} {action}
-        #   handoff:              # 0.7.0 HandoffGate: consecutive empty turns
-        #     enabled: true
-        #     emptyTurns: 1     # consecutive turns with no tool/call and no non-empty text
-        #     # text: ''        # overrides DEFAULT_HANDOFF_TEXT; supports {emptyTurns}
