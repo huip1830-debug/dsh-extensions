@@ -55,7 +55,7 @@ import {
   appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { resolveConfig, resolveRulesPreset } from './lib/config.mjs'
+import { AUTO_TEXT, resolveConfig, resolveRulesPreset } from './lib/config.mjs'
 import { DEFAULT_PROJECT_SWITCH, PROJECT_MODES, readProjectMode, readProjectPolicy, writeProjectMode } from './lib/project.mjs'
 import { callTouchesFile, summarizeTurn } from './lib/tool-calls.mjs'
 import { evaluateWritePolicy, normalizePath, renderDenyText, toCwdRelative } from './lib/write-policy.mjs'
@@ -351,7 +351,7 @@ function runInit(cwd, projectSwitch) {
     const contractCount = document.contract?.patterns?.length ?? 0
     return {
       kind: 'success',
-      text: `已生成 ${resolved.relative}（preset: ${document.rules}，命令 ${commandCount} 条，契约面 ${contractCount} 个）；随时 /dispatch off|shadow|full 切档`,
+      text: `已生成 ${resolved.relative}（preset: ${document.rules}，命令 ${commandCount} 条，契约面 ${contractCount} 个）；随时 /dispatch off|auto|shadow|full 切档`,
     }
   } catch (error) {
     const detail = error?.message === undefined ? '' : `（${error.message}）`
@@ -529,19 +529,23 @@ function makeGuard(config) {
 
       const cwd = session?.cwd ?? session?.header?.cwd
       // 0.13.0 项目级开关（spec §3.3）：`off` 直接放行（只留一条决定日志），
-      // `shadow` 让判定照跑但不返回拒绝串。模式判定 fail-open，读不到标记文件
-      // 的项目与 0.12.3 逐字节一致。
+      // `shadow` 让判定照跑但不返回拒绝串。0.16.0 起 `auto` 同样放行（默认档，
+      // 不写日志）。模式判定 fail-open，读不到标记文件不再等于 full。
       // 0.15.0：同一次读取带回策略字段（spec §2.3），守卫按项目的 allowlist
       // 判定；`off`/`shadow` 分支与 0.14 行为一致。
       const projectPolicy = readProjectPolicy(cwd, config.projectSwitch)
       const projectMode = projectPolicy.mode
-      if (projectMode === 'off') {
-        const key = `${session?.id ?? ''}\0${cwd ?? ''}`
-        if (!reported.has(key)) {
-          reported.add(key)
-          recordDecision(config.log, agent, {
-            kind: 'project', decision: 'suppressed', reason: 'project-off',
-          })
+      // 0.16.0：auto 与 off 一样直接放行；区别只在日志——off 保留每会话一条
+      // `project-off`，auto 是默认档、不是一次判定，不写决定日志。
+      if (projectMode === 'off' || projectMode === 'auto') {
+        if (projectMode === 'off') {
+          const key = `${session?.id ?? ''}\0${cwd ?? ''}`
+          if (!reported.has(key)) {
+            reported.add(key)
+            recordDecision(config.log, agent, {
+              kind: 'project', decision: 'suppressed', reason: 'project-off',
+            })
+          }
         }
         return undefined
       }
@@ -586,8 +590,8 @@ function makeGuard(config) {
   }
 }
 
-/** `/dispatch` 的用法行：参数不在三档或 `init` 时原样返回（spec §3.1 第 3 步、§2.5 第 4 条）。 */
-const COMMAND_USAGE = '用法：/dispatch [off|shadow|full|init]（无参=查询）'
+/** `/dispatch` 的用法行：参数不在四档或 `init` 时原样返回（spec §3.1 第 3 步、§2.5 第 4 条）。 */
+const COMMAND_USAGE = '用法：/dispatch [off|auto|shadow|full|init]（无参=查询）'
 
 /**
  * 注册宿主命令 `/dispatch`（0.14.0，spec `2026-11-17-dispatch-ui-design.md` §3.1）。
@@ -655,7 +659,7 @@ function registerCommand(ctx, config) {
         const register = () => cctx.commands.register({
           name: 'dispatch',
           description: '查看/切换当前项目的派发纪律档位',
-          input: { hint: '[off|shadow|full|init]' },
+          input: { hint: '[off|auto|shadow|full|init]' },
           handler,
         })
         // 与 DSH settings README 的写法一致：disposer 交给子上下文的 effect，
@@ -672,6 +676,73 @@ function registerCommand(ctx, config) {
   }
 }
 
+/** 0.16.0 升级工具名；`AUTO_TEXT` 正文里逐字引用。 */
+const UPGRADE_TOOL_NAME = 'dispatch_upgrade_full'
+
+/**
+ * 注册模型可调用的单向升级工具（spec `2026-11-18-dispatch-auto-mode-design.md`
+ * §2.4）。
+ *
+ * `when` 让工具只在「根代理 + 当前 auto」时出现在模型工具表里：off/shadow/full
+ * 下不可见，子代理也不可见。工具只做 auto → full；降档仍走 `/dispatch` 或 dock。
+ * 定义是手写的 `ToolDefinition`（不 import `@deepseek-ai/dsh-tools`），保持
+ * `node test.mjs` 零依赖；`ctx.tools.register` 只校验 `output`，这个形状合法。
+ * @param ctx - the plugin context.
+ * @param config - the resolved plugin config.
+ */
+function registerUpgradeTool(ctx, config) {
+  if (typeof ctx?.tools?.register !== 'function') return
+  const definition = {
+    name: UPGRADE_TOOL_NAME,
+    description: 'Switch the current project from the auto dispatch mode to full. Call only after the user explicitly confirms; never call on your own.',
+    parameters: {
+      type: 'object',
+      properties: {
+        confirmed: { type: 'boolean', description: 'true only after the user explicitly agreed to switch to full' },
+      },
+      required: ['confirmed'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: String(value) }],
+    },
+    async execute(args, exec) {
+      if (args?.confirmed !== true) throw new Error('user confirmation is required')
+      const agent = exec?.agent
+      const session = agent?.session
+      const cwd = session?.cwd ?? session?.header?.cwd
+      if (typeof cwd !== 'string' || cwd.trim() === '') {
+        throw new Error('cannot determine the session working directory')
+      }
+      const current = readProjectPolicy(cwd, config.projectSwitch).mode
+      if (current === 'full') return '已是 full，无需切换'
+      if (current !== 'auto') throw new Error(`current mode is ${current}; only auto can be upgraded`)
+      const written = mergeModeIntoPolicyFile(cwd, config.projectSwitch, 'full')
+      if (!written.ok) throw new Error(`switch failed: ${written.reason}`)
+      recordDecision(config.log, agent, {
+        kind: 'project', decision: 'switched', reason: 'user-confirmed', mode: 'full', file: written.file,
+      })
+      return `已切换为 full（${written.file}）；后续步骤按 full 执行。`
+    },
+  }
+  try {
+    ctx.effect(() => ctx.tools.register(definition, {
+      when: ({ agent }) => {
+        try {
+          if (agent?.session?.header?.origin === 'subagent') return false
+          const cwd = agent?.session?.cwd ?? agent?.session?.header?.cwd
+          return readProjectPolicy(cwd, config.projectSwitch).mode === 'auto'
+        } catch {
+          return false
+        }
+      },
+    }))
+  } catch {
+    // 工具注册失败不影响其余机制；提示段仍给出 dock / 命令的兜底路径。
+  }
+}
+
 export function apply(ctx, rawConfig) {
   const config = resolveConfig(rawConfig)
 
@@ -682,7 +753,8 @@ export function apply(ctx, rawConfig) {
 
   // 0.13.0 项目级开关（spec §3.3）：`text` 从定值改成函数，每次 assemble 按会话
   // cwd 求值。`off` 时返回空串——系统提示词渲染层会丢弃 `text.length === 0` 的
-  // 段，规则随之消失。拿不到 context 或判定抛错时一律回落 `config.text`：提示词
+  // 段，规则随之消失；0.16.0 的 `auto` 只返回提级提示（子代理为空），其余档位
+  // 维持全文/预设。拿不到 context 或判定抛错时一律回落 `config.text`：提示词
   // 组装失败会让整个请求失败，项目开关只是便利功能，不能有这种代价。
   // 0.15.0：同一次读取选择规则预设（spec §2.3）——`rules: "business"` 用精简
   // 正文，其余（含 `plugin`、缺省）逐字节回落 `config.text`。
@@ -695,6 +767,12 @@ export function apply(ctx, rawConfig) {
         const cwd = session?.cwd ?? session?.header?.cwd
         const projectPolicy = readProjectPolicy(cwd, config.projectSwitch)
         if (projectPolicy.mode === 'off') return ''
+        // 0.16.0：auto 只给根代理注入提级提示——子代理没有用户可问，拿到这段
+        // 只会多一份无用的上下文。
+        if (projectPolicy.mode === 'auto') {
+          const origin = context?.agent?.session?.header?.origin
+          return origin === 'subagent' ? '' : AUTO_TEXT
+        }
         return projectTextFor(projectPolicy, config)
       } catch {
         return config.text
@@ -705,6 +783,9 @@ export function apply(ctx, rawConfig) {
 
   // 0.14.0 `/dispatch` 宿主命令：无参查询、带参写标记文件（spec §3.1）。
   registerCommand(ctx, config)
+
+  // 0.16.0 模型可调用的单向升级工具（spec §2.4）。
+  registerUpgradeTool(ctx, config)
 
   // 0.9.0 写入守卫：唯一能真正阻止一次写入的地方。`ctx.effect` 持有 disposer，
   // 插件卸载时守卫一并消失；`inject` 里的 `'tools'` 保证 `ctx.tools` 存在。
@@ -826,14 +907,18 @@ function registerReminders(ctx, config) {
     pending.delete(parentId)
     if (parent === undefined) return result
     // 0.13.0 项目级开关（spec §3.3）：`off` 的项目不投递检查点，但每个 child 仍
-    // 留一条 suppressed 决定——「没触发」与「触发后被静默」必须可区分。`empty`
-    // 保持既有语义：队列非空（上方已置 false）。
+    // 留一条 suppressed 决定——「没触发」与「触发后被静默」必须可区分。0.16.0
+    // 的 `auto` 同样不投递，但它是默认档，不写 suppressed 行（与 off 的唯一差别）。
+    // `empty` 保持既有语义：队列非空（上方已置 false）。
     const parentCwd = parent?.session?.cwd ?? parent?.session?.header?.cwd
-    if (readProjectMode(parentCwd, config.projectSwitch) === 'off') {
-      for (const [childId, record] of entries) {
-        recordDecision(decisionLog, parent, {
-          turn, kind: 'checkpoint', decision: 'suppressed', reason: 'project-off', childId, label: record.label,
-        })
+    const parentMode = readProjectMode(parentCwd, config.projectSwitch)
+    if (parentMode === 'off' || parentMode === 'auto') {
+      if (parentMode === 'off') {
+        for (const [childId, record] of entries) {
+          recordDecision(decisionLog, parent, {
+            turn, kind: 'checkpoint', decision: 'suppressed', reason: 'project-off', childId, label: record.label,
+          })
+        }
       }
       return result
     }
@@ -915,12 +1000,13 @@ function registerReminders(ctx, config) {
       // 0.11.0 D2：闸门用的 cwd 与写入守卫同源（`session.cwd ?? header.cwd`）；
       // 分类器靠它把绝对路径相对化，取不到时按保守口径把写入当代码。
       const cwd = target?.session?.cwd ?? target?.session?.header?.cwd
-      // 0.13.0 项目级开关（spec §3.3）：`off` 的项目不投递任何状态闸门。判定放
-      // 在 cwd 之后、任何 `deliver` 之前，本回合继续走观测与收尾。
+      // 0.13.0 项目级开关（spec §3.3）：`off` 的项目不投递任何状态闸门；0.16.0
+      // 的 `auto` 是默认档，同样不投递（闸门只在 full/shadow 生效）。判定放在
+      // cwd 之后、任何 `deliver` 之前，本回合继续走观测与收尾。
       // 0.15.0（spec §2.3）：一次读取带回策略字段，构造本回合的 `effectiveGates`
       // ——纯函数返回新对象，不改 `config.gates`；闸门文案仍取 profile 的值。
       const projectPolicy = readProjectPolicy(cwd, config.projectSwitch)
-      if (projectPolicy.mode === 'off') return false
+      if (projectPolicy.mode === 'off' || projectPolicy.mode === 'auto') return false
       const effectiveGates = applyPolicyToGates(gates, projectPolicy)
       /** 投递一条闸门消息：steer + 决定日志 + 本回合去重。 */
       const deliver = (text, payload) => {
@@ -1000,7 +1086,9 @@ function registerReminders(ctx, config) {
       const cwd = target?.session?.cwd ?? target?.session?.header?.cwd
       if (typeof cwd !== 'string' || cwd === '') return
       // 0.13.0 项目级开关（spec §3.3）：`off` 的项目不写 jsonl、也不建目录。
-      if (readProjectMode(cwd, config.projectSwitch) === 'off') return
+      // 0.16.0 的 `auto` 同样不写：没有派发纪律的回合不是观测对象。
+      const observeMode = readProjectMode(cwd, config.projectSwitch)
+      if (observeMode === 'off' || observeMode === 'auto') return
       const events = target?.session?.snapshotEvents?.() ?? []
       // 口径来自写入守卫：写入工具、派发工具、控制面名单都只有这一份真相
       // （0.9.0；此前复用的是 nudge 段）。

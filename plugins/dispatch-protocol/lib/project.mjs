@@ -14,13 +14,17 @@
 // 不出现，由调用方回落 profile 配置。`readProjectMode` 保留为
 // `readProjectPolicy(...).mode` 的薄封装（0.13 调用面不断裂）。
 //
-// fail-open 是本模块唯一的口径（spec §3.2，0.15 仍是）：
+// 0.16.0：默认档从 `full` 改为 `auto`（spec
+// `2026-11-18-dispatch-auto-mode-design.md` §2.1）——没有标记文件的项目只注入
+// 提级提示，不再默认背全文纪律。fail-open 的口径仍是「永不抛错」，但方向分成
+// 两类：
 //   1. 开关关闭 / cwd 非法 / 路径归一化失败 → 'full'
-//   2. 文件不存在（stat/read 失败）→ 'full'
-//   3. JSON 解析失败或顶层不是 plain object → 'full'（坏文件是「没配」，不是错误）
-//   4. `mode` 命中三档 → 该值
-//   5. 否则 `enabled === false` → 'off'，其余 → 'full'
-//   6. 0.15：策略字段类型/内容非法 → **只丢该字段**，其它字段与 mode 不受影响
+//      （无法判定项目或用户显式关闭项目开关时，回到旧行为）
+//   2. 文件不存在 / stat 或读取失败 / JSON 坏 → 'auto'
+//      （按「没配」处理；坏文件不得把成本静默抬到 full）
+//   3. `mode` 命中四档 → 该值；否则 `enabled:false → off`、`enabled:true → full`、
+//      其余 → 'auto'
+//   4. 0.15：策略字段类型/内容非法 → **只丢该字段**，其它字段与 mode 不受影响
 //
 // 路径归一化复用 `write-policy.mjs` 的 `normalizePath` / `toCwdRelative`：名单、
 // override 与本开关必须共用同一套折叠规则，否则 `dispatch/../src` 这类路径会在
@@ -38,8 +42,11 @@ import { normalizePath, toCwdRelative } from './write-policy.mjs'
 /** 项目级开关的默认配置段；`config.mjs` 只校验与转发，默认值只有这一个入口。 */
 export const DEFAULT_PROJECT_SWITCH = { enabled: true, path: 'dispatch/protocol.json' }
 
-/** 允许的档位，顺序即优先级无关的完整枚举。 */
-export const PROJECT_MODES = ['full', 'shadow', 'off']
+/** 允许的档位，顺序即显示顺序（0.16.0 增加 auto）。 */
+export const PROJECT_MODES = ['off', 'auto', 'shadow', 'full']
+
+/** 没有可用策略文件时的默认档位（0.16.0）。 */
+export const DEFAULT_PROJECT_MODE = 'auto'
 
 /**
  * 把 `projectSwitch.path` 解析成标记文件的绝对路径。
@@ -103,15 +110,17 @@ function readNestedList(document, section, key) {
 }
 
 /**
- * `mode` / `enabled` 的 0.13 判定（顺序完全不变）：`mode` 命中三档优先，
- * 其次 `enabled: false → 'off'`，其余 `'full'`。
+ * `mode` / `enabled` 的判定（0.16.0：文档为空或只有策略字段时回落 auto）：
+ * `mode` 命中四档优先，其次 `enabled: false → 'off'`、`enabled: true → 'full'`，
+ * 其余 `'auto'`。
  * @param document - 策略文件解析结果（plain object）。
- * @returns `'full' | 'shadow' | 'off'`。
+ * @returns `'full' | 'shadow' | 'auto' | 'off'`。
  */
 function modeOfDocument(document) {
   if (typeof document.mode === 'string' && PROJECT_MODES.includes(document.mode)) return document.mode
   if (document.enabled === false) return 'off'
-  return 'full'
+  if (document.enabled === true) return 'full'
+  return DEFAULT_PROJECT_MODE
 }
 
 /**
@@ -169,7 +178,8 @@ function readPolicyDocument(file) {
  *
  * 只返回文件里**有效出现**的字段；缺省字段不出现，由调用方回落 profile 配置。
  * 字段级 fail-open：某字段类型/内容非法 → 该字段不出现，其它字段与 mode 不受
- * 影响；整个文件坏/缺失 → 只回 `{ mode: 'full' }`。永不抛错。
+ * 影响；整个文件坏/缺失 → 回落默认档 `auto`（无法判定 cwd / 路径配置错误时
+ * 仍是 `full`）。永不抛错。
  * @param cwd - 会话工作目录（`session.cwd ?? session.header.cwd`）。
  * @param projectSwitch - 已解析的 `projectSwitch` 段；缺省用默认值。
  * @returns `{ mode, rules?, allowlist?, controlPlanePatterns?, verifyCommands?, contractPatterns?, docsPatterns? }`。
@@ -186,8 +196,9 @@ export function readProjectPolicy(cwd, projectSwitch) {
     try {
       mtimeMs = statSync(file).mtimeMs
     } catch {
-      // 文件不存在（ENOENT）与其它 stat 失败同口径：fail-open，且不缓存。
-      return { mode: 'full' }
+      // 文件不存在（ENOENT）与其它 stat 失败同口径：按「没配」处理，回落默认
+      // auto（0.16.0），且不缓存。
+      return { mode: DEFAULT_PROJECT_MODE }
     }
 
     // 键仍是 `(绝对路径, mtimeMs)`：同一回合里守卫、闸门、提示词段各读一次，
@@ -196,10 +207,10 @@ export function readProjectPolicy(cwd, projectSwitch) {
     let document = policyCache.get(key)
     if (document === undefined) {
       document = readPolicyDocument(file)
-      if (document === undefined) return { mode: 'full' }
+      if (document === undefined) return { mode: DEFAULT_PROJECT_MODE }
       policyCache.set(key, document)
     }
-    if (document === INVALID_DOCUMENT) return { mode: 'full' }
+    if (document === INVALID_DOCUMENT) return { mode: DEFAULT_PROJECT_MODE }
     return buildPolicy(document)
   } catch {
     return { mode: 'full' }
@@ -213,7 +224,7 @@ export function readProjectPolicy(cwd, projectSwitch) {
  * 可观察行为（含记忆化）不变。
  * @param cwd - 会话工作目录（`session.cwd ?? session.header.cwd`）。
  * @param projectSwitch - 已解析的 `projectSwitch` 段；缺省用默认值。
- * @returns `'full' | 'shadow' | 'off'`，任何异常都回落 `'full'`。
+ * @returns `'full' | 'shadow' | 'auto' | 'off'`，任何异常都回落 `'full'`。
  */
 export function readProjectMode(cwd, projectSwitch) {
   return readProjectPolicy(cwd, projectSwitch).mode
@@ -238,7 +249,7 @@ export function readProjectMode(cwd, projectSwitch) {
  *   非法档位，这里只是防御）。
  * @param cwd - 会话工作目录（`session.cwd ?? session.header.cwd`）。
  * @param projectSwitch - 已解析的 `projectSwitch` 段；缺省用默认值。
- * @param mode - `'full' | 'shadow' | 'off'`。
+ * @param mode - `'off' | 'auto' | 'shadow' | 'full'`。
  * @returns 写入结果，见上。
  */
 export function writeProjectMode(cwd, projectSwitch, mode) {

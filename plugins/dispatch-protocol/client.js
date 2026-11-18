@@ -1,4 +1,4 @@
-// dispatch-protocol — browser half (0.15.1): the session-zone mode control.
+// dispatch-protocol — browser half (0.16.0): the session-zone mode control.
 //
 // Hand-written lazy-CJS registration script: the Host serves this file as-is
 // (no build, no transpile), so it must stay plain JS with `createElement` only.
@@ -27,7 +27,7 @@
 //     resolves a workspace-root-relative path and answers `RemoteResult`
 //     (dsh-api-workspace-files/src/client/index.ts:19,
 //     dsh-api-workspace-files/README.md:29, :42, :89). `workspace-file/not-found`
-//     means "no marker", which the Host treats as `full`
+//     means "no marker", which the Host treats as `auto`
 //     (lib/project.mjs:99-105).
 //   - Write: `remote.commands.execute(sessionId, line, attachments)` is the
 //     same admission path the `/` menu uses (dsh-client-ui-commands/src/client/
@@ -57,14 +57,15 @@ window.__ModuleLoader__.load({
     /** Marker path, cwd relative — mirrors `DEFAULT_PROJECT_SWITCH.path` (lib/project.mjs:30). */
     const MARKER_PATH = 'dispatch/protocol.json'
 
-    /** Allowed modes, in display order off → shadow → full (lib/project.mjs:33). */
-    const MODES = ['off', 'shadow', 'full']
+    /** Allowed modes, in display order off → auto → shadow → full (lib/project.mjs:42). */
+    const MODES = ['off', 'auto', 'shadow', 'full']
 
     // Mirrors locale/*.json `ui` (the plugin inventory reads meta.* there; the
     // bundle only sees what it carries). Keep both copies in sync.
     const zh = {
       title: '派发纪律',
       modeOff: '关闭',
+      modeAuto: '自动',
       modeShadow: '只记',
       modeFull: '全部',
       modeUnknown: '未知',
@@ -78,6 +79,7 @@ window.__ModuleLoader__.load({
     const en = {
       title: 'Dispatch discipline',
       modeOff: 'Off',
+      modeAuto: 'Auto',
       modeShadow: 'Shadow',
       modeFull: 'Full',
       modeUnknown: 'Unknown',
@@ -123,28 +125,31 @@ window.__ModuleLoader__.load({
     /** Dictionary key for one mode; unknown modes keep the generic label. */
     function modeLabelKey(mode) {
       if (mode === 'off') return 'modeOff'
+      if (mode === 'auto') return 'modeAuto'
       if (mode === 'shadow') return 'modeShadow'
       return 'modeFull'
     }
 
     /**
      * Parse marker-file text into a mode, mirroring the Host reader
-     * (lib/project.mjs:63-83): a bad file is "not configured", which is `full`.
+     * (lib/project.mjs:63-88): a bad file is "not configured", which is `auto`
+     * since 0.16.0. `enabled:true` keeps the 0.13 meaning of full.
      * @param text - the file's text, or anything else.
-     * @returns `'full' | 'shadow' | 'off'`.
+     * @returns `'off' | 'auto' | 'shadow' | 'full'`.
      */
     function modeOfText(text) {
-      if (typeof text !== 'string') return 'full'
+      if (typeof text !== 'string') return 'auto'
       let data
       try {
         data = JSON.parse(text)
       } catch {
-        return 'full'
+        return 'auto'
       }
-      if (data === null || typeof data !== 'object' || Array.isArray(data)) return 'full'
+      if (data === null || typeof data !== 'object' || Array.isArray(data)) return 'auto'
       if (typeof data.mode === 'string' && MODES.includes(data.mode)) return data.mode
       if (data.enabled === false) return 'off'
-      return 'full'
+      if (data.enabled === true) return 'full'
+      return 'auto'
     }
 
     /** Readable cause for a failed RPC outcome; never throws. */
@@ -170,8 +175,8 @@ window.__ModuleLoader__.load({
           if (result === null || typeof result !== 'object' || result.ok !== true) {
             const code = result?.error?.code
             const message = result?.error?.message
-            // No marker in this workspace root: the Host's fail-open default.
-            if (code === 'workspace-file/not-found') return { mode: 'full' }
+            // No marker in this workspace root: the Host's default is auto (0.16.0).
+            if (code === 'workspace-file/not-found') return { mode: 'auto' }
             const detail = [code, message].filter((part) => typeof part === 'string' && part !== '').join(': ')
             return { mode: undefined, detail: detail === '' ? 'unknown' : detail }
           }

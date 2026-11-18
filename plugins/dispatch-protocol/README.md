@@ -18,9 +18,9 @@
 
 **不值得开的场景**：单文件 ≤20 行的小改、机械重命名、改文档 / 配置、陌生代码库探查、紧急热修、一次性数据修复、原型。这些拿不到纪律的收益，只付流程成本。
 
-**成本**：默认正文每请求约 3K token（估算；系统提示词段，可随 KV 缓存复用）；真正的成本大头是 `full` 引起的派发 / 评审 / 提醒轮次（经验值 3–10 倍），小改动尤其明显；大任务 `full` 可能反而省（少返工）。
+**成本**：默认 `auto` 的提示段每请求约 0.5K token（估算；可随 KV 缓存复用）；`full` 正文约 3K token，真正的成本大头是 `full` 引起的派发 / 评审 / 提醒轮次（经验值 3–10 倍），小改动尤其明显；大任务 `full` 可能反而省（少返工）。
 
-**三档一句话**：`off` 全静默（不注入、不拦、不提醒）；`shadow` 规则与提醒都在、写入只记不拦；`full` 完整纪律。默认值按项目选，**不要**给全仓库都设 `full`（见「常见误用」）。
+**四档一句话**：`off` 全静默（不注入、不拦、不提醒）；`auto`（默认）只注入一段提级提示，模型判断需求命中多文件/契约面/并行写等条件时请示用户，确认后用 `dispatch_upgrade_full` 升到 `full`；`shadow` 规则与提醒都在、写入只记不拦；`full` 完整纪律。**不要**给所有项目都写 `full`（见「常见误用」）。
 
 **按项目适配**：项目根 `dispatch/protocol.json` 可写 `mode` / `rules` / `allowlist` / `controlPlanePatterns` / `verify.commands` / `contract.patterns` / `docs.patterns`，缺省字段回落 profile；`rules: "business"` 换成精简预设；`/dispatch init` 扫项目生成初始策略。字段与生成规则见 [项目策略文件与 business 预设](#项目策略文件与-business-预设)。
 
@@ -28,9 +28,10 @@
 
 **常见误用**：
 
-1. **全仓库默认 `full`**：小改动也要走派发 / 评审 / 提醒，经验值 3–10 倍轮次成本；按项目或按任务降档。
+1. **给所有项目都写 `full`**：小改动也要走派发 / 评审 / 提醒，经验值 3–10 倍轮次成本；默认 `auto` 就是为了不付这笔钱，按项目或按任务升档。
 2. **把本仓库的白名单 / 闸门默认值当通用值**：`dispatch/`、`docs/superpowers/specs/`、`tsc` / `test.mjs` 都是本仓库口径，业务项目要用 `/dispatch init` 或手写策略，否则误拦误报。
 3. **以为评审能替代测试**：评审只看 diff 的语义，运行时装配和视觉问题不在它的判定面；没有 E2E / 真机验收，纪律全绿也可能不能用。
+4. **把大改动留在 `auto`**：`auto` 没有守卫兜底，模型漏问就等同无纪律；跨文件或契约面改动确认后应升 `full`，不要一路「先按 auto 做」。
 
 ## 它是什么
 
@@ -43,13 +44,14 @@
 | 状态闸门 | `agent/turn-stopping`，五个事件闸门（`plugin.mjs#evaluateGates`） | 不拦，只提醒 |
 | 检查点与观测 | 子代理 settle 登记 → 父代理回合收尾判定；根代理回合收尾写观测行（`plugin.mjs#registerReminders`、`plugin.mjs#drain`、`plugin.mjs#observeTurn`） | 不拦 |
 | 文档校验 | `scripts/docs-check.mjs`，仓库根无参运行，只判语法 / 围栏 / 表格列数 / 相对链接 / 配置表键名 | 不拦 |
-| 项目级开关 | 每个工具调用 / 回合收尾按会话 cwd 实时读标记文件（`lib/project.mjs#readProjectPolicy`） | 按项目降档：`shadow` 只记不拦、`off` 全静默 |
+| 项目级开关 | 每个工具调用 / 回合收尾按会话 cwd 实时读标记文件（`lib/project.mjs#readProjectPolicy`） | 按项目分四档：`auto`（默认）只注入提级提示、`shadow` 只记不拦、`off` 全静默 |
+| 升级工具 | `ctx.tools.register`，`dispatch_upgrade_full` 只在「根代理 + 当前 `auto`」可见（`plugin.mjs#registerUpgradeTool`） | 不拦：用户确认后把 `mode` 写成 `full`（单向，保留其它策略字段） |
 
 收尾提醒（完成检查点 + 五个闸门）共用一个 `agent/turn-stopping` 处理器，一次收尾最多投一条 `steer`；写入约束不在收尾，而在动作之前。
 
 ## 注入内容
 
-默认六条规则 + 一段收口，渲染进 `## 派发纪律（DSH）` 小节：`order: 500`、`interpolate: false`（`{{…}}` 原样保留）。六条各一句主旨，细则以 `lib/config.mjs` 为准：
+默认档是 `auto`：只注入 `AUTO_TEXT`（约 470 字）——五条客观触发条件 +「命中才请示、每需求最多问一次」+ 确认后调用 `dispatch_upgrade_full`。**下面六条规则只在 `full` / `shadow` 注入**，渲染进 `## 派发纪律（DSH）` 小节：`order: 500`、`interpolate: false`（`{{…}}` 原样保留）。六条各一句主旨，细则以 `lib/config.mjs` 为准：
 
 1. **主控只做控制面，不做执行面**——七类动作之外一律派发；用户显式要求主控亲做时，先写 `dispatch/override.json` 再动手。
 2. **执行类派发必须自包含**——现状、白名单、唯一一条窄验证、预算、输出格式缺一不可，派发即冻结。
@@ -61,6 +63,15 @@
 收口段（`DEFAULT_FOOTER`）回答「谁来做、什么可以直接做、怎么判级」：产出物归属、交付通道按风险缩放、循环批与 `NEEDS_DECISION`、外部未知先派只读 spike、对称预算。
 
 ## 机制
+
+### auto 档与升级工具
+
+`auto` 是默认档：只给根代理注入 `AUTO_TEXT`，不注册守卫拦截、不投递检查点/闸门、不写观测行。模型命中提示里的五条条件时请示用户；用户确认后调用 `dispatch_upgrade_full`（`confirmed: true`），工具用 0.15 的原子合并写把 `mode` 改成 `full`，保留 `rules` / `allowlist` / `verify` 等字段；成功后下一步按 full 执行。
+
+- **可见性**：`ctx.tools.register(definition, { when })` 的 `when` 只在「根代理 + 当前 auto」为真；`off` / `shadow` / `full` 与子代理都看不到这个工具（`plugin.mjs#registerUpgradeTool`）。
+- **确认门**：`confirmed: false` 直接抛错；`confirmed` 是模型自证，不是安全边界——真正的门是请示文本与用户回复。
+- **单向**：只 `auto → full`；降档仍由用户 `/dispatch auto` 或点 dock 完成，模型不能在任务中途自行卸掉纪律。
+- **失败面**：cwd 缺失、当前不是 auto、写盘失败都返回 `Error: …`，回合继续；提示段同时给出「点 full 按钮 / 输入 `/dispatch full`」的兜底。
 
 ### 写入守卫
 
@@ -153,35 +164,38 @@
 
 ## 项目级开关
 
-同一个 profile 里有些项目不需要派发纪律。在项目根建一个标记文件即可降档或静默：`dispatch/protocol.json` 写 `{"mode":"off"}`（或不写 `mode`、只写 `{"enabled":false}`），写 `{"mode":"shadow"}` 则是「照常提醒、写入只记不拦」。判定在每个工具调用与回合收尾时实时读文件（`lib/project.mjs#readProjectPolicy`），**不需要重启 DSH、不需要改 profile**；标记文件只按会话 cwd 查找（`lib/project.mjs#resolveMarkerFile`），同 profile 的其它项目不受影响。
+同一个 profile 里不同项目用不同档位。**默认是 `auto`**：不建标记文件的项目只注入提级提示。项目根建 `dispatch/protocol.json` 可显式选档：`{"mode":"off"}`（或 `{"enabled":false}`）全静默、`{"mode":"auto"}` 与默认相同、`{"mode":"shadow"}` 照常提醒但写入只记不拦、`{"mode":"full"}`（或 `{"enabled":true}`）完整纪律。判定在每个工具调用与回合收尾时实时读文件（`lib/project.mjs#readProjectPolicy`），**不需要重启 DSH、不需要改 profile**；标记文件只按会话 cwd 查找（`lib/project.mjs#resolveMarkerFile`），同 profile 的其它项目不受影响。
 
 | 档位 | 提示词段 | 写入守卫 | 完成检查点 | 五个闸门 | 观测行 |
 |---|---|---|---|---|---|
-| `full`（无标记，或标记写 `{"mode":"full"}` / `{"enabled":true}`） | 注入（现状） | 照常拦（现状） | 照常提醒（现状） | 照常提醒（现状） | 照常写（现状） |
-| `shadow` | 注入 | 判定照跑，**永不返回拒绝串**；仅对本会被拦下的写入改记一条 `reason: 'project-shadow'`（`plugin.mjs#makeGuard`） | 照常提醒 | 照常提醒 | 照常写 |
-| `off`（`{"mode":"off"}` 或 `{"enabled":false}`） | 不注入：`text` 返回 `''`，空段被宿主丢弃（`plugin.mjs#apply`） | 根代理带路径的 `write`/`edit` 直接放行，每 `(会话, cwd)` 记一条 `kind:"project", reason:"project-off"`（`plugin.mjs#makeGuard`；子代理、名单外工具、无 `file_path`/`path` 的调用在 `off` 判定之前就已豁免，不记） | 不投递；每个 child 记一条 `kind:"checkpoint", reason:"project-off"`（`plugin.mjs#drain`） | 判定入口即短路（`plugin.mjs#evaluateGates`） | 不写 jsonl、不建目录（`plugin.mjs#observeTurn`） |
+| `auto`（无标记 / 坏文件 / `{"mode":"auto"}`） | 根代理注入 `AUTO_TEXT`，子代理为空（`plugin.mjs#apply`） | 根代理带路径的 `write`/`edit` 直接放行，不写日志（`plugin.mjs#makeGuard`） | 不投递，也不写 suppressed 行（`plugin.mjs#drain`） | 入口短路，返回 false（`plugin.mjs#evaluateGates`） | 不写 jsonl、不建目录（`plugin.mjs#observeTurn`） |
+| `off`（`{"mode":"off"}` 或 `{"enabled":false}`） | 不注入：`text` 返回 `''`，空段被宿主丢弃（`plugin.mjs#apply`） | 直接放行，每 `(会话, cwd)` 记一条 `kind:"project", reason:"project-off"`（`plugin.mjs#makeGuard`；子代理、名单外工具、无 `file_path`/`path` 的调用在 `off` 判定之前就已豁免，不记） | 不投递；每个 child 记一条 `kind:"checkpoint", reason:"project-off"`（`plugin.mjs#drain`） | 判定入口即短路（`plugin.mjs#evaluateGates`） | 不写 jsonl、不建目录（`plugin.mjs#observeTurn`） |
+| `shadow` | 注入全文 | 判定照跑，**永不返回拒绝串**；仅对本会被拦下的写入改记一条 `reason: 'project-shadow'`（`plugin.mjs#makeGuard`） | 照常提醒 | 照常提醒 | 照常写 |
+| `full`（`{"mode":"full"}` 或 `{"enabled":true}`） | 注入全文 | 照常拦 | 照常提醒 | 照常提醒 | 照常写 |
 
 判定口径（顺序固定，`lib/project.mjs#readProjectPolicy`）：
 
 - 配置来自顶层 `projectSwitch`，默认 `{enabled:true, path:'dispatch/protocol.json'}`（`lib/project.mjs#DEFAULT_PROJECT_SWITCH`）；`enabled` 非布尔、`path` 空白在加载期报错（`lib/config.mjs#resolveConfig`）；`enabled`/`path` 写 `null` 视同未设置，回落默认值（其余配置段同款 `??` 口径）。
-- `projectSwitch.enabled: false`、cwd 不是非空字符串、路径归一化失败 → `full`（`lib/project.mjs#readProjectPolicy`）。
-- 标记文件不存在、`stat` 或读取失败 → `full`（`lib/project.mjs#readProjectPolicy`）。
-- JSON 解析失败、顶层不是 plain object（`[]`、`null`）→ `full`（`lib/project.mjs#readPolicyDocument`）。
-- 对象含 `mode` 且为 `full`/`shadow`/`off` 之一 → 该值；否则 `enabled: false` → `off`，其余 → `full`（`lib/project.mjs#modeOfDocument`）。
+- `projectSwitch.enabled: false`、cwd 不是非空字符串、路径归一化失败 → `full`（无法判定项目，或用户显式关闭项目开关）。
+- 标记文件不存在、`stat` 或读取失败 → `auto`（默认档；0.16.0 起坏文件不再等于 full）。
+- JSON 解析失败、顶层不是 plain object（`[]`、`null`）→ `auto`（坏文件按「没配」处理，`lib/project.mjs#readPolicyDocument`）。
+- 对象含 `mode` 且为 `off`/`auto`/`shadow`/`full` 之一 → 该值；否则 `enabled: false` → `off`、`enabled: true` → `full`、其余 → `auto`（`lib/project.mjs#modeOfDocument`）。
 - 路径只相对会话 cwd：绝对路径落在 cwd 外或含 `..` 逃逸 → 归一化失败 → `full`（`lib/project.mjs#resolveMarkerFile`）。
-- fail-open 是唯一口径：任何异常都回落 `full`，永不抛错（`lib/project.mjs#readProjectPolicy`），与写入守卫同口径（`plugin.mjs#makeGuard`）。
+- fail-open 是唯一口径：任何异常都回落、永不抛错（`lib/project.mjs#readProjectPolicy`），与写入守卫同口径（`plugin.mjs#makeGuard`）。方向分两类：判不出项目 → `full`，项目策略缺失/损坏 → `auto`。
 
 判定按 `(归一化绝对路径, mtimeMs)` 记忆化：每次调用先 `stat` 取 mtime（实时读取），mtime 变了就是新缓存键；`stat` 或读取失败不缓存（`lib/project.mjs#readProjectPolicy`）。
 
 日志（与 checkpoint、写入守卫、闸门共用同一份决定日志，`log: false` 时都不写，`lib/config.mjs#resolveConfig`）：
 
-- 写入守卫的 `off` 记录每 `(会话, cwd)` 只有一条——键是 `session.id + '\0' + cwd`，去重集合在守卫闭包里（`plugin.mjs#makeGuard`）。
-- 检查点是「每个 child 一条」：沿用既有 `kind:"checkpoint"` + `reason` 字段，便于事后区分「没触发」与「触发后被静默」（`plugin.mjs#drain`）。
+- 写入守卫的 `off` 记录每 `(会话, cwd)` 只有一条——键是 `session.id + '\0' + cwd`，去重集合在守卫闭包里（`plugin.mjs#makeGuard`）；`auto` 是默认档，不写这条。
+- 检查点是「每个 child 一条」：沿用既有 `kind:"checkpoint"` + `reason` 字段，便于事后区分「没触发」与「触发后被静默」（`plugin.mjs#drain`）；`auto` 不写。
+- 升级工具成功切换时记一条 `kind:"project", decision:"switched", reason:"user-confirmed"`（`plugin.mjs#registerUpgradeTool`）。
 
 边界：
 
 - `shadow` 只放弃拒绝串，不放弃判定与日志：越界写入记成 `decision:"allowed", reason:"project-shadow", mode:"shadow"`（`plugin.mjs#makeGuard`）。
 - `off` 的项目不再背派发纪律：规则段整段消失（`plugin.mjs#apply`），该项目的模型不会被提醒、也不会被拦——漏派发只能靠用户自己发现。
+- `auto` 的项目有提示、没有兜底：模型漏问就等同无纪律，这是默认档的已知取舍；跨文件或契约面改动应确认升 `full`。
 - 标记文件只认会话 cwd（`lib/project.mjs#resolveMarkerFile`）：子代理继承父 cwd 时同档（提示词段按 context 的会话 cwd 求值，`plugin.mjs#apply`），取不到 cwd 时回落 `full`（`lib/project.mjs#readProjectPolicy`）。
 
 ## 项目策略文件与 business 预设
@@ -190,7 +204,7 @@
 
 | 字段 | 缺省回落（profile 解析值） | 作用 |
 |---|---|---|
-| `mode` | `full`（`enabled:false` → `off`） | 三档行为与 0.13 一致，见「项目级开关」 |
+| `mode` | `auto`（`enabled:false` → `off`，`enabled:true` → `full`） | 四档行为见「项目级开关」 |
 | `rules` | 默认六条 + 默认收口（`config.rules` / `config.footer`） | `"plugin"` 同上；`"business"` 用精简预设（见下） |
 | `allowlist` | `writePolicy.allowlist` | 主控可直接写的 cwd 相对前缀（`isAllowedPath` 口径） |
 | `controlPlanePatterns` | `gates.controlPlanePatterns` | VerifyGate / ReviewGate 的控制面豁免（`classifyPath` 口径） |
@@ -198,7 +212,7 @@
 | `contract.patterns` | `gates.contract.patterns` | 有子代理运行时改写契约文件的提醒 |
 | `docs.patterns` | `gates.verify.docPatterns` | 文档/控制面判定：verify 不触发、review 复用同一列表 |
 
-**字段级 fail-open**：某个字段类型或内容非法（空数组、含非字符串、`rules` 不是两个预设名之一）只丢该字段、回落 profile，其它字段与 `mode` 不受影响；整个文件坏 JSON 或缺失 → 全部回落，行为与 0.14.3 一致。路径匹配沿用 `classifyPath` / `isAllowedPath`（cwd 锚定、大小写不敏感、尾 `/` 前缀），没有第二套归一化。
+**字段级 fail-open**：某个字段类型或内容非法（空数组、含非字符串、`rules` 不是两个预设名之一）只丢该字段、回落 profile，其它字段与 `mode` 不受影响；整个文件坏 JSON 或缺失 → 全部回落（mode 取 `auto`，策略字段取 profile）。路径匹配沿用 `classifyPath` / `isAllowedPath`（cwd 锚定、大小写不敏感、尾 `/` 前缀），没有第二套归一化。
 
 **`business` 预设**：`BUSINESS_RULES`（实测 900 字，六条骨架）+ `BUSINESS_FOOTER`（217 字）冻结在 `lib/config.mjs`；相对默认正文（规则正文 3216 字 + 5 个分隔换行、合计 3221；收口 615 ≈ 3.8K）约 3/10（含换行实测：business 正文 905/3221 ≈ 28%，含收口 1122/3836 ≈ 29%，不到三分之一）。删掉的是本仓库专属细节：docs-check、「断言 → 代码位置」表、`docs/superpowers/specs` 路径与 spec 冻结/评审切片细则；留下的是主控只做控制面、派发自包含、验收只付一次、评审只审变更集、提交权、并行读写判级。预设只换规则正文，不改白名单与闸门口径——业务项目仍要配 `allowlist` / `verify.commands`。
 
@@ -208,24 +222,24 @@
 - 白名单：有 `docs/` → `["dispatch/", "docs/"]`，否则 `["dispatch/"]`（`controlPlanePatterns` 同值）。
 - 契约面：存在 `src/types/`、`prisma/schema.prisma`、`openapi.{yaml,yml,json}` 的才各加一条。
 - 预设：`package.json` 含 `dsh.bundle` / `dsh.client` → `plugin`，否则 `business`。
-- 返回一行摘要（文件、preset、命令数、契约面数）+「随时 `/dispatch off|shadow|full` 切档」；生成的是可直接手改的示例 JSON（`mode` 固定 `full`）。
+- 返回一行摘要（文件、preset、命令数、契约面数）+「随时 `/dispatch off|auto|shadow|full` 切档」；生成的是可直接手改的示例 JSON（`mode` 固定 `full`）。
 
-**切换 mode 会保留其它字段**：`/dispatch off|shadow|full` 只替换 `mode`（读现有 JSON 后原子写回），不会抹掉手写的 `rules` / `allowlist` / `verify`；文件缺失或坏 JSON 时仍只写 `{"mode":"…"}`（0.14 行为）。
+**切换 mode 会保留其它字段**：`/dispatch off|auto|shadow|full` 只替换 `mode`（读现有 JSON 后原子写回），不会抹掉手写的 `rules` / `allowlist` / `verify`；文件缺失或坏 JSON 时仍只写 `{"mode":"…"}`（0.14 行为）。
 
-**与 0.13/0.14 兼容**：只有 `{"mode":…}`（或 `{"enabled":false}`）的文件行为逐字节不变——策略字段全部缺省即回落。
+**与 0.13/0.14/0.15 兼容**：已有的 `{"mode":…}` 与 `{"enabled":…}` 语义不变——`off`/`shadow`/`full` 逐字节不变，`{"enabled":true}` 仍是 `full`。0.16.0 的唯一行为变化是**没有标记文件的项目从 `full` 变为 `auto`**；0.15 手写的、只有 `rules` / `allowlist` 等字段而没有 `mode` 的策略文件也按 `auto` 处理，需要全文纪律时补 `"mode":"full"`。
 
 ## 会话区控件与 /dispatch
 
-0.14.0 起有两个新入口，读写的是同一个标记文件 `dispatch/protocol.json`：宿主命令 `/dispatch`（无参=查询，`/dispatch off|shadow|full`=切换，`/dispatch init`=按项目检测生成策略文件）和输入框上方的常驻控件。**文件仍是唯一真相**：在默认 `projectSwitch.path` 下，控件、命令、手改文件三者等价，无标记文件时一律按 `full`；自定义 `path` 时见下方读口径与「已知坑」。
+0.14.0 起有两个新入口，读写的是同一个标记文件 `dispatch/protocol.json`：宿主命令 `/dispatch`（无参=查询，`/dispatch off|auto|shadow|full`=切换，`/dispatch init`=按项目检测生成策略文件）和输入框上方的常驻控件。**文件仍是唯一真相**：在默认 `projectSwitch.path` 下，控件、命令、手改文件三者等价，无标记文件时按 `auto`；自定义 `path` 时见下方读口径与「已知坑」。
 
-控件落点是 `conversation.input.dock`——输入框卡片正上方那一行（与 Todo、队列停靠同一片区域，本控件 `order: 10`）。它显示 `派发纪律` 和当前档位，右侧三个窄按钮 `off` / `shadow` / `full`；窄屏（宽度不超过 640px）只留当前档位那一个按钮，点它之前先看档位、点其它档位需横向空间。会话 id 由 slot 的 session 作用域注入传进来，控件不依赖 owner props（`client.js#apply`、`dsh-client-ui-conversation` 的 `src/client/contract/slots.ts:301-305`）。0.14.x 的 `conversation.composer.dock` 不行：宿主只在 `variant === 'composer'` 时渲染它（`dsh-client-ui-conversation` 的 `src/client/skeleton/InputBar.tsx:596-599`），而新建的空白会话是 hero 态（同包 `src/client/skeleton/ConversationMainPanel.tsx:32-35`），整行控件因此不出现；`input.dock` 只要求会话与输入态就绪（同包 `src/client/skeleton/ConversationContent.tsx:86-87`、`:169`）。
+控件落点是 `conversation.input.dock`——输入框卡片正上方那一行（与 Todo、队列停靠同一片区域，本控件 `order: 10`）。它显示 `派发纪律` 和当前档位，右侧四个窄按钮 `off` / `auto` / `shadow` / `full`；窄屏（宽度不超过 640px）只留当前档位那一个按钮，点它之前先看档位、点其它档位需横向空间。会话 id 由 slot 的 session 作用域注入传进来，控件不依赖 owner props（`client.js#apply`、`dsh-client-ui-conversation` 的 `src/client/contract/slots.ts:301-305`）。0.14.x 的 `conversation.composer.dock` 不行：宿主只在 `variant === 'composer'` 时渲染它（`dsh-client-ui-conversation` 的 `src/client/skeleton/InputBar.tsx:596-599`），而新建的空白会话是 hero 态（同包 `src/client/skeleton/ConversationMainPanel.tsx:32-35`），整行控件因此不出现；`input.dock` 只要求会话与输入态就绪（同包 `src/client/skeleton/ConversationContent.tsx:86-87`、`:169`）。
 
 读口径（`client.js#readModeOf`）：
 
-- `remote.workspaceFiles.read(sessionId, 'dispatch/protocol.json', {})`，路径按**工作区根相对**解析。**控件拿不到 profile 配置**：这个路径是硬编码的默认值（`client.js#MARKER_PATH`），改了 `projectSwitch.path` 的项目控件仍读默认文件，可能停在 `full`——这类项目以 `/dispatch` 为准（见「已知坑」）。
-- 错误码 `workspace-file/not-found` → 显示 `full`（没有标记就是全文规则）。
+- `remote.workspaceFiles.read(sessionId, 'dispatch/protocol.json', {})`，路径按**工作区根相对**解析。**控件拿不到 profile 配置**：这个路径是硬编码的默认值（`client.js#MARKER_PATH`），改了 `projectSwitch.path` 的项目控件仍读默认文件，可能停在 `auto`——这类项目以 `/dispatch` 为准（见「已知坑」）。
+- 错误码 `workspace-file/not-found` → 显示 `auto`（没有标记就是默认档）。
 - 其它错误（越界、非文本、RPC 失败）→ 显示 `未知`，鼠标悬停的 title 给出错误码与消息。
-- 文件能读到但 JSON 坏 → 与宿主读取器同口径回落 `full`（`client.js#modeOfText`、`lib/project.mjs#readPolicyDocument`）。
+- 文件能读到但 JSON 坏 → 与宿主读取器同口径回落 `auto`（`client.js#modeOfText`、`lib/project.mjs#readPolicyDocument`）。
 
 写口径（首选面，`client.js#switchModeOf`）：点按钮走 `remote.commands.execute(sessionId, '/dispatch <mode>', [])`，也就是 `/` 菜单敲命令走的那条 admission 路径（`dsh-client-ui-commands` 的 `src/client/service.ts:420-435`）；成功与否看返回的 `{ ok, value: { result } }`，`result.kind === 'error'` 时把宿主文案放进 `切换失败：…` 提示。`remote`、`remote.commands`、`remote.workspaceFiles` 都写在 `inject` 里（`client.js#inject`）——它们是独立的子服务，少一个宿主就不加载本插件（控件整块不出现，而不是「显示未知/不支持」），所以注入是必需项，不做第二套写入。
 
@@ -296,12 +310,12 @@
 
 | 命令 | 期望 |
 |---|---|
-| `node plugins/dispatch-protocol/test.mjs` | 184 pass（`ℹ pass 184` / `ℹ fail 0`），exit 0 |
-| `node plugins/dispatch-protocol/scripts/docs-check.mjs` | 无参扫仓库根，`docs-check: files=28 fail=0`，exit 0 |
+| `node plugins/dispatch-protocol/test.mjs` | 188 pass（`ℹ pass 188` / `ℹ fail 0`），exit 0 |
+| `node plugins/dispatch-protocol/scripts/docs-check.mjs` | 无参扫仓库根，`docs-check: files=29 fail=0`，exit 0 |
 | `node plugins/dispatch-protocol/scripts/check-anchors.mjs` | 无参扫仓库根 `README.md` 与 `plugins/*/README.md`，`anchors-check: files=4 fail=0`，exit 0 |
 | `node plugins/dispatch-protocol/scripts/docs-check.mjs --self-test` | `self-test: pass=21 fail=0`，exit 0 |
 
-前三条都是离线检查（测试、文档语法、锚点有效性）；最后一条只验 docs-check 自身（fixture 全建在 `os.tmpdir()`，不写仓库；`check-anchors.mjs --self-test` 同理）。真机口径另走临时 profile：`dsh plugin --profile probe add "link:<仓库根>/plugins/dispatch-protocol"` 后 headless 问系统提示词「派发纪律」里的六条，模型应逐条复述。
+前三条都是离线检查（测试、文档语法、锚点有效性）；最后一条只验 docs-check 自身（fixture 全建在 `os.tmpdir()`，不写仓库；`check-anchors.mjs --self-test` 同理）。真机口径另走临时 profile：`dsh plugin --profile probe add "link:<仓库根>/plugins/dispatch-protocol"`；无标记项目应看到 `auto` 提级提示，写 `{"mode":"full"}` 的项目再 headless 问系统提示词「派发纪律」里的六条，模型应逐条复述。
 
 ## 设计取舍
 
@@ -329,6 +343,7 @@
 | `0.14.3` | dock 选中态改用「标签主色 + 透明度」着色（`color-mix` 叠在 `--dsw-alias-label-primary` 上，14% / hover 20% + 1px `inset` 描边），原先用 `--dsw-alias-brand-primary`，该别名在浅/深主题下解析成白色底色、配 `--dsw-alias-label-inverse` 回落 `#fff` → 白底白字；不支持 `color-mix` 的浏览器回退到 `--dsw-alias-bg-layer-3`（缺失则 `--dsw-alias-interactive-bg-hover`）+ `--dsw-alias-label-primary`。 |
 | `0.15.0` | 项目策略文件 + `business` 预设 + `/dispatch init`：`dispatch/protocol.json` 从 mode 扩成项目策略（`rules` / `allowlist` / `controlPlanePatterns` / `verify.commands` / `contract.patterns` / `docs.patterns`，字段级 fail-open——坏字段只丢自己；切换 mode 只替换 `mode`、保留其它字段）；`rules:"business"` 用 900 + 217 字的精简预设（默认正文 3.8K，约 3/10）；`/dispatch init` 按锁文件 / scripts / `docs/` / 契约面 / `dsh.bundle|client` 检测生成示例 JSON，已存在不覆盖；`/dispatch` 的 `input.hint` 与用法串加 `init`。无策略文件时行为与 0.14.3 一致；测试 183 条（相对 0.14.3 的 168 条新增 15 条：策略读取 / 回落 / business / init / 切档保留 / 命令形状）。 |
 | `0.15.1` | dock 落点从 `conversation.composer.dock` 迁到 `conversation.input.dock`（`order: 10`）——原落点只在 composer 形态渲染，新建的空白会话是 hero 态，整行控件不显示；位置同时纠正为用户最初要的「输入框上方」；测试 184 条（新增 1 条落点回归）。 |
+| `0.16.0` | `auto` 默认档 + 模型请示 + 单向升级工具：默认从 `full` 改为 `auto`（无标记 / 坏文件 / 无 `mode` 的策略文件都回落 `auto`；`{"enabled":true}` 仍是 `full`），`auto` 只给根代理注入 470 字的提级提示，不拦写入、不投递检查点/闸门、不写观测行；新增 `dispatch_upgrade_full` 工具，仅在「根代理 + 当前 auto」可见，用户确认后原子写回 `mode:"full"` 并保留其它策略字段；`/dispatch`、dock 与客户端读取器增加 `auto`。行为变化只有一条：没有标记的项目从 `full` 降到 `auto`；测试 188 条（新增 4 条：默认/静默/工具/客户端）。 |
 
 0.10.0–0.11.0 为未发布的中间提交，内容并入 0.12.0。
 
@@ -349,6 +364,8 @@
 - **记账在 TEMP 里**：`log` 默认落系统临时目录（`dispatch-protocol-decisions.jsonl`），不随仓库版本化；要长期留档就把路径指到固定位置，或写 `false` 全关。
 - **观测计数与守卫是两套口径**：观测行按去重路径计、失败写入不计；检查点的只读判定按调用名、尝试即算（失败或被拒也算执行类）；守卫只看参数路径，不解析 `pwsh`。
 - **HandoffGate 是 best-effort**：空回合依赖宿主触发 `agent/turn-stopping`，空流/中断回合可能不触发，提醒不到时按「交接」模板手工落盘。
-- **控件只读默认标记路径**（0.14.0 已知限制）：浏览器控件拿不到 profile 的配置，读路径硬编码为 `dispatch/protocol.json`（`client.js#MARKER_PATH`），丢弃 `projectSwitch.path`。自定义了 `projectSwitch.path` 的项目**以 `/dispatch` 为准**——命令与写入守卫走同一份配置，仍是唯一真相；控件的显示可能停在 `full`（它读的默认文件不存在，`workspace-file/not-found` 按 `full` 显示）。
+- **控件只读默认标记路径**（0.14.0 已知限制）：浏览器控件拿不到 profile 的配置，读路径硬编码为 `dispatch/protocol.json`（`client.js#MARKER_PATH`），丢弃 `projectSwitch.path`。自定义了 `projectSwitch.path` 的项目**以 `/dispatch` 为准**——命令与写入守卫走同一份配置，仍是唯一真相；控件的显示可能停在 `auto`（它读的默认文件不存在，`workspace-file/not-found` 按 `auto` 显示）。
+- **auto 没有兜底**：默认档只注入提示，模型漏问就等同无纪律；需要「保证不裸奔」的项目显式写 `{"mode":"full"}`。
+- **升级工具依赖宿主工具面**：`ctx.tools.register` 不存在时工具静默缺席，模型只能请用户点 dock 或输入 `/dispatch full`；提示段已写这条兜底。
 - **无会话 / 会话未就绪时不显示控件**（0.15.1 的 `input.dock` 也如此）：该槽要求会话已打开且输入态就绪（`zone` 需 `session` 与 `inputState`）——还没选/建会话（`sessionId === undefined`）、会话打开中、打开失败时整行不渲染，属预期；会话打开且输入态就绪后显示（**空白新会话也算**），`/dispatch` 在这些状态下始终可用。
 - **profile 插件不支持热加载**：装完必须重启 DSH；`dsh plugin update` 失败可能留下半残目录（被打开的子目录进入 delete-pending），只能重启 Windows 清——先完全退出 DSH 再 update。

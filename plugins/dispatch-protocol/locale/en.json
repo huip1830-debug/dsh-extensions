@@ -6,6 +6,7 @@
   "ui": {
     "title": "Dispatch discipline",
     "modeOff": "Off",
+    "modeAuto": "Auto",
     "modeShadow": "Shadow",
     "modeFull": "Full",
     "modeUnknown": "Unknown",

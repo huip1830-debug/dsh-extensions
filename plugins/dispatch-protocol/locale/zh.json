@@ -6,6 +6,7 @@
   "ui": {
     "title": "派发纪律",
     "modeOff": "关闭",
+    "modeAuto": "自动",
     "modeShadow": "只记",
     "modeFull": "全部",
     "modeUnknown": "未知",

@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import * as plugin from './plugin.mjs'
-import { resolveConfig, DEFAULT_RULES, BUSINESS_FOOTER, BUSINESS_RULES, resolveRulesPreset } from './lib/config.mjs'
+import { resolveConfig, AUTO_TEXT, DEFAULT_RULES, BUSINESS_FOOTER, BUSINESS_RULES, resolveRulesPreset } from './lib/config.mjs'
 import {
   DEFAULT_PROJECT_SWITCH, PROJECT_MODES, readProjectMode, readProjectPolicy, writeProjectMode,
 } from './lib/project.mjs'
@@ -950,7 +950,7 @@ test('a root turn that wrote files appends one observation row', () => {
       call(1, 'pwsh', { command: 'Remove-Item dead.cs' }),
       call(1, 'subagent', { description: '实现 X' }),
       call(2, 'read', { file_path: 'b.ts' }),
-    ], {}, 'session-59', dir)
+    ], {}, 'session-59', fullProject(dir))
     h.created(parent)
 
     h.turnStopping(parent, 1)
@@ -976,7 +976,7 @@ test('observation is off for child agents, missing cwd, and explicit disable', (
     const h = harness()
     plugin.apply(h.ctx, { log: false, observation: { enabled: false } })
 
-    const parent = h.main('parent-60', [call(1, 'edit', { file_path: 'a.ts' })], {}, 'session-60', dir)
+    const parent = h.main('parent-60', [call(1, 'edit', { file_path: 'a.ts' })], {}, 'session-60', fullProject(dir))
     h.created(parent)
     h.turnStopping(parent, 1)
 
@@ -996,7 +996,7 @@ test('one (session, turn) is observed once even when the turn closes twice', () 
     const parent = h.main('parent-63', [
       call(1, 'edit', { file_path: 'a.ts' }),
       call(1, 'edit', { file_path: 'b.ts' }),
-    ], {}, 'session-63', dir)
+    ], {}, 'session-63', fullProject(dir))
     h.created(parent)
 
     h.turnStopping(parent, 1) // the turn-end snapshot appends the row
@@ -1021,7 +1021,7 @@ test('a commit-only turn leaves no observation row', () => {
 
     const parent = h.main('parent-64', [
       call(1, 'pwsh', { command: 'git commit -m "x"' }),
-    ], {}, 'session-64', dir)
+    ], {}, 'session-64', fullProject(dir))
     h.created(parent)
     h.turnStopping(parent, 1)
 
@@ -1997,7 +1997,7 @@ test('a root write outside the allowlist is denied with the paths and the overri
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
     plugin.apply(h.ctx, { log })
-    const root = h.main('session-policy-deny', [], {}, 'session-policy-deny', dir)
+    const root = h.main('session-policy-deny', [], {}, 'session-policy-deny', fullProject(dir))
 
     const verdict = h.guard({ agent: root, name: 'write', arguments: { file_path: 'server/src/x.ts' } })
 
@@ -2029,7 +2029,7 @@ test('control-plane writes pass without a decision-log line', () => {
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
     plugin.apply(h.ctx, { log })
-    const root = h.main('session-policy-allow', [], {}, 'session-policy-allow', dir)
+    const root = h.main('session-policy-allow', [], {}, 'session-policy-allow', fullProject(dir))
 
     const allowed = [
       'dispatch/state.md',
@@ -2078,7 +2078,7 @@ test('a fresh override written in this session allows the write and logs reason 
     const h = harness()
     plugin.apply(h.ctx, { log })
     const createdAt = Date.now() - 60_000
-    const root = h.main('session-policy-override', [], {}, 'session-policy-override', dir, createdAt)
+    const root = h.main('session-policy-override', [], {}, 'session-policy-override', fullProject(dir), createdAt)
 
     const overrideDir = join(dir, 'dispatch')
     const overrideFile = join(overrideDir, 'override.json')
@@ -2108,7 +2108,7 @@ test('an override older than the session is stale and denied', () => {
     const h = harness()
     plugin.apply(h.ctx, { log })
     const createdAt = Date.now()
-    const root = h.main('session-policy-stale', [], {}, 'session-policy-stale', dir, createdAt)
+    const root = h.main('session-policy-stale', [], {}, 'session-policy-stale', fullProject(dir), createdAt)
 
     const overrideDir = join(dir, 'dispatch')
     const overrideFile = join(overrideDir, 'override.json')
@@ -2135,7 +2135,7 @@ test('a malformed override is invalid and denied', () => {
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
     plugin.apply(h.ctx, { log })
-    const root = h.main('session-policy-invalid', [], {}, 'session-policy-invalid', dir)
+    const root = h.main('session-policy-invalid', [], {}, 'session-policy-invalid', fullProject(dir))
 
     const overrideDir = join(dir, 'dispatch')
     mkdirSync(overrideDir, { recursive: true })
@@ -2157,7 +2157,7 @@ test('an override without a non-empty reason is invalid and denied', () => {
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
     plugin.apply(h.ctx, { log })
-    const root = h.main('session-policy-noreason', [], {}, 'session-policy-noreason', dir)
+    const root = h.main('session-policy-noreason', [], {}, 'session-policy-noreason', fullProject(dir))
 
     const overrideDir = join(dir, 'dispatch')
     mkdirSync(overrideDir, { recursive: true })
@@ -2179,7 +2179,7 @@ test('shadow mode logs the denial but lets the write through', () => {
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
     plugin.apply(h.ctx, { log, writePolicy: { mode: 'shadow' } })
-    const root = h.main('session-policy-shadow', [], {}, 'session-policy-shadow', dir)
+    const root = h.main('session-policy-shadow', [], {}, 'session-policy-shadow', fullProject(dir))
 
     assert.equal(h.guard({ agent: root, name: 'write', arguments: { file_path: 'server/src/x.ts' } }), undefined,
       'shadow mode never blocks')
@@ -2200,7 +2200,7 @@ test('tools outside the write list, path-less calls and unscoped agents pass sil
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
     plugin.apply(h.ctx, { log })
-    const root = h.main('session-policy-exempt', [], {}, 'session-policy-exempt', dir)
+    const root = h.main('session-policy-exempt', [], {}, 'session-policy-exempt', fullProject(dir))
 
     assert.equal(h.guard({ agent: root, name: 'read', arguments: { file_path: 'server/src/x.ts' } }), undefined,
       'only the configured write tools are judged')
@@ -2222,7 +2222,7 @@ test('an absolute path outside the session cwd is denied', () => {
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
     plugin.apply(h.ctx, { log })
-    const root = h.main('session-policy-outside', [], {}, 'session-policy-outside', dir)
+    const root = h.main('session-policy-outside', [], {}, 'session-policy-outside', fullProject(dir))
 
     const outside = join(tmpdir(), `dispatch-protocol-outside-${process.pid}.ts`)
     assert.equal(typeof h.guard({ agent: root, name: 'write', arguments: { file_path: outside } }), 'string',
@@ -2245,7 +2245,7 @@ test('a valid override without a session timestamp is allowed as override-unboun
     plugin.apply(h.ctx, { log })
     // A minimal agent with no `createdAt` anywhere: the freshness check has no
     // anchor, so it is skipped (fail-open) and the log says why.
-    const root = { session: { id: 'session-policy-unbounded', header: { origin: 'root' }, cwd: dir } }
+    const root = { session: { id: 'session-policy-unbounded', header: { origin: 'root' }, cwd: fullProject(dir) } }
 
     const overrideDir = join(dir, 'dispatch')
     mkdirSync(overrideDir, { recursive: true })
@@ -2270,7 +2270,7 @@ test('dot-dot segments are folded before the allowlist match', () => {
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
     plugin.apply(h.ctx, { log })
-    const root = h.main('session-policy-dotdot', [], {}, 'session-policy-dotdot', dir)
+    const root = h.main('session-policy-dotdot', [], {}, 'session-policy-dotdot', fullProject(dir))
 
     assert.equal(typeof h.guard({ agent: root, name: 'write', arguments: { file_path: 'dispatch/../src/x.ts' } }), 'string',
       'dispatch/../src/x.ts escapes the control plane and is denied')
@@ -2293,7 +2293,7 @@ test('the allowlist matches on a word boundary, so dispatch-notes.md is denied',
     const log = join(dir, 'decisions.jsonl')
     const h = harness()
     plugin.apply(h.ctx, { log })
-    const root = h.main('session-policy-boundary', [], {}, 'session-policy-boundary', dir)
+    const root = h.main('session-policy-boundary', [], {}, 'session-policy-boundary', fullProject(dir))
 
     assert.equal(typeof h.guard({ agent: root, name: 'write', arguments: { file_path: 'dispatch-notes.md' } }), 'string',
       'a dispatch/ entry must not leak to dispatch-notes.md')
@@ -2582,7 +2582,7 @@ test('C4: the plugin picks the doc-only review text and logs docOnly', () => {
       log, checkpoint: { enabled: false }, gates: { handoff: { enabled: false } },
     })
 
-    const parent = h.main('session-review-doc', events, {}, 'session-review-doc', dir)
+    const parent = h.main('session-review-doc', events, {}, 'session-review-doc', fullProject(dir))
     h.created(parent)
     h.created(h.child('review-doc', 'session-review-doc', '只读评审：diff'))
     h.ended({ childId: 'review-doc', stopReason: 'completed' })
@@ -2793,7 +2793,7 @@ test('D2: the plugin passes the session cwd to the verify gate (A1 end-to-end)',
     const events = []
     const h = harness()
     plugin.apply(h.ctx, { log: false, checkpoint: { enabled: false } })
-    const parent = h.main('session-gate-cwd', events, {}, 'session-gate-cwd', dir)
+    const parent = h.main('session-gate-cwd', events, {}, 'session-gate-cwd', fullProject(dir))
     h.created(parent)
 
     events.push(
@@ -2886,7 +2886,7 @@ test('0.13.0: projectSwitch defaults and rejects silent breakage', () => {
   assert.deepEqual(config.projectSwitch, { enabled: true, path: 'dispatch/protocol.json' })
   assert.deepEqual(DEFAULT_PROJECT_SWITCH, { enabled: true, path: 'dispatch/protocol.json' },
     'the single default lives in lib/project.mjs')
-  assert.deepEqual(PROJECT_MODES, ['full', 'shadow', 'off'])
+  assert.deepEqual(PROJECT_MODES, ['off', 'auto', 'shadow', 'full'])
 
   assert.throws(() => resolveConfig({ projectSwitch: 42 }),
     { message: 'dispatch-protocol: projectSwitch must be an object' })
@@ -2896,8 +2896,8 @@ test('0.13.0: projectSwitch defaults and rejects silent breakage', () => {
     { message: 'dispatch-protocol: projectSwitch.path must be a non-empty string' })
 })
 
-test('0.13.0: readProjectMode reads the marker file and fails open', () => {
-  // §5-2
+test('0.13.0/0.16.0: readProjectMode reads the marker file with auto as the default', () => {
+  // §5-2；0.16.0 默认改 auto，坏文件不再等于 full。
   const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-project-mode-'))
   try {
     const config = resolveConfig({}).projectSwitch
@@ -2908,18 +2908,26 @@ test('0.13.0: readProjectMode reads the marker file and fails open', () => {
       return cwd
     }
 
-    assert.equal(readProjectMode(project('missing'), config), 'full', 'no marker file → full')
+    assert.equal(readProjectMode(project('missing'), config), 'auto', 'no marker file → auto (0.16.0)')
+    assert.equal(readProjectMode(project('empty-object', '{}'), config), 'auto', 'no mode or enabled → auto')
+    assert.equal(readProjectMode(project('rules-only', '{"rules":"business"}'), config), 'auto',
+      'a policy file without a mode defaults to auto')
     assert.equal(readProjectMode(project('enabled-off', '{"enabled":false}'), config), 'off')
+    assert.equal(readProjectMode(project('enabled-on', '{"enabled":true}'), config), 'full',
+      'the 0.13 explicit enable still means full')
     assert.equal(readProjectMode(project('mode-off', '{"mode":"off"}'), config), 'off')
+    assert.equal(readProjectMode(project('mode-auto', '{"mode":"auto"}'), config), 'auto')
     assert.equal(readProjectMode(project('mode-shadow', '{"mode":"shadow"}'), config), 'shadow')
     assert.equal(readProjectMode(project('mode-full', '{"mode":"full"}'), config), 'full')
-    assert.equal(readProjectMode(project('bad-json', '{oops'), config), 'full',
-      'a broken file is a missing convenience, not an error')
-    assert.equal(readProjectMode(project('array', '[]'), config), 'full')
+    assert.equal(readProjectMode(project('mode-wins', '{"mode":"off","enabled":true}'), config), 'off',
+      'a valid mode wins over enabled')
+    assert.equal(readProjectMode(project('bad-json', '{oops'), config), 'auto',
+      'a broken file is treated as no policy, not as an error')
+    assert.equal(readProjectMode(project('array', '[]'), config), 'auto')
     assert.equal(readProjectMode(project('switch-disabled', '{"mode":"off"}'),
       { enabled: false, path: 'dispatch/protocol.json' }), 'full',
     'projectSwitch.enabled === false wins over any marker content')
-    assert.equal(readProjectMode('', config), 'full', 'an empty cwd fails open')
+    assert.equal(readProjectMode('', config), 'full', 'an empty cwd falls back to full')
     assert.equal(readProjectMode(undefined, config), 'full')
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -3066,12 +3074,15 @@ test('0.13.0: a project off mode writes no observation row and creates no runs d
   }
 })
 
-test('0.13.0: the prompt section text is a per-cwd function', () => {
-  // §5-8
+test('0.13.0/0.16.0: the prompt section text is a per-cwd function', () => {
+  // §5-8；0.16.0 增加 auto：根代理拿到提级提示，子代理拿到空串。
   const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-project-prompt-'))
   try {
     const fullCwd = join(dir, 'full')
     mkdirSync(fullCwd, { recursive: true })
+    writeProjectMarker(fullCwd, '{"mode":"full"}')
+    const autoCwd = join(dir, 'auto')
+    mkdirSync(autoCwd, { recursive: true })
     const shadowCwd = join(dir, 'shadow')
     mkdirSync(shadowCwd, { recursive: true })
     writeProjectMarker(shadowCwd, '{"mode":"shadow"}')
@@ -3088,6 +3099,10 @@ test('0.13.0: the prompt section text is a per-cwd function', () => {
     assert.equal(typeof section.text, 'function', 'off is decided per assemble, not at load time')
     assert.equal(section.text({ agent: { session: { cwd: fullCwd } } }), config.text,
       'full keeps the rules')
+    assert.equal(section.text({ agent: { session: { cwd: autoCwd } } }), AUTO_TEXT,
+      'auto injects only the escalation hint')
+    assert.equal(section.text({ agent: { session: { cwd: autoCwd, header: { origin: 'subagent' } } } }), '',
+      'auto injects nothing for a subagent')
     assert.equal(section.text({ agent: { session: { cwd: shadowCwd } } }), config.text,
       'shadow keeps the rules and only changes the write guard')
     assert.equal(section.text({ agent: { session: { cwd: offCwd } } }), '',
@@ -3117,7 +3132,7 @@ test('0.14.0: apply registers the /dispatch command with the frozen shape', () =
   const [command] = h.commands
   assert.equal(command.name, 'dispatch')
   assert.equal(command.description, '查看/切换当前项目的派发纪律档位')
-  assert.deepEqual(command.input, { hint: '[off|shadow|full|init]' })
+  assert.deepEqual(command.input, { hint: '[off|auto|shadow|full|init]' })
   assert.equal(typeof command.handler, 'function')
 })
 
@@ -3202,8 +3217,8 @@ test('0.14.0: writeProjectMode reports write-failed and cleans the temp file', (
   }
 })
 
-test('0.14.0: the /dispatch command writes all three modes and reports the relative path', () => {
-  // §5：三档各写一次并返回 success 文本；大小写与空白由 handler 归一化。
+test('0.14.0: the /dispatch command writes all four modes and reports the relative path', () => {
+  // §5：四档各写一次并返回 success 文本；大小写与空白由 handler 归一化。
   const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-command-write-'))
   try {
     const h = harness()
@@ -3232,9 +3247,9 @@ test('0.14.0: the /dispatch command queries the current mode with no argument', 
     const bare = join(dir, 'bare')
     mkdirSync(bare, { recursive: true })
     const bareAgent = h.main('agent-bare', [], {}, 'session-bare', bare)
-    assert.deepEqual(runCommand(h, '', bareAgent), { kind: 'success', text: '当前项目档位：full' },
-      'no marker file means full')
-    assert.deepEqual(runCommand(h, undefined, bareAgent), { kind: 'success', text: '当前项目档位：full' })
+    assert.deepEqual(runCommand(h, '', bareAgent), { kind: 'success', text: '当前项目档位：auto' },
+      'no marker file means auto (0.16.0)')
+    assert.deepEqual(runCommand(h, undefined, bareAgent), { kind: 'success', text: '当前项目档位：auto' })
 
     const off = join(dir, 'off')
     mkdirSync(off, { recursive: true })
@@ -3263,7 +3278,7 @@ test('0.14.0: the /dispatch command rejects an unknown argument and a missing cw
     const agent = h.main('agent-errors', [], {}, 'session-errors', cwd)
 
     assert.deepEqual(runCommand(h, 'loud', agent),
-      { kind: 'error', text: '用法：/dispatch [off|shadow|full|init]（无参=查询）' })
+      { kind: 'error', text: '用法：/dispatch [off|auto|shadow|full|init]（无参=查询）' })
     assert.equal(existsSync(join(cwd, 'dispatch')), false, 'an unknown argument writes nothing')
 
     assert.deepEqual(runCommand(h, 'off', { session: {} }),
@@ -3288,7 +3303,7 @@ test('0.14.0: a non-string rawInput is a usage error, not a no-arg query', () =>
 
     for (const rawInput of [[], ['off'], {}, { mode: 'off' }, 42, null]) {
       assert.deepEqual(runCommand(h, rawInput, agent),
-        { kind: 'error', text: '用法：/dispatch [off|shadow|full|init]（无参=查询）' }, `rawInput=${JSON.stringify(rawInput)}`)
+        { kind: 'error', text: '用法：/dispatch [off|auto|shadow|full|init]（无参=查询）' }, `rawInput=${JSON.stringify(rawInput)}`)
     }
     assert.equal(existsSync(join(cwd, 'dispatch')), false, 'a non-string argument writes nothing')
   } finally {
@@ -3531,17 +3546,18 @@ test('0.15.0: readProjectPolicy returns only the fields the file validly carries
       return cwd
     }
 
-    assert.deepEqual(readProjectPolicy(project('missing'), config), { mode: 'full' },
-      'no marker file → only the mode, no policy fields')
-    assert.deepEqual(readProjectPolicy(project('empty-file', ''), config), { mode: 'full' })
-    assert.deepEqual(readProjectPolicy(project('bad-json', '{oops'), config), { mode: 'full' })
-    assert.deepEqual(readProjectPolicy(project('array', '[]'), config), { mode: 'full' })
-    assert.deepEqual(readProjectPolicy(project('null', 'null'), config), { mode: 'full' })
+    assert.deepEqual(readProjectPolicy(project('missing'), config), { mode: 'auto' },
+      'no marker file → auto, no policy fields (0.16.0)')
+    assert.deepEqual(readProjectPolicy(project('empty-file', ''), config), { mode: 'auto' })
+    assert.deepEqual(readProjectPolicy(project('bad-json', '{oops'), config), { mode: 'auto' })
+    assert.deepEqual(readProjectPolicy(project('array', '[]'), config), { mode: 'auto' })
+    assert.deepEqual(readProjectPolicy(project('null', 'null'), config), { mode: 'auto' })
 
-    // mode / enabled 的 0.13 判定顺序不变。
+    // mode / enabled 的 0.13 判定顺序不变；没有 mode 的普通策略文件默认 auto。
     assert.deepEqual(readProjectPolicy(project('mode-shadow', '{"mode":"shadow"}'), config), { mode: 'shadow' })
     assert.deepEqual(readProjectPolicy(project('enabled-false', '{"enabled":false}'), config), { mode: 'off' })
-    assert.deepEqual(readProjectPolicy(project('unknown-mode', '{"mode":"loud"}'), config), { mode: 'full' })
+    assert.deepEqual(readProjectPolicy(project('enabled-true', '{"enabled":true}'), config), { mode: 'full' })
+    assert.deepEqual(readProjectPolicy(project('unknown-mode', '{"mode":"loud"}'), config), { mode: 'auto' })
     assert.deepEqual(readProjectPolicy(project('mode-off-rules', '{"mode":"off","rules":"business"}'), config),
       { mode: 'off', rules: 'business' },
       'mode and rules are independent fields')
@@ -3673,9 +3689,9 @@ test('0.15.0: readProjectMode is exactly readProjectPolicy(...).mode and never t
     assert.deepEqual(readProjectPolicy(project('escaping-path', '{"rules":"business"}'),
       { enabled: true, path: '../outside.json' }), { mode: 'full' },
     'a path escaping the cwd is not a marker file')
-    assert.deepEqual(readProjectPolicy(project('custom-path', '{"rules":"business"}'),
-      { enabled: true, path: 'dispatch/custom.json' }), { mode: 'full' },
-    'the default marker path is only read when projectSwitch.path says so')
+    assert.deepEqual(readProjectPolicy(project('custom-path', '{"mode":"full"}'),
+      { enabled: true, path: 'dispatch/custom.json' }), { mode: 'auto' },
+    'the default marker path is only read when projectSwitch.path says so; the missing custom file is auto')
     assert.deepEqual(readProjectMode(undefined), 'full', 'no projectSwitch at all still fails open')
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -3755,7 +3771,7 @@ test('0.15.0: the write guard uses the project allowlist and still honours the o
     const log = join(dir, 'decisions.jsonl')
     const cwd = join(dir, 'project')
     mkdirSync(cwd, { recursive: true })
-    writeProjectMarker(cwd, JSON.stringify({ allowlist: ['dispatch/', 'src/'] }))
+    writeProjectMarker(cwd, JSON.stringify({ mode: 'full', allowlist: ['dispatch/', 'src/'] }))
 
     const h = harness()
     plugin.apply(h.ctx, { log })
@@ -3796,7 +3812,7 @@ test('0.15.0: the verify gate uses the project verify.commands', () => {
   try {
     const cwd = join(dir, 'project')
     mkdirSync(cwd, { recursive: true })
-    writeProjectMarker(cwd, JSON.stringify({ verify: { commands: ['pnpm -w test'] } }))
+    writeProjectMarker(cwd, JSON.stringify({ mode: 'full', verify: { commands: ['pnpm -w test'] } }))
 
     const verified = harness()
     plugin.apply(verified.ctx, quiet)
@@ -3839,7 +3855,7 @@ test('0.15.0: the contract gate uses the project contract.patterns', () => {
   try {
     const cwd = join(dir, 'project')
     mkdirSync(cwd, { recursive: true })
-    writeProjectMarker(cwd, JSON.stringify({ contract: { patterns: ['schema/'] } }))
+    writeProjectMarker(cwd, JSON.stringify({ mode: 'full', contract: { patterns: ['schema/'] } }))
 
     const h = harness()
     plugin.apply(h.ctx, { log: false, checkpoint: { enabled: false } })
@@ -3874,7 +3890,7 @@ test('0.15.0: the docs patterns flow into both verify and review', () => {
   try {
     const cwd = join(dir, 'project')
     mkdirSync(cwd, { recursive: true })
-    writeProjectMarker(cwd, JSON.stringify({ docs: { patterns: ['.txt'] } }))
+    writeProjectMarker(cwd, JSON.stringify({ mode: 'full', docs: { patterns: ['.txt'] } }))
 
     // verify：策略认 .txt 是文档，收口静默；.md 不再是文档，收口触发。
     const docOnly = harness()
@@ -3931,7 +3947,7 @@ test('0.15.0: the gates use the project controlPlanePatterns', () => {
   try {
     const cwd = join(dir, 'project')
     mkdirSync(cwd, { recursive: true })
-    writeProjectMarker(cwd, JSON.stringify({ controlPlanePatterns: ['src/notes/'] }))
+    writeProjectMarker(cwd, JSON.stringify({ mode: 'full', controlPlanePatterns: ['src/notes/'] }))
 
     const controlHarness = harness()
     plugin.apply(controlHarness.ctx, quiet)
@@ -3987,10 +4003,10 @@ test('0.15.0: the prompt section switches to the business preset by rules', () =
   try {
     const businessCwd = join(dir, 'business')
     mkdirSync(businessCwd, { recursive: true })
-    writeProjectMarker(businessCwd, '{"rules":"business"}')
+    writeProjectMarker(businessCwd, '{"mode":"full","rules":"business"}')
     const pluginCwd = join(dir, 'plugin')
     mkdirSync(pluginCwd, { recursive: true })
-    writeProjectMarker(pluginCwd, '{"rules":"plugin"}')
+    writeProjectMarker(pluginCwd, '{"mode":"full","rules":"plugin"}')
     const offCwd = join(dir, 'off')
     mkdirSync(offCwd, { recursive: true })
     writeProjectMarker(offCwd, '{"mode":"off","rules":"business"}')
@@ -4069,7 +4085,7 @@ test('0.15.0: /dispatch init writes the detected policy and never overwrites', (
     assert.match(result.text, /preset: plugin/)
     assert.match(result.text, /命令 3 条/)
     assert.match(result.text, /契约面 3 个/)
-    assert.match(result.text, /\/dispatch off\|shadow\|full/)
+    assert.match(result.text, /\/dispatch off\|auto\|shadow\|full/)
 
     // 已存在不覆盖：返回错误文案且文件逐字节不变。
     const before = readFileSync(file, 'utf8')
@@ -4181,13 +4197,160 @@ test('0.15.0: the unknown-argument error mentions init so the subcommand is disc
 
     assert.equal(result.kind, 'error')
     assert.match(result.text, /init/, 'the usage error advertises the init subcommand')
-    assert.match(result.text, /\/dispatch \[off\|shadow\|full\|init\]/)
+    assert.match(result.text, /\/dispatch \[off\|auto\|shadow\|full\|init\]/)
     assert.equal(existsSync(join(cwd, 'dispatch')), false, 'an unknown argument still writes nothing')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
+
+// ---------------------------------------------------------------------------
+// 0.16.0 — auto 默认档 + dispatch_upgrade_full（spec
+// `2026-11-18-dispatch-auto-mode-design.md` §2.1-§2.5）
+
+test('0.16.0: a project with no marker defaults to auto and does not enforce', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-auto-default-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    const root = h.main('session-auto-default', [], {}, 'session-auto-default', cwd)
+
+    assert.equal(readProjectMode(cwd, resolveConfig({}).projectSwitch), 'auto',
+      'no marker file means auto')
+    assert.equal(h.guard({ agent: root, name: 'write', arguments: { file_path: 'src/x.ts' } }), undefined,
+      'auto never blocks a root write')
+    assert.equal(existsSync(log), false, 'auto writes no decision line')
+
+    const section = h.rawSections[0]
+    assert.equal(section.text({ agent: { session: { cwd } } }), AUTO_TEXT,
+      'the auto prompt is the frozen escalation hint')
+    assert.match(AUTO_TEXT, /dispatch_upgrade_full/, 'the hint names the upgrade tool')
+    assert.match(AUTO_TEXT, /每需求最多问一次/, 'the hint bounds the asking')
+
+    assert.equal(h.registered.length, 1, 'the upgrade tool is registered')
+    const { definition, options } = h.registered[0]
+    assert.equal(definition.name, 'dispatch_upgrade_full')
+    assert.equal(options.when({ agent: root }), true, 'visible to the root agent in auto')
+    assert.equal(options.when({ agent: h.child('child-auto-default', 'session-auto-default', '实现 A') }),
+      false, 'never visible to a subagent')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.16.0: auto silences the checkpoint, the gates and the observation rows', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-auto-silent-'))
+  try {
+    const h = harness()
+    plugin.apply(h.ctx, quiet)
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    const parent = h.main('parent-auto-silent', [
+      call(1, 'list_agents', {}, 'poll-1'),
+      call(1, 'list_agents', {}, 'poll-2'),
+      call(1, 'list_agents', {}, 'poll-3'),
+      call(1, 'list_agents', {}, 'poll-4'),
+      call(1, 'list_agents', {}, 'poll-5'),
+      call(1, 'list_agents', {}, 'poll-6'),
+      call(2, 'edit', { file_path: 'a.ts' }, 'write-auto'),
+    ], {}, 'session-auto-silent', cwd)
+    h.created(parent)
+    h.created(h.child('child-auto-silent', 'parent-auto-silent', '实现 A',
+      [call(1, 'write', { file_path: 'a.ts' })]))
+    h.ended({ childId: 'child-auto-silent', stopReason: 'completed' })
+    h.turnStopping(parent, 1)
+    h.turnStopping(parent, 2)
+
+    assert.equal(parent.messages.length, 0, 'no checkpoint and no gate in auto')
+    assert.equal(existsSync(join(cwd, 'dispatch', 'runs')), false,
+      'auto writes no observation row and creates no runs directory')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.16.0: dispatch_upgrade_full is confirmed, auto-only and preserves policy fields', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-auto-upgrade-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+    const cwd = join(dir, 'project')
+    mkdirSync(cwd, { recursive: true })
+    writeProjectMarker(cwd, JSON.stringify({ mode: 'auto', rules: 'business', allowlist: ['dispatch/', 'src/'] }))
+    const root = h.main('session-upgrade', [], {}, 'session-upgrade', cwd)
+    const { definition, options } = h.registered[0]
+
+    await assert.rejects(definition.execute({ confirmed: false }, { agent: root }),
+      /user confirmation is required/)
+    await assert.rejects(definition.execute({ confirmed: true }, {}),
+      /working directory/)
+
+    const offCwd = join(dir, 'off')
+    mkdirSync(offCwd, { recursive: true })
+    writeProjectMarker(offCwd, '{"mode":"off"}')
+    const offAgent = h.main('session-off', [], {}, 'session-off', offCwd)
+    assert.equal(options.when({ agent: offAgent }), false)
+    await assert.rejects(definition.execute({ confirmed: true }, { agent: offAgent }),
+      /only auto can be upgraded/)
+
+    const text = await definition.execute({ confirmed: true }, { agent: root })
+    assert.match(text, /已切换为 full/)
+    assert.deepEqual(JSON.parse(readFileSync(join(cwd, 'dispatch', 'protocol.json'), 'utf8')),
+      { mode: 'full', rules: 'business', allowlist: ['dispatch/', 'src/'] },
+      'only the mode changes; policy fields survive')
+    assert.equal(readProjectPolicy(cwd, resolveConfig({}).projectSwitch).mode, 'full')
+    const row = readRows(log).find(entry => entry.kind === 'project' && entry.decision === 'switched')
+    assert.ok(row, 'the switch is recorded')
+    assert.equal(row.reason, 'user-confirmed')
+    assert.equal(row.mode, 'full')
+    assert.equal(options.when({ agent: root }), false, 'once full the tool disappears')
+
+    const fullCwd = join(dir, 'full')
+    mkdirSync(fullCwd, { recursive: true })
+    writeProjectMarker(fullCwd, '{"mode":"full"}')
+    const fullAgent = h.main('session-full', [], {}, 'session-full', fullCwd)
+    assert.equal(await definition.execute({ confirmed: true }, { agent: fullAgent }),
+      '已是 full，无需切换', 'a full project is idempotent')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.16.0: client.js exposes auto and mirrors the locale key', () => {
+  const previousWindow = globalThis.window
+  let captured
+  try {
+    globalThis.window = { __ModuleLoader__: { load(registration) { captured = registration } } }
+    new Function(readFileSync(new URL('./client.js', import.meta.url), 'utf8'))()
+    const exports = captured.factory((id) => {
+      if (id === 'react') return { createElement: () => null }
+      throw new Error(`client.js required an unexpected module: ${id}`)
+    })
+
+    assert.deepEqual(exports.pure.MODES, ['off', 'auto', 'shadow', 'full'])
+    assert.equal(exports.pure.modeLabelKey('auto'), 'modeAuto')
+    assert.equal(exports.pure.modeOfText(undefined), 'auto')
+    assert.equal(exports.pure.modeOfText('{"enabled":true}'), 'full')
+    assert.equal(exports.pure.modeOfText('{"enabled":false}'), 'off')
+
+    const zh = JSON.parse(readFileSync(new URL('./locale/zh.json', import.meta.url), 'utf8'))
+    const en = JSON.parse(readFileSync(new URL('./locale/en.json', import.meta.url), 'utf8'))
+    assert.equal(zh.ui.modeAuto, '自动')
+    assert.equal(en.ui.modeAuto, 'Auto')
+    assert.equal(exports.dictionaries.zh.modeAuto, zh.ui.modeAuto,
+      'the bundle dictionary mirrors locale/zh.json')
+    assert.equal(exports.dictionaries.en.modeAuto, en.ui.modeAuto,
+      'the bundle dictionary mirrors locale/en.json')
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  }
+})
 
 // ---------------------------------------------------------------------------
 function call(turn, name, args, id) {
@@ -4214,6 +4377,18 @@ function resultWithText(turn, callId, text, isError = false) {
 function writeProjectMarker(cwd, body) {
   mkdirSync(join(cwd, 'dispatch'), { recursive: true })
   writeFileSync(join(cwd, 'dispatch', 'protocol.json'), body)
+}
+
+/**
+ * 0.16.0: opt a fixture cwd into the full discipline. Since 0.16.0 a cwd with no
+ * marker resolves to `auto`, so every case that asserts full-mode guard/gate/
+ * observation behaviour must say so explicitly.
+ * @param cwd - the fixture working directory.
+ * @returns the same cwd, for use inline in `h.main(...)`.
+ */
+function fullProject(cwd) {
+  writeProjectMarker(cwd, '{"mode":"full"}')
+  return cwd
 }
 
 /** Read a decision log as parsed rows (0.6.0 gate assertions). */
@@ -4278,6 +4453,8 @@ function harness(options = {}) {
   const rawSections = []
   /** Registered `ctx.tools.guard(fn)` functions, in registration order. */
   const guards = []
+  /** 0.16.0: `ctx.tools.register(definition, options)` records, in order. */
+  const registered = []
   /** 0.14.0: definitions registered through `ctx.inject(['commands'], …)`. */
   const commands = []
   const events = new Map()
@@ -4303,6 +4480,12 @@ function harness(options = {}) {
     tools: {
       guard(fn) {
         guards.push(fn)
+        return () => {}
+      },
+      // 0.16.0 conditional tool registration; the harness records the definition
+      // and its `when` so tests can drive visibility and execute directly.
+      register(definition, options = {}) {
+        registered.push({ definition, options })
         return () => {}
       },
     },
@@ -4353,6 +4536,8 @@ function harness(options = {}) {
     sections,
     rawSections,
     guards,
+    /** 0.16.0: conditional tool registrations `{ definition, options }`. */
+    registered,
     /** 0.14.0: definitions registered through the optional `commands` service. */
     commands,
     /**

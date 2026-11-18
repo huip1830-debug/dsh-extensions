@@ -1,6 +1,6 @@
 # dispatch-protocol 0.16.0 — `auto` 默认档、模型请示与单向升级工具
 
-- 状态：**设计稿，待用户复核**（2026-11-18）
+- 状态：**契约冻结**（2026-11-18，用户回「实现」＝接受推荐项；默认 auto、升级工具按 §2.4 落地）
 - 需求原文（2026-11-18）：「派发纪律，默认 off，用户可以手动切换到 full，大模型也可以在收到需求后，评估需求是否需要开 full，如果需要，提示用户切换到 full，类似于提问」→ 讨论后用户裁决：默认改 `auto`（不是 off）；升级通道取「模型问」，**必须用户确认**；确认后由模型调用新增的切换工具执行。
 - 版本：`0.15.1` → **`0.16.0`**
 - 非目标：不改 DSH 本体；不改 `off` / `shadow` / `full` 的既有语义；不做自动切换（模型不得未经确认改档）；不做降档工具（`full → auto` 仍由用户命令或 dock 完成）；不新增 profile 配置键。
@@ -142,7 +142,7 @@ export const PROJECT_MODES = ['off', 'auto', 'shadow', 'full']
 ### 2.5 `/dispatch` 与 dock
 
 - 命令：`input.hint` 改为 `[off|auto|shadow|full|init]`；无参查询返回当前档；无标记文件时返回 `auto`；`/dispatch auto` 走 `mergeModeIntoPolicyFile`。
-- `runInit` 仍生成 `mode: "full"`（init 的语义是「这个项目要纪律」，不是「用默认」），文案不变。
+- `runInit` 仍生成 `mode: "full"`（init 的语义是「这个项目要纪律」，不是「用默认」）；成功文案里的切档提示同步改为 `off|auto|shadow|full`。
 - dock：`MODES = ['off', 'auto', 'shadow', 'full']`；`modeOfText` 的坏文件或非对象回落改为 `auto`；`readModeOf` 的 `workspace-file/not-found` 返回 `auto`；`modeLabelKey('auto')` 返回 `'modeAuto'`；`locale/zh.json` 与 `locale/en.json` 的 `ui` 增加 `modeAuto`，值分别是「自动」与 `Auto`。
 - 窄屏规则不变，只显示当前档。
 
