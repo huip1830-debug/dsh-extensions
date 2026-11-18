@@ -3443,6 +3443,78 @@ test('0.14.0: client.js declares the Remote namespace and both faces in inject',
   }
 })
 
+test('0.15.1: the dock registers on conversation.input.dock (blank Sessions render it)', () => {
+  // 线上缺陷回归：dock 原先挂在 `conversation.composer.dock`，宿主只在
+  // `variant === 'composer'` 时渲染该槽（InputBar.tsx:596-599），而「新建会话」
+  // 落到的空白会话是 hero 态（ConversationMainPanel.tsx:32-35），整行控件因此
+  // 不出现，发出首条消息后才出现。`conversation.input.dock` 只要 session 与
+  // inputState 就绪就渲染（ConversationContent.tsx:86-87、:169）。本用例把
+  // 「落在哪个槽」钉死在测试里，防止再迁回 composer.dock。
+  const previousWindow = globalThis.window
+  let captured
+  try {
+    globalThis.window = { __ModuleLoader__: { load(registration) { captured = registration } } }
+    new Function(readFileSync(new URL('./client.js', import.meta.url), 'utf8'))()
+    const exports = captured.factory((id) => {
+      if (id === 'react') return { createElement: () => null }
+      throw new Error(`client.js required an unexpected module: ${id}`)
+    })
+
+    const injected = []
+    const registered = []
+    const ctx = {
+      slots: {
+        inject(name, callback) {
+          injected.push(name)
+          callback()
+          return () => {}
+        },
+        register(definition, component) {
+          registered.push({ definition, component })
+          return () => {}
+        },
+      },
+      locale: { register() { return () => {} } },
+      remote: { workspaceFiles: { read() {} }, commands: { execute() {} } },
+      effect(fn) { fn(); return () => {} },
+      on() { return () => {} },
+    }
+    exports.apply(ctx)
+
+    // 落点只能是 input.dock：一旦回到 composer.dock，「新建的空白会话」就又整行
+    // 不渲染（hero 态不满足 composer 的 variant 条件）。deepEqual 顺带断言没有
+    // 多注册第二个槽。
+    assert.deepEqual(injected, ['conversation.input.dock'],
+      'the dock injects exactly one slot: conversation.input.dock (never composer.dock)')
+
+    assert.equal(registered.length, 1, 'the dock registers exactly one component')
+    const { definition, component } = registered[0]
+    // 注册定义三件套：名字、稳定 id（宿主靠它去重与卸载）、order 10（宿主 Todo
+    // 是 0、队列是 20，本控件夹在两者中间）。
+    assert.equal(definition.name, 'conversation.input.dock')
+    assert.equal(definition.id, 'dispatch-protocol.dock')
+    assert.equal(definition.order, 10)
+    // locale 必须是本 bundle 的字典命名空间，否则 dock 文案回落成键名。
+    assert.equal(definition.locale, exports.NS)
+    assert.equal(definition.locale, 'dispatchProtocol')
+
+    // session 作用域的 `inject` 由宿主以 SessionId 调用，返回值即组件 props；
+    // 这条保证 props 里的 sessionId 与宿主 session 作用域同一条来路（读/写/刷新
+    // 都拿它当键），不是靠 owner props 另取一份。
+    assert.equal(typeof definition.inject, 'function', 'the slot definition exposes an inject callback')
+    const props = definition.inject('sess-1')
+    assert.equal(props.sessionId, 'sess-1')
+    assert.equal(typeof props.readMode, 'function', 'readMode is passed to the component')
+    assert.equal(typeof props.switchMode, 'function', 'switchMode is passed to the component')
+    assert.equal(typeof props.subscribe, 'function', 'subscribe is passed to the component')
+    assert.equal(typeof component, 'function', 'the registered component is the dock')
+  } finally {
+    // 桩只活在这个用例里：其它用例依赖真实的宿主环境。
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  }
+})
+
 // ---------------------------------------------------------------------------
 // 0.15.0 项目策略文件：`readProjectPolicy`（spec `2026-11-17-project-policy-
 // design.md` §2.1/§2.2）+ `business` 规则预设（§2.4）。用例全部只碰临时目录。

@@ -216,9 +216,9 @@
 
 ## 会话区控件与 /dispatch
 
-0.14.0 起有两个新入口，读写的是同一个标记文件 `dispatch/protocol.json`：宿主命令 `/dispatch`（无参=查询，`/dispatch off|shadow|full`=切换，`/dispatch init`=按项目检测生成策略文件）和输入框下方的常驻控件。**文件仍是唯一真相**：在默认 `projectSwitch.path` 下，控件、命令、手改文件三者等价，无标记文件时一律按 `full`；自定义 `path` 时见下方读口径与「已知坑」。
+0.14.0 起有两个新入口，读写的是同一个标记文件 `dispatch/protocol.json`：宿主命令 `/dispatch`（无参=查询，`/dispatch off|shadow|full`=切换，`/dispatch init`=按项目检测生成策略文件）和输入框上方的常驻控件。**文件仍是唯一真相**：在默认 `projectSwitch.path` 下，控件、命令、手改文件三者等价，无标记文件时一律按 `full`；自定义 `path` 时见下方读口径与「已知坑」。
 
-控件落点是 `conversation.composer.dock`——输入框卡片正下方那一行（与队列、Todo 停靠同一片区域）。它显示 `派发纪律` 和当前档位，右侧三个窄按钮 `off` / `shadow` / `full`；窄屏（宽度不超过 640px）只留当前档位那一个按钮，点它之前先看档位、点其它档位需横向空间。会话 id 由 slot 的 session 作用域注入传进来，控件不依赖 owner props（`client.js#apply`、`dsh-client-ui-conversation` 的 `src/client/contract/slots.ts:317`）。
+控件落点是 `conversation.input.dock`——输入框卡片正上方那一行（与 Todo、队列停靠同一片区域，本控件 `order: 10`）。它显示 `派发纪律` 和当前档位，右侧三个窄按钮 `off` / `shadow` / `full`；窄屏（宽度不超过 640px）只留当前档位那一个按钮，点它之前先看档位、点其它档位需横向空间。会话 id 由 slot 的 session 作用域注入传进来，控件不依赖 owner props（`client.js#apply`、`dsh-client-ui-conversation` 的 `src/client/contract/slots.ts:301-305`）。0.14.x 的 `conversation.composer.dock` 不行：宿主只在 `variant === 'composer'` 时渲染它（`dsh-client-ui-conversation` 的 `src/client/skeleton/InputBar.tsx:596-599`），而新建的空白会话是 hero 态（同包 `src/client/skeleton/ConversationMainPanel.tsx:32-35`），整行控件因此不出现；`input.dock` 只要求会话与输入态就绪（同包 `src/client/skeleton/ConversationContent.tsx:86-87`、`:169`）。
 
 读口径（`client.js#readModeOf`）：
 
@@ -296,7 +296,7 @@
 
 | 命令 | 期望 |
 |---|---|
-| `node plugins/dispatch-protocol/test.mjs` | 183 pass（`ℹ pass 183` / `ℹ fail 0`），exit 0 |
+| `node plugins/dispatch-protocol/test.mjs` | 184 pass（`ℹ pass 184` / `ℹ fail 0`），exit 0 |
 | `node plugins/dispatch-protocol/scripts/docs-check.mjs` | 无参扫仓库根，`docs-check: files=28 fail=0`，exit 0 |
 | `node plugins/dispatch-protocol/scripts/check-anchors.mjs` | 无参扫仓库根 `README.md` 与 `plugins/*/README.md`，`anchors-check: files=4 fail=0`，exit 0 |
 | `node plugins/dispatch-protocol/scripts/docs-check.mjs --self-test` | `self-test: pass=21 fail=0`，exit 0 |
@@ -328,6 +328,7 @@
 | `0.14.2` | `package.json` 的 `files` 白名单补回 `test.mjs`——0.14.0 引入 `files` 时漏了它，导致 `scripts/verify-install.mjs` 的 `files` 项在每次发布后永久报「installed 缺失」（该脚本按仓库插件目录全部文件与 installed 逐项比对）。 |
 | `0.14.3` | dock 选中态改用「标签主色 + 透明度」着色（`color-mix` 叠在 `--dsw-alias-label-primary` 上，14% / hover 20% + 1px `inset` 描边），原先用 `--dsw-alias-brand-primary`，该别名在浅/深主题下解析成白色底色、配 `--dsw-alias-label-inverse` 回落 `#fff` → 白底白字；不支持 `color-mix` 的浏览器回退到 `--dsw-alias-bg-layer-3`（缺失则 `--dsw-alias-interactive-bg-hover`）+ `--dsw-alias-label-primary`。 |
 | `0.15.0` | 项目策略文件 + `business` 预设 + `/dispatch init`：`dispatch/protocol.json` 从 mode 扩成项目策略（`rules` / `allowlist` / `controlPlanePatterns` / `verify.commands` / `contract.patterns` / `docs.patterns`，字段级 fail-open——坏字段只丢自己；切换 mode 只替换 `mode`、保留其它字段）；`rules:"business"` 用 900 + 217 字的精简预设（默认正文 3.8K，约 3/10）；`/dispatch init` 按锁文件 / scripts / `docs/` / 契约面 / `dsh.bundle|client` 检测生成示例 JSON，已存在不覆盖；`/dispatch` 的 `input.hint` 与用法串加 `init`。无策略文件时行为与 0.14.3 一致；测试 183 条（相对 0.14.3 的 168 条新增 15 条：策略读取 / 回落 / business / init / 切档保留 / 命令形状）。 |
+| `0.15.1` | dock 落点从 `conversation.composer.dock` 迁到 `conversation.input.dock`（`order: 10`）——原落点只在 composer 形态渲染，新建的空白会话是 hero 态，整行控件不显示；位置同时纠正为用户最初要的「输入框上方」；测试 184 条（新增 1 条落点回归）。 |
 
 0.10.0–0.11.0 为未发布的中间提交，内容并入 0.12.0。
 
@@ -349,4 +350,5 @@
 - **观测计数与守卫是两套口径**：观测行按去重路径计、失败写入不计；检查点的只读判定按调用名、尝试即算（失败或被拒也算执行类）；守卫只看参数路径，不解析 `pwsh`。
 - **HandoffGate 是 best-effort**：空回合依赖宿主触发 `agent/turn-stopping`，空流/中断回合可能不触发，提醒不到时按「交接」模板手工落盘。
 - **控件只读默认标记路径**（0.14.0 已知限制）：浏览器控件拿不到 profile 的配置，读路径硬编码为 `dispatch/protocol.json`（`client.js#MARKER_PATH`），丢弃 `projectSwitch.path`。自定义了 `projectSwitch.path` 的项目**以 `/dispatch` 为准**——命令与写入守卫走同一份配置，仍是唯一真相；控件的显示可能停在 `full`（它读的默认文件不存在，`workspace-file/not-found` 按 `full` 显示）。
+- **无会话 / 会话未就绪时不显示控件**（0.15.1 的 `input.dock` 也如此）：该槽要求会话已打开且输入态就绪（`zone` 需 `session` 与 `inputState`）——还没选/建会话（`sessionId === undefined`）、会话打开中、打开失败时整行不渲染，属预期；会话打开且输入态就绪后显示（**空白新会话也算**），`/dispatch` 在这些状态下始终可用。
 - **profile 插件不支持热加载**：装完必须重启 DSH；`dsh plugin update` 失败可能留下半残目录（被打开的子目录进入 delete-pending），只能重启 Windows 清——先完全退出 DSH 再 update。

@@ -1,4 +1,4 @@
-// dispatch-protocol — browser half (0.14.0): the session-zone mode control.
+// dispatch-protocol — browser half (0.15.1): the session-zone mode control.
 //
 // Hand-written lazy-CJS registration script: the Host serves this file as-is
 // (no build, no transpile), so it must stay plain JS with `createElement` only.
@@ -8,12 +8,21 @@
 // Spec: docs/superpowers/specs/2026-11-17-dispatch-ui-design.md §3.2.
 //
 // Signal surfaces consumed (verified against the shipped desktop build):
-//   - Slot `conversation.composer.dock`: a `list` slot of `scope: 'session'`
-//     rendered below the composer card
-//     (dsh-client-ui-conversation/src/client/contract/slots.ts:317). A
-//     session-scope entry's `inject` is called with the SessionId, so the
-//     component takes the current Session from props and never reads owner
-//     props (dsh-client-ui-renderer/src/client/scoped-slots.tsx:175-190).
+//   - Slot `conversation.input.dock`: a `list` slot of `scope: 'session'`,
+//     "Full-width entries above the composer card"
+//     (dsh-client-ui-conversation/src/client/contract/slots.ts:301-305). The
+//     Host renders it as soon as `session` and `inputState` are ready — with no
+//     hero/composer condition — so a freshly created blank Session shows it too
+//     (same package, src/client/skeleton/ConversationContent.tsx:86-87, :169).
+//     0.14.x used `conversation.composer.dock`, which the Host renders only for
+//     `variant === 'composer'`
+//     (dsh-client-ui-conversation/src/client/skeleton/InputBar.tsx:596-599);
+//     new Sessions land in the hero state
+//     (same package, src/client/skeleton/ConversationMainPanel.tsx:32-35), so
+//     that whole row vanished — the defect 0.15.1 fixes. A session-scope
+//     entry's `inject` is called with the SessionId, so the component takes the
+//     current Session from props and never reads owner props
+//     (dsh-client-ui-renderer/src/client/scoped-slots.tsx:175-190).
 //   - Read: `remote.workspaceFiles.read(sessionId, path, range, signal)`
 //     resolves a workspace-root-relative path and answers `RemoteResult`
 //     (dsh-api-workspace-files/src/client/index.ts:19,
@@ -81,7 +90,8 @@ window.__ModuleLoader__.load({
 
     // Injected exactly like the official css modules: one style tag per bundle,
     // themed through the --dsw-alias-* custom properties. The dock is an
-    // ambient row under the composer card, so it stays a single line of chips.
+    // ambient row above the composer card (0.15.1 `input.dock`), so it stays a
+    // single line of chips.
     const CSS = [
       '.ddp-dock{display:flex;align-items:center;flex-wrap:wrap;gap:6px;padding:2px 4px;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}',
       '.ddp-label{color:var(--dsw-alias-label-secondary);font-weight:600}',
@@ -366,9 +376,10 @@ window.__ModuleLoader__.load({
       ctx.effect(() => ctx.on('command/executed', () => notify()), 'dispatch-protocol: command/executed')
       ctx.effect(() => ctx.on('connection/reset', () => notify()), 'dispatch-protocol: connection generation')
 
-      ctx.effect(() => ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
-        name: 'conversation.composer.dock',
+      ctx.effect(() => ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
+        name: 'conversation.input.dock',
         id: 'dispatch-protocol.dock',
+        order: 10,
         locale: NS,
         inject: (sessionId) => ({
           sessionId,
@@ -376,7 +387,7 @@ window.__ModuleLoader__.load({
           switchMode: api.switchMode,
           subscribe: api.subscribe,
         }),
-      }, DispatchDock)), 'dispatch-protocol: composer dock')
+      }, DispatchDock)), 'dispatch-protocol: input dock')
     }
 
     exports.NS = NS

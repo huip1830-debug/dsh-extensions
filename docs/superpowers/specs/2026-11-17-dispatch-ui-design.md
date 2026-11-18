@@ -39,7 +39,7 @@
 
 ### 3.2 客户端控件（批 B）
 
-- 落点：`conversation.composer.dock`；组件**不依赖 owner props**（未证实），会话 id 自取（`ctx.uiSession` / `ctx.uiWorkspace.selection` / `ctx.sessions.list` 中现取当前会话，具体取法以实现时实测到的可用面为准）。
+- 落点：`conversation.input.dock`（0.15.1 修订，见 §7；原定 `conversation.composer.dock` 在空白新会话里整行不渲染）；组件**不依赖 owner props**（未证实），会话 id 自取（`ctx.uiSession` / `ctx.uiWorkspace.selection` / `ctx.sessions.list` 中现取当前会话，具体取法以实现时实测到的可用面为准）。
 - 显示：`派发纪律` + 当前档位（off/shadow/full/未知）+ 三个窄按钮；窄屏只显示当前档位按钮。
 - 读：`remote.workspaceFiles.read(sessionId, 'dispatch/protocol.json')`（默认路径；见下方已知限制）；`not-found` → `full`；其它错误 → `未知` + title 提示。
   - **已知限制（2026-11-17 复审追加）**：客户端拿不到 profile 的插件配置，因此控件固定读默认路径 `dispatch/protocol.json`；把 `projectSwitch.path` 配成别的文件名时，`/dispatch` 照常写自定义文件，但控件显示会停在 `full`。该限制必须写进 README「已知坑」，自定义 path 用户以 `/dispatch` 为准。
@@ -69,7 +69,7 @@
 
 - 批 A：`node plugins/dispatch-protocol/test.mjs` 新增断言——`writeProjectMode` 创建父目录/原子覆盖/坏路径返回失败；命令 handler 三档写入、无参查询、非法参数、cwd 缺失、`commands` 服务缺失不抛；既有 153 条不改。
 - 批 B：同一命令 + `node plugins/dispatch-protocol/scripts/docs-check.mjs`（fail=0）；UI 人工清单：
-  1. 刷新页面后 dock 显示当前档位（无文件 = `full`）；
+  1. 刷新页面后 dock 显示当前档位（无文件 = `full`）；**新建会话（空白、无消息）里同样显示**（0.15.1 修订项）；
   2. 点 `off` → 文件变 `{"mode":"off"}`、dock 更新、下一轮请求无「派发纪律」节；
   3. 点 `full` → 恢复；坏 JSON → 显示未知/回落 full 且不崩；
   4. 切换会话 → 档位随项目变化。
@@ -78,3 +78,24 @@
 ## 6. 发布
 
 提交推送 → 完全退出 DSH → `dsh plugin --profile desktop update dispatch-protocol` → 重启 → `verify-install.mjs` 四项 PASS → **刷新页面**（客户端产物无热更）→ 新会话验收。
+
+## 7. 0.15.1 修订：dock 落点从 `composer.dock` 迁到 `input.dock`
+
+- 触发：用户报告「新开的会话窗口不显示」（2026-11-18）。
+- 缺陷（已证实，出处见 `dispatch/state/dock-blank-session.md`）：`conversation.composer.dock` 只在
+  `variant === 'composer'` 时渲染（`InputBar.tsx:596-599`），而「新建会话」落到的空白会话是 hero 态
+  （`ConversationMainPanel.tsx:32-35`、`navigation.ts:208-247`），于是整行控件消失；发首条消息后才出现。
+  这不是注入/加载缺陷：注入缺失会让控件在**所有**会话都不出现。
+- 契约：落点改为 `conversation.input.dock`（`slots.ts:301-305`）。该槽只要 `session` 与 `inputState`
+  就绪就渲染（`ConversationContent.tsx:86-87`、`:169`），与 hero/composer 无关；宿主 Todo（`order: 0`）
+  与队列（`order: 20`）已挂此槽，本控件 `order: 10`。session 作用域 props 自带 `sessionId`，读/写/刷新
+  三面与 0.14 完全一致。
+- 位置语义修正：该槽在**输入框卡片上方**，与用户最初「输入框上方 dock」的选择一致。0.14 的
+  `composer.dock` 实际落在卡片下方，README 当时如实写了「正下方」；§1/§3.2 却按用户要求写「输入框
+  上方」，两者直到本版才对齐。
+- 边界（写入 README「已知坑」）：该槽要求**会话已打开且输入态就绪**——`zone` 需 `session` 与
+  `inputState`（`ConversationContent.tsx:86-87`）。所以无会话的冷启动首页（`sessionId` 为 `undefined`）、
+  会话打开中（settling）、打开失败（`cold`/`error` 且列表未证明空白）都不渲染；**空白新会话**
+  （已打开、输入态就绪）会渲染。
+- 版本：`0.15.0` → **`0.15.1`**；接口/配置/文件格式零变化，host 侧零改动。
+
