@@ -4230,6 +4230,12 @@ test('0.16.0: a project with no marker defaults to auto and does not enforce', (
       'the auto prompt is the frozen escalation hint')
     assert.match(AUTO_TEXT, /dispatch_upgrade_full/, 'the hint names the upgrade tool')
     assert.match(AUTO_TEXT, /每需求最多问一次/, 'the hint bounds the asking')
+    assert.match(AUTO_TEXT, /四件事上真正改变结果/, 'the hint explains what full actually buys')
+    assert.match(AUTO_TEXT, /执行面一律派发/, 'the hint discloses the control/execution split')
+    assert.match(AUTO_TEXT, /会不会从上面四件事中的至少一件显著受益/,
+      'the model judges by benefit, not by a file-count checklist')
+    assert.doesNotMatch(AUTO_TEXT, /≥2 个文件|≥3 个文件/,
+      'no hard file-count trigger: a two-file small change must not ask')
 
     assert.equal(h.registered.length, 1, 'the upgrade tool is registered')
     const { definition, options } = h.registered[0]

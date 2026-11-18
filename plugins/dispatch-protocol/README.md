@@ -20,7 +20,7 @@
 
 **成本**：默认 `auto` 的提示段每请求约 0.5K token（估算；可随 KV 缓存复用）；`full` 正文约 3K token，真正的成本大头是 `full` 引起的派发 / 评审 / 提醒轮次（经验值 3–10 倍），小改动尤其明显；大任务 `full` 可能反而省（少返工）。
 
-**四档一句话**：`off` 全静默（不注入、不拦、不提醒）；`auto`（默认）只注入一段提级提示，模型判断需求命中多文件/契约面/并行写等条件时请示用户，确认后用 `dispatch_upgrade_full` 升到 `full`；`shadow` 规则与提醒都在、写入只记不拦；`full` 完整纪律。**不要**给所有项目都写 `full`（见「常见误用」）。
+**四档一句话**：`off` 全静默（不注入、不拦、不提醒）；`auto`（默认）只注入一段提级提示，模型判断需求会不会从 `full` 的四个机制显著受益，会则请示用户，确认后用 `dispatch_upgrade_full` 升到 `full`；`shadow` 规则与提醒都在、写入只记不拦；`full` 完整纪律。**不要**给所有项目都写 `full`（见「常见误用」）。
 
 **按项目适配**：项目根 `dispatch/protocol.json` 可写 `mode` / `rules` / `allowlist` / `controlPlanePatterns` / `verify.commands` / `contract.patterns` / `docs.patterns`，缺省字段回落 profile；`rules: "business"` 换成精简预设；`/dispatch init` 扫项目生成初始策略。字段与生成规则见 [项目策略文件与 business 预设](#项目策略文件与-business-预设)。
 
@@ -31,7 +31,7 @@
 1. **给所有项目都写 `full`**：小改动也要走派发 / 评审 / 提醒，经验值 3–10 倍轮次成本；默认 `auto` 就是为了不付这笔钱，按项目或按任务升档。
 2. **把本仓库的白名单 / 闸门默认值当通用值**：`dispatch/`、`docs/superpowers/specs/`、`tsc` / `test.mjs` 都是本仓库口径，业务项目要用 `/dispatch init` 或手写策略，否则误拦误报。
 3. **以为评审能替代测试**：评审只看 diff 的语义，运行时装配和视觉问题不在它的判定面；没有 E2E / 真机验收，纪律全绿也可能不能用。
-4. **把大改动留在 `auto`**：`auto` 没有守卫兜底，模型漏问就等同无纪律；跨文件或契约面改动确认后应升 `full`，不要一路「先按 auto 做」。
+4. **把会受益的改动留在 `auto`**：`auto` 没有守卫兜底，模型漏问就等同无纪律；契约面、并行写、独立验收或失败归因会改变结果的改动，确认后应升 `full`，不要一路「先按 auto 做」。
 
 ## 它是什么
 
@@ -51,7 +51,7 @@
 
 ## 注入内容
 
-默认档是 `auto`：只注入 `AUTO_TEXT`（约 470 字）——五条客观触发条件 +「命中才请示、每需求最多问一次」+ 确认后调用 `dispatch_upgrade_full`。**下面六条规则只在 `full` / `shadow` 注入**，渲染进 `## 派发纪律（DSH）` 小节：`order: 500`、`interpolate: false`（`{{…}}` 原样保留）。六条各一句主旨，细则以 `lib/config.mjs` 为准：
+默认档是 `auto`：只注入 `AUTO_TEXT`（约 380 字）——说明 `full` 的四件事（契约冻结 / 执行面派发 / 独立评审 / 一次性集成）与代价，让模型判断「这个需求会不会显著受益」，会则请示、每需求最多问一次、确认后调用 `dispatch_upgrade_full`。**下面六条规则只在 `full` / `shadow` 注入**，渲染进 `## 派发纪律（DSH）` 小节：`order: 500`、`interpolate: false`（`{{…}}` 原样保留）。六条各一句主旨，细则以 `lib/config.mjs` 为准：
 
 1. **主控只做控制面，不做执行面**——七类动作之外一律派发；用户显式要求主控亲做时，先写 `dispatch/override.json` 再动手。
 2. **执行类派发必须自包含**——现状、白名单、唯一一条窄验证、预算、输出格式缺一不可，派发即冻结。
@@ -66,7 +66,7 @@
 
 ### auto 档与升级工具
 
-`auto` 是默认档：只给根代理注入 `AUTO_TEXT`，不注册守卫拦截、不投递检查点/闸门、不写观测行。模型命中提示里的五条条件时请示用户；用户确认后调用 `dispatch_upgrade_full`（`confirmed: true`），工具用 0.15 的原子合并写把 `mode` 改成 `full`，保留 `rules` / `allowlist` / `verify` 等字段；成功后下一步按 full 执行。
+`auto` 是默认档：只给根代理注入 `AUTO_TEXT`，不注册守卫拦截、不投递检查点/闸门、不写观测行。模型判断需求会不会从 `full` 的四个机制显著受益，会则请示用户；用户确认后调用 `dispatch_upgrade_full`（`confirmed: true`），工具用 0.15 的原子合并写把 `mode` 改成 `full`，保留 `rules` / `allowlist` / `verify` 等字段；成功后下一步按 full 执行。
 
 - **可见性**：`ctx.tools.register(definition, { when })` 的 `when` 只在「根代理 + 当前 auto」为真；`off` / `shadow` / `full` 与子代理都看不到这个工具（`plugin.mjs#registerUpgradeTool`）。
 - **确认门**：`confirmed: false` 直接抛错；`confirmed` 是模型自证，不是安全边界——真正的门是请示文本与用户回复。
@@ -343,7 +343,7 @@
 | `0.14.3` | dock 选中态改用「标签主色 + 透明度」着色（`color-mix` 叠在 `--dsw-alias-label-primary` 上，14% / hover 20% + 1px `inset` 描边），原先用 `--dsw-alias-brand-primary`，该别名在浅/深主题下解析成白色底色、配 `--dsw-alias-label-inverse` 回落 `#fff` → 白底白字；不支持 `color-mix` 的浏览器回退到 `--dsw-alias-bg-layer-3`（缺失则 `--dsw-alias-interactive-bg-hover`）+ `--dsw-alias-label-primary`。 |
 | `0.15.0` | 项目策略文件 + `business` 预设 + `/dispatch init`：`dispatch/protocol.json` 从 mode 扩成项目策略（`rules` / `allowlist` / `controlPlanePatterns` / `verify.commands` / `contract.patterns` / `docs.patterns`，字段级 fail-open——坏字段只丢自己；切换 mode 只替换 `mode`、保留其它字段）；`rules:"business"` 用 900 + 217 字的精简预设（默认正文 3.8K，约 3/10）；`/dispatch init` 按锁文件 / scripts / `docs/` / 契约面 / `dsh.bundle|client` 检测生成示例 JSON，已存在不覆盖；`/dispatch` 的 `input.hint` 与用法串加 `init`。无策略文件时行为与 0.14.3 一致；测试 183 条（相对 0.14.3 的 168 条新增 15 条：策略读取 / 回落 / business / init / 切档保留 / 命令形状）。 |
 | `0.15.1` | dock 落点从 `conversation.composer.dock` 迁到 `conversation.input.dock`（`order: 10`）——原落点只在 composer 形态渲染，新建的空白会话是 hero 态，整行控件不显示；位置同时纠正为用户最初要的「输入框上方」；测试 184 条（新增 1 条落点回归）。 |
-| `0.16.0` | `auto` 默认档 + 模型请示 + 单向升级工具：默认从 `full` 改为 `auto`（无标记 / 坏文件 / 无 `mode` 的策略文件都回落 `auto`；`{"enabled":true}` 仍是 `full`），`auto` 只给根代理注入 470 字的提级提示，不拦写入、不投递检查点/闸门、不写观测行；新增 `dispatch_upgrade_full` 工具，仅在「根代理 + 当前 auto」可见，用户确认后原子写回 `mode:"full"` 并保留其它策略字段；`/dispatch`、dock 与客户端读取器增加 `auto`。行为变化只有一条：没有标记的项目从 `full` 降到 `auto`；测试 188 条（新增 4 条：默认/静默/工具/客户端）。 |
+| `0.16.0` | `auto` 默认档 + 模型请示 + 单向升级工具：默认从 `full` 改为 `auto`（无标记 / 坏文件 / 无 `mode` 的策略文件都回落 `auto`；`{"enabled":true}` 仍是 `full`），`auto` 只给根代理注入 370 余字的提级提示（判断式：`full` 的四件事是否会显著受益，不列文件数门槛），不拦写入、不投递检查点/闸门、不写观测行；新增 `dispatch_upgrade_full` 工具，仅在「根代理 + 当前 auto」可见，用户确认后原子写回 `mode:"full"` 并保留其它策略字段；`/dispatch`、dock 与客户端读取器增加 `auto`。行为变化只有一条：没有标记的项目从 `full` 降到 `auto`；测试 188 条（新增 4 条：默认/静默/工具/客户端）。 |
 
 0.10.0–0.11.0 为未发布的中间提交，内容并入 0.12.0。
 
