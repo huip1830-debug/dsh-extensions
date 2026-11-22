@@ -3083,6 +3083,44 @@ test('0.16.0: client.js exposes auto and mirrors the locale key', () => {
 })
 
 // ---------------------------------------------------------------------------
+// 0.19.0 — AUTO_TEXT 重框架（spec `2026-11-22-dispatch-auto-text-reframe.md`）
+
+test('0.19.0: AUTO_TEXT uses a neutral frame and names positive escalation examples', () => {
+  assert.doesNotMatch(AUTO_TEXT, /默认不启用派发纪律/,
+    'the opening no longer frames the default as "discipline off"')
+  assert.match(AUTO_TEXT, /当前项目处于自动档/,
+    'the opening states the current mode neutrally')
+  assert.match(AUTO_TEXT, /典型受益的情形/,
+    'the hint carries a positive-example list, not only negative guidance')
+  assert.match(AUTO_TEXT, /契约面（schema\/类型\/接口\/路由\/权限\/迁移）/,
+    'example one: contract-surface changes with multiple callers')
+  assert.match(AUTO_TEXT, /多个并行或先后批次/,
+    'example two: multi-batch work needing independent review')
+  assert.doesNotMatch(AUTO_TEXT, /哪怕文件不少/,
+    'the strongest negative sentence of 0.16.0 is gone')
+  assert.match(AUTO_TEXT, /dispatch_upgrade_full/, 'the hint still names the upgrade tool')
+  assert.match(AUTO_TEXT, /每需求最多问一次/, 'the hint still bounds the asking')
+})
+
+// ---------------------------------------------------------------------------
+// 0.20.0 — 请示的证据门槛（spec `2026-11-22-dispatch-auto-evidence-gate.md`）
+
+test('0.20.0: AUTO_TEXT gates asking on evidence instead of mandating a survey flow', () => {
+  assert.match(AUTO_TEXT, /请示只在你能说出具体受益点（哪个契约面、哪些调用方、几个批次）时提出/,
+    'asking is legitimate only with a concrete benefit point')
+  assert.match(AUTO_TEXT, /说不出就不要问，直接做/,
+    'no evidence means do it directly')
+  assert.doesNotMatch(AUTO_TEXT, /摸清波及面|先勘察|先.*读相关代码/,
+    'no survey-flow wording: the prompt must not mandate a pipeline step')
+  assert.doesNotMatch(AUTO_TEXT, /在收到需求时判断/,
+    'the entry-timing phrase is gone; judgment is not pinned to intake')
+  assert.match(AUTO_TEXT, /被拒后除非范围实质扩大，不再问/,
+    'the permissive mid-task re-ask clause is retained verbatim')
+  assert.match(AUTO_TEXT, /会不会从上面四件事中的至少一件显著受益/,
+    'the benefit question survives the rewrite')
+})
+
+// ---------------------------------------------------------------------------
 function call(turn, name, args, id) {
   return { type: 'tool/call', data: { turn, step: 1, callId: id ?? `call-${turn}-${name}`, name, arguments: JSON.stringify(args ?? {}) } }
 }
