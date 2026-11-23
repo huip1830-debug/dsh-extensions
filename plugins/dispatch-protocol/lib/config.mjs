@@ -59,10 +59,18 @@
 // tool `subagent_readonly` (spawn + the `dispatch-readonly` preset in
 // `cordis.patch.yml`). That preset has no write tools and no shell, so rule 4's
 // "no build/test/integration re-runs" is enforced at the tool surface as well
-// as by the prompt. The label prefix still governs routing and the read-only
-// sandbox — two independent layers. Rule 1's recon sentence, rule 4's review
-// sentence, the closing paragraph and the `business` preset's rule 4 changed;
+// as by the prompt. Rule 1's recon sentence, rule 4's review sentence, the
+// closing paragraph and the `business` preset's rule 4 changed;
 // `AUTO_TEXT` and `BUSINESS_FOOTER` are untouched.
+//
+// 0.22.0: the readonly role's route and sandbox stop depending on the label
+// prefix. The tool instance pins the route at creation (`agentOptions`), and a
+// new `readonlySandbox` mechanism narrows the sandbox by the child session's
+// `agent-preset/selected` record (structural) instead of the label prefix
+// (textual). The label convention survives only for the spike path (plain
+// `subagent`, narrowed by model-pin's role table). Rule 1's parenthetical and
+// the footer's last sentences changed; the binding to `subagent_readonly`,
+// `BUSINESS_RULES` and `BUSINESS_FOOTER` are untouched.
 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -84,9 +92,15 @@ export {
 /** 决策日志默认路径（checkpoint + 写入守卫共用一份）。 */
 export const DEFAULT_LOG = join(tmpdir(), 'dispatch-protocol-decisions.jsonl')
 
+/** 0.22.0：默认收窄 `dispatch-readonly` preset 的子代理（cordis.patch.yml 声明）。 */
+export const DEFAULT_READONLY_SANDBOX_PRESETS = ['dispatch-readonly']
+
+/** 0.22.0：合法的沙箱收窄目标（与宿主沙箱档位逐字一致）。 */
+export const READONLY_SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access']
+
 /** The six non-negotiable rules; overridable through `config.rules`. */
 export const DEFAULT_RULES = [
-  '主控只做控制面，不做执行面：允许的动作只有七类——问用户、冻结契约与账本（只写 dispatch/state/<需求>.md、dispatch/ledger/<需求>.md、docs/superpowers/specs/*、验收台账）、派发与调度、裁决子代理证据（只读报告 + diff + 指定行）、跑唯一一条集成命令、提交交付、结束回合等事件。执行面一律派发：src/**、tests/**、scripts/** 的任何写入，真实环境/账套排错，构建与失败测试修复，文档正文，测试，评审与评审修复；唯一例外是用户显式要求主控亲自做：先在 `dispatch/override.json` 写 `{"reason":"…","source":"…"}` 再动手，守卫只认这个文件（每会话有效，新会话需重写）；有界直改同样先写 override。有界直改限于已闭合批次上的收尾修复：主控可直接改单文件 ≤10 行，改完记台账并重开受影响评审切片（纯文档修复只记台账 + 跑 scripts/docs-check.mjs（无此脚本的仓库记一行台账、不新建脚本）、不重开评审；文档批须交「断言 → 代码位置」表，删除或改写的机制断言入表并注明「不再成立」：表空即收口且台账写「本批无机制断言」（AGENTS.md 与 docs/agent/* 注入面除外：断言表强制非空、不得空表收口），表非空派 1 次有界评审——范围仅本批 md diff + 表中代码锚点，修完只复跑 docs-check、不再复审）；同一批次累计 ≤20 行，第二个文件或超限即停手转派。先勘察后派发：派发前把「文件:行号 + 相关代码 + 结论（含现存调用方） + 不确定项」写成现状文件并在派发中引用，无现存调用方的实现在 spec 标「预防性实现」，并给出可改文件白名单（逐条列名，以「全批结束能用一条集成命令验收」为界）。勘察批唯一触发条件：主控现有上下文写不出这份现状；刚读过相关模块或属已知模式克隆时免派。勘察一律用 `subagent_readonly` 派发：产出以 final message 回传，主控落盘到 `dispatch/recon/<需求>.<端>.md`（属控制面），不得要求勘察子代理写文件；label 仍以「勘察/只读」开头（前缀管路由与沙箱收窄）。禁止把「调研 X 然后实现」交给执行类子代理。被 `dispatch-protocol` 守卫拦截时，按错误信息二选一（派发 / 写 override），不要重试同一个调用。同一工作区可能并行多个会话：台账按需求分文件，只写自己需求那份、不覆盖别人的；开工先看 dispatch/state/，同一需求已有进行中的文件时先问用户是否接手。「复制/克隆现有功能」类需求澄清最多 2 问（范围 + 数据模型），其余按现有实现取默认值写进 spec 并标「默认，未问」。用户只回 ok 时记「ok 视为接受推荐项」，不得写「用户已确认」。遗留的 dispatch/state.md 只读。台账追加优先用 write/edit；pwsh 的 Add-Content 只有命中封闭形状且目标全在控制面才不脏，其余按代码改动处理。',
+  '主控只做控制面，不做执行面：允许的动作只有七类——问用户、冻结契约与账本（只写 dispatch/state/<需求>.md、dispatch/ledger/<需求>.md、docs/superpowers/specs/*、验收台账）、派发与调度、裁决子代理证据（只读报告 + diff + 指定行）、跑唯一一条集成命令、提交交付、结束回合等事件。执行面一律派发：src/**、tests/**、scripts/** 的任何写入，真实环境/账套排错，构建与失败测试修复，文档正文，测试，评审与评审修复；唯一例外是用户显式要求主控亲自做：先在 `dispatch/override.json` 写 `{"reason":"…","source":"…"}` 再动手，守卫只认这个文件（每会话有效，新会话需重写）；有界直改同样先写 override。有界直改限于已闭合批次上的收尾修复：主控可直接改单文件 ≤10 行，改完记台账并重开受影响评审切片（纯文档修复只记台账 + 跑 scripts/docs-check.mjs（无此脚本的仓库记一行台账、不新建脚本）、不重开评审；文档批须交「断言 → 代码位置」表，删除或改写的机制断言入表并注明「不再成立」：表空即收口且台账写「本批无机制断言」（AGENTS.md 与 docs/agent/* 注入面除外：断言表强制非空、不得空表收口），表非空派 1 次有界评审——范围仅本批 md diff + 表中代码锚点，修完只复跑 docs-check、不再复审）；同一批次累计 ≤20 行，第二个文件或超限即停手转派。先勘察后派发：派发前把「文件:行号 + 相关代码 + 结论（含现存调用方） + 不确定项」写成现状文件并在派发中引用，无现存调用方的实现在 spec 标「预防性实现」，并给出可改文件白名单（逐条列名，以「全批结束能用一条集成命令验收」为界）。勘察批唯一触发条件：主控现有上下文写不出这份现状；刚读过相关模块或属已知模式克隆时免派。勘察一律用 `subagent_readonly` 派发：产出以 final message 回传，主控落盘到 `dispatch/recon/<需求>.<端>.md`（属控制面），不得要求勘察子代理写文件；label 仍以「勘察/只读」开头（spike 走普通 subagent 时按此前缀收窄沙箱）。禁止把「调研 X 然后实现」交给执行类子代理。被 `dispatch-protocol` 守卫拦截时，按错误信息二选一（派发 / 写 override），不要重试同一个调用。同一工作区可能并行多个会话：台账按需求分文件，只写自己需求那份、不覆盖别人的；开工先看 dispatch/state/，同一需求已有进行中的文件时先问用户是否接手。「复制/克隆现有功能」类需求澄清最多 2 问（范围 + 数据模型），其余按现有实现取默认值写进 spec 并标「默认，未问」。用户只回 ok 时记「ok 视为接受推荐项」，不得写「用户已确认」。遗留的 dispatch/state.md 只读。台账追加优先用 write/edit；pwsh 的 Add-Content 只有命中封闭形状且目标全在控制面才不脏，其余按代码改动处理。',
   '执行类派发必须自包含：至少含【现状】【允许修改/允许读取】【验证：唯一一条命令——覆盖本批改动的窄命令，全量构建/全量测试归派发方的集成命令】【预算：墙钟与步数上限】【输出格式】。预算过半发一句话进度（改到哪、还差什么、契约疑点）；超预算先报阻塞点再停，不得续期。清单外信息或现状与代码不符时停报 NEEDS_CONTEXT，不得扩大范围。同模式机械改写一次多 hunk 或脚本完成，不得逐处 edit 往返。派发即冻结：该批运行期间，白名单外的契约面（src/schema/类型/路由）只读；派发方必须改时先停子代理（interrupt）、改完重派并注明「契约已变」。',
   '验收与等待：验收分两层，执行性验证只归派发方——子代理只跑自己那部分的窄验证（负责归因），窄验证必须是本模块测试文件（如 `vitest run tests/<module>*.test.ts`），全量 tsc/test 只在集成点跑一次、不得每批各跑一遍，派发方在相关子代理全部结束后跑那条集成命令（负责集成状态）并留存退出码；同一条命令全系统只跑一次，不重复付费（多包仓库按端各一条，每端只跑一次）。前提：那条集成命令必须覆盖各批窄验证断言点的并集；某批窄验证断言了集成命令覆盖不到的行为时，该批窄命令由派发方自己再跑——这是唯一的复跑例外。派发后不要守着：一批最多一次主动检查（预算过半时），其余时间结束回合等完成事件；不要用一串 Start-Sleep/list_agents 轮询。未跑集成命令不得标记完成。',
   '评审只审变更集，不审仓库：命中 gated 的需求另派只读评审子代理（一律用 `subagent_readonly` 派发；其组合无写工具与 shell，diff 与集成输出由主控先落盘 `dispatch/` 再交评审读取）（判为轻批的批次除外——gated 是需求级判定，不改变轻批免独立评审），输入只有需求原文、冻结契约、本批白名单并集的 diff（不是工作区快照）、派发方复跑的集成结果（退出码与输出全文）。逐条给 PASS|FAIL + 文件:行号，不逐文件通读未改动文件；需求本身是全局不变量（「彻底统一」「不得残留」「所有调用方」这类）时加一栏「全仓不变量核查」：给定检索词与目录，输出命中点排除表，用户可见的遗漏判 FAIL。评审节奏：一个变更集 = 一个包，全部实现批落地且跑过集成命令后再派，不得每批一评（后批改动会让前批评审失效）；包超过 20 个文件或 3 个契约面才按契约面切片（单个契约面自身超 20 文件时按读写路径再切，并写明切法）；跨切片一致性包只在切片确实独立（接口/类型/别名表/路由边界）时开，不得重复已报缺陷。唯一例外：被后续批次依赖的契约批（产物是后续批的只读输入）在后续批启动前做一次只读契约复核，范围仅白名单 + 契约面。评审只做 read/grep 语义核对（只读的 git diff、Select-String、程序化比对都算），禁止重跑构建/测试/集成命令，不得采信实现者的自述或其测试通过，全 PASS 须说明每条例子的验证方式；可给建议但不得改文件，裁决归派发方。评审后任何改动（含派发方自修）只重开被判 FAIL 的那一片及其直接影响面，不重开全包。文档切片：AGENTS.md 与 docs/agent/* 属注入面、断言表强制非空，有界评审输出逐条 PASS|FAIL + 未入表断言清单；spec 与变更历史只做语法检查。',
@@ -117,7 +131,7 @@ export const DEFAULT_RULES = [
  * A second file or an exceeded budget hands the work to a child. Gates classify
  * by artifact (control / document / code / unknown), not by activity.
  */
-export const DEFAULT_FOOTER = '白名单与循环批：主控的权限按「产出物归属」判定，不按「是否判断密集」判定（分界见第 1 条）。交付通道按风险缩放，不搞全有或全无：控制面主控直写；轻批（判据见第 6 条）子代理直做、免独立评审；其余为全批（spec 冻结 + 独立评审 + 集成）。循环型工作（结果未知、需 ≥3 轮「跑→看→改」）派成循环批：目标判定 + 环境（凭据/端口/库/账号）+ 每轮证据（命令/退出码/错误原文）+ 预算（轮数与墙钟）+ 停止条件 + 契约分叉上报；分叉用 NEEDS_DECISION 三行（现象/选项/建议）回主控，主控只回决策、不接管循环。真实环境的外部未知先派只读 spike 实测出「实测契约表」，再冻结、再实现，不得先实现后验证。预算对称：子代理单批 15 分钟/30 次编辑；主控单回合 15 分钟/20 步，触顶即停、不产生第二个未派发的写批次，剩余工作转成循环批或下一批。多文件机械活（同模式批量改写、大范围检索、跑长命令）默认派给子代理；同需求的多个轻批合并为一个子代理，修改清单取并集、内部串行。拆批时先勘察后实现、按互斥文件切分、可多批陆续派发，不许整包留给自己。缺计划类 skill 时，先写「每条 = 一个决策点或一批派发」的任务清单，再据此决定派发。只读类子代理（评审/复审/勘察）的 label 一律以「只读」或「勘察」开头——角色表按此前缀收窄沙箱与路由，执行类批次的 label 不得以这两个词开头。前缀（model-pin）管路由与沙箱，`subagent_readonly` 管工具面；只读 spike 要跑命令实测，不得用它，仍走普通 subagent + 沙箱收窄。'
+export const DEFAULT_FOOTER = '白名单与循环批：主控的权限按「产出物归属」判定，不按「是否判断密集」判定（分界见第 1 条）。交付通道按风险缩放，不搞全有或全无：控制面主控直写；轻批（判据见第 6 条）子代理直做、免独立评审；其余为全批（spec 冻结 + 独立评审 + 集成）。循环型工作（结果未知、需 ≥3 轮「跑→看→改」）派成循环批：目标判定 + 环境（凭据/端口/库/账号）+ 每轮证据（命令/退出码/错误原文）+ 预算（轮数与墙钟）+ 停止条件 + 契约分叉上报；分叉用 NEEDS_DECISION 三行（现象/选项/建议）回主控，主控只回决策、不接管循环。真实环境的外部未知先派只读 spike 实测出「实测契约表」，再冻结、再实现，不得先实现后验证。预算对称：子代理单批 15 分钟/30 次编辑；主控单回合 15 分钟/20 步，触顶即停、不产生第二个未派发的写批次，剩余工作转成循环批或下一批。多文件机械活（同模式批量改写、大范围检索、跑长命令）默认派给子代理；同需求的多个轻批合并为一个子代理，修改清单取并集、内部串行。拆批时先勘察后实现、按互斥文件切分、可多批陆续派发，不许整包留给自己。缺计划类 skill 时，先写「每条 = 一个决策点或一批派发」的任务清单，再据此决定派发。只读类子代理（评审/复审/勘察）的 label 一律以「只读」或「勘察」开头，执行类批次的 label 不得以这两个词开头。`subagent_readonly` 的 preset 管工具面、路由与沙箱（结构钉死，不靠 label）；label 前缀只服务 spike 的沙箱收窄——spike 要跑命令实测，仍走普通 subagent。'
 
 // 0.15.0 `business` 预设（spec `2026-11-17-project-policy-design.md` §2.4，逐字
 // 冻结）：给「不跑 dispatch 纪律仓库」的普通业务项目用的六条骨架，删掉本仓库专属
@@ -240,6 +254,30 @@ export function resolveConfig(config = {}) {
     throw new Error('dispatch-protocol: observation.dir must be a non-empty string or false')
   }
 
+  // 0.22.0 结构化沙箱收窄：按子会话的 preset（`agent-preset/selected` 事件 /
+  // `header.agentPreset`）把命中角色的沙箱收窄为 `mode`，替代 model-pin 按
+  // label 字面前缀的 roles 表（评审角色；spike 仍走普通 subagent + roles）。
+  // 与既有段落同口径：非法配置加载期抛错，不静默降级——`mode` 拼错若静默
+  // 回落，会表现为「机制挂着但从不命中」，与「没配」无法区分。
+  const readonlySandboxSource = source.readonlySandbox ?? {}
+  if (typeof readonlySandboxSource !== 'object' || readonlySandboxSource === null || Array.isArray(readonlySandboxSource)) {
+    throw new Error('dispatch-protocol: readonlySandbox must be an object')
+  }
+  const readonlySandboxEnabled = readonlySandboxSource.enabled ?? true
+  if (typeof readonlySandboxEnabled !== 'boolean') {
+    throw new Error('dispatch-protocol: readonlySandbox.enabled must be a boolean')
+  }
+  const readonlySandboxPresets = readonlySandboxSource.presets ?? DEFAULT_READONLY_SANDBOX_PRESETS
+  if (!Array.isArray(readonlySandboxPresets) || readonlySandboxPresets.length === 0
+    || readonlySandboxPresets.some(preset => typeof preset !== 'string' || preset.trim() === '')) {
+    throw new Error('dispatch-protocol: readonlySandbox.presets must be a non-empty array of non-empty strings')
+  }
+  const readonlySandboxMode = readonlySandboxSource.mode ?? 'read-only'
+  if (!READONLY_SANDBOX_MODES.includes(readonlySandboxMode)) {
+    throw new Error(`dispatch-protocol: readonlySandbox.mode must be one of ${READONLY_SANDBOX_MODES.join(', ')}`)
+  }
+  const readonlySandbox = { enabled: readonlySandboxEnabled, presets: readonlySandboxPresets, mode: readonlySandboxMode }
+
   const numbered = rules.map((rule, index) => `${index + 1}. ${rule}`).join('\n')
   const text = [
     '## 派发纪律（DSH）',
@@ -293,5 +331,5 @@ export function resolveConfig(config = {}) {
   }
   const projectSwitch = { enabled: projectSwitchEnabled, path: projectSwitchPath }
 
-  return { enabled: source.enabled !== false, order, rules, footer, text, checkpoint, observation, writePolicy, log, projectSwitch }
+  return { enabled: source.enabled !== false, order, rules, footer, text, checkpoint, observation, readonlySandbox, writePolicy, log, projectSwitch }
 }

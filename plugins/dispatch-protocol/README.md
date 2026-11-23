@@ -139,17 +139,18 @@
 - **不采信自述**：实现者的说明、以及它自己的测试通过，都不算证据（实现与测试可能共享同一个盲点）。
 - **输出**：逐条 `PASS|FAIL + 文件:行号`；全 PASS 须说明每条例子的验证方式。可以给建议，但不得改文件；建议归派发方，裁决也归派发方。评审后任何改动（含派发方自修）只重开被判 FAIL 的那一片及其直接影响面，不重开全包。（纯文档级修复：docs-check 绿 + 断言表，见规则 1/4）
 
-## 只读评审 preset（0.21.0）
+## 只读评审 preset（0.21.0 / 0.22.0）
 
-评审/复审/勘察的「只读」现在有两层独立保障，任一层失效另一层仍在：
+评审/复审/勘察的「只读」与「低成本路由」有三层独立保障，任一层失效其余仍在：
 
-- **工具面（本插件 0.21.0）**：`cordis.patch.yml` 声明 agent preset `dispatch-readonly`——`dsh-tool-fs` 的 `write`/`edit` 关闭、不挂 `tool-pwsh`/`tool-bash`，只剩 read / readImage / grep / glob；同时注册 Host 全局委派工具 **`subagent_readonly`**（`provider: spawn` + `agentPreset: dispatch-readonly` + `modelSelection: false`）。派给它的子代理组合里根本没有写工具与 shell：评审想写文件或重跑构建时得到的是「工具不存在」，而不是沙箱拒绝。
-- **沙箱面（`subagent-model-pin`）**：label 以「只读」/「勘察」开头时按角色表收窄为 `sandbox: read-only` 并路由到低成本模型。`modelSelection: false` 表示子代理路由完全交给继承链，本插件不抢模型选择。
-- **谁必须走它**：评审、复审、勘察一律用 `subagent_readonly` 派发（规则 1/4 与 `business` 规则 4 已写死）。**spike 例外**：只读 spike 要真跑命令实测环境，不能用这个无 shell 的工具，仍走普通 `subagent` + 沙箱收窄。
+- **工具面（0.21.0）**：`cordis.patch.yml` 声明 agent preset `dispatch-readonly`——`dsh-tool-fs` 的 `write`/`edit` 关闭、不挂 `tool-pwsh`/`tool-bash`，只剩 read / readImage / grep / glob；同时注册 Host 全局委派工具 **`subagent_readonly`**（`provider: spawn` + `agentPreset: dispatch-readonly` + `modelSelection: false`）。派给它的子代理组合里根本没有写工具与 shell：评审想写文件或重跑构建时得到的是「工具不存在」，而不是沙箱拒绝。
+- **路由面（0.22.0）**：`tool-subagent-readonly` 带 `agentOptions`（默认 `opencode-go` / `deepseek-v4.1-flash` / `high`），子代理路由在**创建时**钉死——`subagent/descriptor`、首请求、冷恢复三者一致，adapter 预检在委派调用时就报错，且不经会话白名单（白名单只约束模型在调用时显式选择的路由）。`modelSelection: false` 表示模型不能在该工具上改路由。要换钉死的路由：profile patch 按 id 整段覆盖 `tool-subagent-readonly`（config 整体替换，不深合并）。
+- **沙箱面（0.22.0）**：`readonlySandbox` 机制按子会话的 preset 记录（`header.agentPreset` / `agent-preset/selected` 事件，结构键）把命中角色的沙箱收窄为 `read-only`——`agent/created` 时追加一条 `sandbox/mode` 事件（与 model-pin 同款 last-wins 写路径，幂等共存、监听顺序无关）。0.21.0 时这一面靠 model-pin 按 label 字面前缀收窄（G8/P1 两起事故的根因）；现在 label 前缀只服务 spike。
+- **谁必须走它**：评审、复审、勘察一律用 `subagent_readonly` 派发（规则 1/4 与 `business` 规则 4 已写死）。**spike 例外**：只读 spike 要真跑命令实测环境，不能用这个无 shell 的工具，仍走普通 `subagent`——它的沙箱收窄仍由 model-pin 角色表按 label 前缀提供（这是 label 约定剩下的唯一机制用途）。
 - **派发方的职责**：评审组合没有 shell，读不到主控运行时之外的东西——本批白名单并集的 diff 与集成命令输出（退出码 + 输出全文）由派发方先落盘到 `dispatch/` 再交评审读取（规则 4 已写死）。
 - **成本**：该工具常驻所有会话（约数百 token/请求），是本版显式接受的取舍；动态注册（方案 B）因复刻官方委派语义风险高而放弃，工具名与文本日后可平滑演进。
-- **安装后验证**：更新插件 → 完全退出并重启 DSH → 新会话派一个「只读评审：…」任务，确认 ① 子代理工具列表里没有 write / edit / pwsh；② `list_agents` 能看到它；③ 让它尝试写文件时得到「工具不存在」；④ `node scripts/verify-install.mjs` 的 `readonly-tool` 项 PASS（两行 insert 在安装副本里）。
-- **回滚**：插件页禁用 dispatch-protocol，或在 profile patch 里给 `preset-dispatch-readonly` / `tool-subagent-readonly` 两行写 `disabled: true`；纪律文本随下一版退回。
+- **安装后验证**：更新插件 → 完全退出并重启 DSH → 新会话派一个「只读评审：…」任务，确认 ① 子代理工具列表里没有 write / edit / pwsh；② `list_agents` 能看到它；③ 让它尝试写文件时得到「工具不存在」；④ 子会话日志里 `agent-preset/selected` = `dispatch-readonly`、`subagent/descriptor.agentModel` = 钉死路由、`sandbox/mode` 末态为 `read-only`；⑤ `node scripts/verify-install.mjs` 的 `readonly-tool` 项 PASS（两行 insert + `agentOptions` 在安装副本里）。
+- **回滚**：插件页禁用 dispatch-protocol，或在 profile patch 里给 `preset-dispatch-readonly` / `tool-subagent-readonly` 两行写 `disabled: true`；单关沙箱机制用 `readonlySandbox: { enabled: false }`，单退路由钉就整段覆盖 `tool-subagent-readonly` 删掉 `agentOptions`；纪律文本随下一版退回。
 
 ## 项目级开关
 
@@ -245,7 +246,10 @@
 | `checkpoint.waveText` | 内置模板 | 波次聚合文案，支持 `{count}` / `{labels}` |
 | `observation.enabled` | `true` | 是否写回合观测行（不是门禁） |
 | `observation.dir` | `dispatch/runs` | 观测行目录（相对会话 cwd）；`false` 关闭 |
-| `log` | `%TEMP%\dispatch-protocol-decisions.jsonl` | checkpoint / 写入守卫共用的决定日志；`false` 两者都不记 |
+| `readonlySandbox.enabled` | `true` | 是否按子会话 preset 收窄沙箱（0.22.0，判定面见「只读评审 preset」） |
+| `readonlySandbox.presets` | `['dispatch-readonly']` | 收窄哪些 preset 的子代理（非空字符串数组） |
+| `readonlySandbox.mode` | `read-only` | 收窄目标档位（`read-only` / `workspace-write` / `danger-full-access`） |
+| `log` | `%TEMP%\dispatch-protocol-decisions.jsonl` | checkpoint / 写入守卫 / 沙箱收窄共用的决定日志；`false` 都不记 |
 | `projectSwitch.enabled` | `true` | 项目级开关总闸；`false` 时完全回到 0.12.3 行为（不读标记文件） |
 | `projectSwitch.path` | `dispatch/protocol.json` | 项目标记文件，cwd 相对；命中判定见「项目级开关」一节 |
 | `writePolicy.enabled` | `true` | 是否注册写入守卫（宿主没有 `ctx.tools.guard` 时静默跳过） |
@@ -255,9 +259,9 @@
 | `writePolicy.tools` | `['write','edit']` | 守卫检查的工具名 |
 | `writePolicy.delegationTools` | `['subagent','subagent_fork','workflow','subagent_readonly']` | 观测行复用的「已派发」工具名 |
 
-表内 6 个 `writePolicy.*` 键就是 `resolveWritePolicy({})` 的叶子键；`enabled`/`order`/`rules`/`footer`/`checkpoint.*`/`observation.*`/`log`/`projectSwitch.*` 是 `resolveConfig` 的顶层键（`projectSwitch` 段默认值只在 `lib/project.mjs#DEFAULT_PROJECT_SWITCH`，校验在 `lib/config.mjs#resolveConfig`）。`gates` 段已在 0.17.0 移除：出现即加载期报错（迁移提示指向 `dispatch/runs` 与决定日志）。
+表内 6 个 `writePolicy.*` 键就是 `resolveWritePolicy({})` 的叶子键；`enabled`/`order`/`rules`/`footer`/`checkpoint.*`/`observation.*`/`readonlySandbox.*`/`log`/`projectSwitch.*` 是 `resolveConfig` 的顶层键（`projectSwitch` 段默认值只在 `lib/project.mjs#DEFAULT_PROJECT_SWITCH`，校验在 `lib/config.mjs#resolveConfig`）。`gates` 段已在 0.17.0 移除：出现即加载期报错（迁移提示指向 `dispatch/runs` 与决定日志）。
 
-非法配置在插件加载时直接报错，不会静默降级：`order` 非有限数字、`rules` 为空/非数组、`footer` 或 `checkpoint.*` 非字符串、`log` 既非非空路径也非 `false`、`observation.dir` 非非空字符串也非 `false`、`nudge`/`gates` 段出现、`writePolicy.mode` 不是 `enforce`/`shadow`、`writePolicy.allowlist`/`tools`/`delegationTools` 为空数组或含空白串、`writePolicy.overridePath` 空白、`projectSwitch` 非对象/`projectSwitch.enabled` 非布尔/`projectSwitch.path` 空白。
+非法配置在插件加载时直接报错，不会静默降级：`order` 非有限数字、`rules` 为空/非数组、`footer` 或 `checkpoint.*` 非字符串、`log` 既非非空路径也非 `false`、`observation.dir` 非非空字符串也非 `false`、`nudge`/`gates` 段出现、`writePolicy.mode` 不是 `enforce`/`shadow`、`writePolicy.allowlist`/`tools`/`delegationTools` 为空数组或含空白串、`writePolicy.overridePath` 空白、`projectSwitch` 非对象/`projectSwitch.enabled` 非布尔/`projectSwitch.path` 空白、`readonlySandbox` 非对象/`readonlySandbox.enabled` 非布尔/`readonlySandbox.presets` 为空数组或含空白串/`readonlySandbox.mode` 不在三值档位内。
 
 ## 文档校验
 
@@ -275,8 +279,8 @@
 
 | 命令 | 期望 |
 |---|---|
-| `node plugins/dispatch-protocol/test.mjs` | 115 pass（`ℹ pass 115` / `ℹ fail 0`），exit 0 |
-| `node plugins/dispatch-protocol/scripts/docs-check.mjs` | 无参扫仓库根，`docs-check: files=31 fail=0`，exit 0 |
+| `node plugins/dispatch-protocol/test.mjs` | 126 pass（`ℹ pass 126` / `ℹ fail 0`），exit 0 |
+| `node plugins/dispatch-protocol/scripts/docs-check.mjs` | 无参扫仓库根，`docs-check: files=35 fail=0`，exit 0 |
 | `node plugins/dispatch-protocol/scripts/check-anchors.mjs` | 无参扫仓库根 `README.md` 与 `plugins/*/README.md`，`anchors-check: files=4 fail=0`，exit 0 |
 | `node plugins/dispatch-protocol/scripts/docs-check.mjs --self-test` | `self-test: pass=20 fail=0`，exit 0 |
 
@@ -315,6 +319,7 @@
 | `0.19.0` | `AUTO_TEXT` 重框架（spec `2026-11-22-dispatch-auto-text-reframe.md`）：针对「auto 档几乎不升级」的诊断改提示词——删首句「本项目默认不启用派发纪律」（基线框成 off 的措辞），改为中性陈述当前档位与判断责任；删「哪怕文件不少、看起来很大——不要问」的最强负例，保留降调后的反向边界；补三类典型应请示的正面情形（契约面多调用方随动 / 拆多批次需独立评审 / 用户明确要求过程纪律），场景式而非关键词触发。四件事清单、判断问句、「每需求最多问一次」、工具名与兜底文案逐字保留；明确不加 auto 观测、不做文本关键词触发（用户裁决）。行为变化只有提示段正文；测试 116 条（新增 1 条：中性框架 / 正面示例 / 负例降调 / 保留要素）。 |
 | `0.20.0` | `AUTO_TEXT` 证据门槛（spec `2026-11-22-dispatch-auto-evidence-gate.md`）：解决「判断在需求入口、手里无证据」——否掉流程式措辞（「先勘察再判断」会被模型当流程真执行，等于把 full 的阶段搬进 auto），改为门槛式：「请示只在你能说出具体受益点（哪个契约面、哪些调用方、几个批次）时提出；说不出就不要问，直接做」。配套删除首段「在收到需求时判断」的入口时点、「典型应该请示升级的情形」改「典型受益的情形」、删被门槛句涵盖的「反过来…直接做、不必问」。中途再请示仍走已有的「被拒后除非范围实质扩大」许可条款，措辞不动。行为变化只有提示段正文；测试 117 条（0.19.0 用例断言适配 + 新增 1 条：门槛存在 / 无流程措辞 / 入口时点删除 / 保留要素）。 |
 | `0.21.0` | 只读评审机制面（spec `2026-11-23-dispatch-readonly-preset-design.md`）：`cordis.patch.yml` 新增两行 insert——agent preset `dispatch-readonly`（`dsh-tool-fs` 关 `write`/`edit`、不挂 `tool-pwsh`/`tool-bash`，只留 read/grep/glob）与 Host 全局委派工具 `tool-subagent-readonly`（`provider: spawn` + `toolName: subagent_readonly` + `agentPreset: dispatch-readonly` + `modelSelection: false`）。纪律文本把评审/复审/勘察绑定到该工具（规则 1/4、footer、`business` 规则 4），footer 注明 spike 例外（要跑命令实测，仍走普通 `subagent`）；`writePolicy.delegationTools` 默认值追加 `subagent_readonly`；`verify-install.mjs` 新增 `readonly-tool` 检查项。工具面（该组合无写工具、无 shell）与沙箱面（model-pin 按 label 前缀只读）构成双保险，`AUTO_TEXT` / `BUSINESS_FOOTER` 不变；全文增量 197 字符；测试 120 条（新增 3 条：patch 结构 / 文本绑定 / 字数增量）。 |
+| `0.22.0` | 只读角色路由钉死 + 结构化沙箱（spec `2026-11-23-dispatch-readonly-route-sandbox.md`）：`tool-subagent-readonly` 增加 `agentOptions`（创建时钉死路由——descriptor / 首请求 / 冷恢复一致、adapter 预检、不经会话白名单）；新增 `readonlySandbox` 机制与配置段——`agent/created` 按子会话 preset 记录（`header.agentPreset` / `agent-preset/selected`，结构键）收窄沙箱为 `read-only`，替代 model-pin 对评审角色按 label 字面前缀的收窄（label 前缀只继续服务 spike，其沙箱仍由 model-pin 角色表提供）；规则 1 括号注与 footer 末两句随之改词（增量 22 字符），`BUSINESS_RULES` / `BUSINESS_FOOTER` / `AUTO_TEXT` 不变；`verify-install.mjs` 的 `readonly-tool` 检查补 `agentOptions` 三字段；测试 126 条（新增 6 条：配置段默认与校验 / 创建时收窄 / 事件回退 / 非命中跳过 / 幂等 / 根代理与开关豁免）。 |
 
 0.10.0–0.11.0 为未发布的中间提交，内容并入 0.12.0。
 
@@ -339,3 +344,4 @@
 - **升级工具依赖宿主工具面**：`ctx.tools.register` 不存在时工具静默缺席，模型只能请用户点 dock 或输入 `/dispatch full`；提示段已写这条兜底。
 - **无会话 / 会话未就绪时不显示控件**（0.15.1 的 `input.dock` 也如此）：该槽要求会话已打开且输入态就绪（`zone` 需 `session` 与 `inputState`）——还没选/建会话（`sessionId === undefined`）、会话打开中、打开失败时整行不渲染，属预期；会话打开且输入态就绪后显示（**空白新会话也算**），`/dispatch` 在这些状态下始终可用。
 - **profile 插件不支持热加载**：装完必须重启 DSH；`dsh plugin update` 失败可能留下半残目录（被打开的子目录进入 delete-pending），只能重启 Windows 清——先完全退出 DSH 再 update。
+- **钉死路由与兜底 pin 是两份事实**（0.22.0）：评审角色的路由在 `cordis.patch.yml` 的 `agentOptions`（跟随仓库发布），其余子代理的默认路由在 model-pin 的 pin（插件页可改）。换低成本模型时两处都要动（或在 profile 整段覆盖 `tool-subagent-readonly`）；两处不一致不会报错，只会让评审角色留在旧路由——换路由后跑一遍「只读评审 preset › 安装后验证」的第 ④ 项即可确认。

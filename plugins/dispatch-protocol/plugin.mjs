@@ -1,6 +1,6 @@
 // dispatch-protocol — always-on dispatch discipline for DSH sessions.
 //
-// Three mechanisms, all DSH-only:
+// Four mechanisms, all DSH-only:
 //   1. One system-prompt section, so every request (main agent and every
 //      subagent) carries the six dispatch rules. Independent of which skills
 //      the model chose to load.
@@ -17,6 +17,12 @@
 //      Delivery waits for the parent's next turn-stopping, so a parent that
 //      already acted on the report is skipped instead of re-reminded.
 //      Static rules alone get skipped; a timed reminder does not.
+//   4. A structural sandbox narrowing (0.22.0, spec
+//      2026-11-23-dispatch-readonly-route-sandbox.md): children composed from a
+//      preset in `readonlySandbox.presets` get a `sandbox/mode` event at
+//      `agent/created`, keyed by the durable `agent-preset/selected` record
+//      instead of the delegation label's text prefix (model-pin's role table
+//      keeps covering only the spike path on the plain `subagent` tool).
 //
 // 0.17.0 removed the five turn-end state gates（Wait / Verify / Contract /
 // Review / Handoff）. They were checkable reminders about the turn just closed,
@@ -646,6 +652,78 @@ function registerUpgradeTool(ctx, config) {
   }
 }
 
+/**
+ * 读子代理会话组合时选中的 preset id（0.22.0）。
+ *
+ * 运行时在子会话建立时把所选 preset 持久化：`session.header.agentPreset`
+ * （恢复路径也读它），以及 `agent-preset/selected` 事件（建立时 append 在
+ * `subagent/descriptor` 之前，`agent/created` 触发时已提交可见）。先读
+ * header，取不到再回扫事件；两处都没有返回 undefined（未独立组合的子代理
+ * 继承父 preset，不在收窄面内）。
+ * @param agent - the newly created child agent.
+ * @returns the preset id, or undefined.
+ */
+function readChildPreset(agent) {
+  try {
+    const fromHeader = agent?.session?.header?.agentPreset
+    if (typeof fromHeader === 'string' && fromHeader !== '') return fromHeader
+    const events = agent?.session?.snapshotEvents?.() ?? []
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i]
+      if (event?.type === 'agent-preset/selected' && typeof event.data?.agentPreset === 'string') {
+        return event.data.agentPreset
+      }
+    }
+  } catch {
+    // preset is a judgement input only; unreadable means "not narrowed"
+  }
+  return undefined
+}
+
+/**
+ * 注册结构化沙箱收窄（0.22.0，spec `2026-11-23-dispatch-readonly-route-sandbox.md` §3.2）。
+ *
+ * 命中 `readonlySandbox.presets` 的子代理在 `agent/created` 时追加一条
+ * `sandbox/mode` 事件：子会话权限在委派开始时固定、不能自行放宽，只能从外部
+ * 收窄，追加即生效（与 model-pin `applyRoleSandbox` 同款 last-wins 写路径；
+ * 当前已是目标 mode 时跳过，不产生重复事件）。判定键是 preset 记录而非
+ * label 文本——label 前缀只继续服务 spike（普通 `subagent`，由 model-pin
+ * roles 收窄）。
+ *
+ * 与 model-pin 同监听 `agent/created`、同写 `sandbox/mode`：监听顺序任意，
+ * 先追加的一方让另一方走 `already` 跳过，终态一致。全程 fail-open：收窄是
+ * 保险丝，绝不能因为它的异常拦住一次委派。
+ * @param ctx - the plugin context.
+ * @param config - the resolved plugin config (`readonlySandbox` and `log`).
+ */
+function registerReadonlySandbox(ctx, config) {
+  const settings = config.readonlySandbox
+  if (!settings.enabled) return
+  ctx.on('agent/created', ({ agent }) => {
+    try {
+      const session = agent?.session
+      if (session?.header?.origin !== 'subagent') return
+      const preset = readChildPreset(agent)
+      if (preset === undefined || !settings.presets.includes(preset)) return
+      if (typeof session.append !== 'function') return
+      const events = session.snapshotEvents?.() ?? []
+      const current = [...events].reverse().find(event => event?.type === 'sandbox/mode')?.data?.mode
+      if (current === settings.mode) {
+        recordDecision(config.log, agent, {
+          kind: 'readonly-sandbox', decision: 'suppressed', reason: 'already', mode: settings.mode,
+        })
+        return
+      }
+      session.append('sandbox/mode', { mode: settings.mode })
+      recordDecision(config.log, agent, {
+        kind: 'readonly-sandbox', decision: 'applied', mode: settings.mode,
+      })
+    } catch {
+      // narrowing is a fuse: never break a delegation on it
+    }
+  })
+}
+
 export function apply(ctx, rawConfig) {
   const config = resolveConfig(rawConfig)
 
@@ -695,6 +773,9 @@ export function apply(ctx, rawConfig) {
   if (config.writePolicy.enabled && typeof ctx.tools?.guard === 'function') {
     ctx.effect(() => ctx.tools.guard(makeGuard(config)))
   }
+
+  // 0.22.0 结构化沙箱收窄：按子会话 preset 记录收窄，不靠 label 文本。
+  registerReadonlySandbox(ctx, config)
 
   registerReminders(ctx, config)
 }

@@ -34,8 +34,10 @@
         #   # agent may ask; after the user confirms it calls `dispatch_upgrade_full`, visible only in auto, which
         #   # writes mode:"full" atomically and preserves the other policy fields. Downgrades stay user-only.
     # 0.21.0 只读评审/勘察：Host 全局委派工具 subagent_readonly = spawn + dispatch-readonly preset。
-    # 该 preset 没有写工具、也没有 shell（只有 read / readImage / grep / glob），与 model-pin 按
-    # label 前缀收窄的只读沙箱构成「工具面 + 沙箱面」双保险；spike 要跑命令实测，仍走普通 subagent。
+    # 该 preset 没有写工具、也没有 shell（只有 read / readImage / grep / glob）。
+    # 0.22.0：agentOptions 在创建时钉死路由（descriptor / 首请求 / 冷恢复三者一致，
+    # adapter 预检、不经会话白名单）；沙箱收窄改由本插件 readonlySandbox 按
+    # agent-preset/selected 结构判定。spike 要跑命令实测，仍走普通 subagent。
     - id: preset-dispatch-readonly
       name: '@deepseek-ai/dsh-agent-preset'
       config:
@@ -75,3 +77,9 @@
         toolName: subagent_readonly
         agentPreset: dispatch-readonly
         modelSelection: false
+        # 0.22.0：创建时钉死评审角色的低成本路由；要换路由在 profile 层按 id
+        # 整段覆盖本行（config 整体替换，不深合并）。
+        agentOptions:
+          provider: opencode-go
+          model: deepseek-v4.1-flash
+          reasoningEffort: high

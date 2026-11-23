@@ -64,7 +64,7 @@ roles:
 
 配置有三条途径：插件页配置卡片（4 个 volatile 字段，见下节）、bundle 自带的 `cordis.patch.yml` 作默认值、profile 的 `cordis.patch.yml` 用同 id 覆盖（`config` 整体替换，不深合并——手写 YAML 时务必抄全字段）。
 
-**角色与沙箱的唯一真相源就是这里的 `roles`**：`sandbox` 字段（`read-only` / `workspace-write` / `danger-full-access`）也在同一张表里。别再在别处维护第二份角色名单——2026-10-22 的审查把这种复制列为漂移源（`dispatch-guard` 的 `stall.exempt` 就因从未配置而失效，已归档）。
+**角色表职责已收缩（0.3.1 起的事实陈述，非行为变化）**：dispatch-protocol 0.22.0 起，评审/复审/勘察角色（`subagent_readonly` + `dispatch-readonly` preset）的路由与沙箱改由 dispatch-protocol 结构钉死——路由在工具实例的 `agentOptions`（创建时一致、不经白名单），沙箱按其 `readonlySandbox` 机制依子会话 preset 记录收窄；两者都不再经过这里的 roles 表。**roles 表剩下的唯一职责是 spike**：走普通 `subagent`、要跑命令实测的只读 spike 没有独立 preset，沙箱收窄仍按 label 前缀在这里判定。非 dispatch-protocol 宿主仍可把 roles 当通用角色分档用（代码路径未变）。0.3.1 之前「角色与沙箱的唯一真相源是这里的 roles」的口径同时废止——评审角色的真相源已上移，但「别在别处维护第二份角色名单」仍然成立（2026-10-22 的审查把这种复制列为漂移源，`dispatch-guard` 的 `stall.exempt` 就因从未配置而失效，已归档）。
 
 ## GUI 配置（插件页配置卡片）
 
@@ -348,6 +348,7 @@ dump 里能看到相对插件路径被解析成 `file:///...` 绝对 URL，可�
 | 9 | 分支会话沿用旧白名单 | 设计如此，无法用插件绕过 | policy 事件只写一次，投影只认第一条 |
 | 10 | 插件页配置卡片（0.2.0） | 已验证 | schemastery `.volatile()` 四字段 + 手写 `client.js` 注册 `plugins.bundle.config`；settings 写盘只含 volatile 子树，roles 等不可能被界面覆盖 |
 | 11 | 回退 pin 从 `agent/request` 中间件迁到 `agent/created` 时 `agent.model.select()`（0.3.0） | 离线 34 用例全绿 | 0.2.2 起 `preStep` 先固定本步模型，`agent/request` 返回不同路由会直接抛错；`select()` 追加持久 `model/selection`，created 早于首个 `preStep` |
+| 12 | 评审角色路由/沙箱上移 dispatch-protocol 0.22.0（0.3.1，文档-only） | roles 职责收缩为 spike 沙箱 | `agentOptions` 结构钉死（创建时一致、不经白名单）+ `agent-preset/selected` 结构键取代 label 字面前缀；本插件代码不变 |
 
 ### 实测记录（2026-10-21）
 

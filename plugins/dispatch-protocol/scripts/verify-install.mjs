@@ -6,7 +6,8 @@
  *       是否与仓库 plugins/dispatch-protocol/ 一致，并核验 profile 的
  *       cordis.patch.yml 只读角色表未漂移（`- match: 只读` / `- match: 勘察`
  *       块内必须含 `sandbox: read-only`），以及插件 bundle 的两行 0.21.0 insert
- *       （`preset-dispatch-readonly` / `tool-subagent-readonly`）仍在。
+ *       （`preset-dispatch-readonly` / `tool-subagent-readonly`）仍在，且
+ *       0.22.0 起后者带 `agentOptions` 路由钉（provider / model / reasoningEffort）。
  *
  * 依据：docs/superpowers/specs/2026-10-26-dispatch-protocol-0.4.1-patch-plan.md §6；
  *       评审主文档 §10.3-P1（profile 角色表丢失中文前缀 → 只读沙箱失守的实证）。
@@ -337,8 +338,14 @@ function checkReadonlyTool(installedDir) {
     ['provider', 'spawn'],
     ['toolName', 'subagent_readonly'],
     ['agentPreset', 'dispatch-readonly'],
+    // 0.22.0：路由在工具实例上钉死；缺了 agentOptions 字段，评审角色的路由就
+    // 退回继承 + model-pin 兜底（descriptor 不一致的老问题回归）。
+    ['agentOptions', ''],
+    ['provider', 'opencode-go'],
+    ['model', 'deepseek-v4\\.1-flash'],
+    ['reasoningEffort', 'high'],
   ]) {
-    if (!findInsertField(tool.body, key, value)) missing.push(`${key}: ${value}`);
+    if (!findInsertField(tool.body, key, value)) missing.push(value === '' ? key : `${key}: ${value}`);
   }
   if (missing.length > 0) {
     fail('readonly-tool', `"- id: tool-subagent-readonly"（L${tool.line}）缺 ${missing.join('、')}`);
@@ -346,7 +353,7 @@ function checkReadonlyTool(installedDir) {
   }
   pass(
     'readonly-tool',
-    `preset-dispatch-readonly（L${preset.line}）+ tool-subagent-readonly（L${tool.line}）含 provider: spawn / toolName: subagent_readonly / agentPreset: dispatch-readonly`,
+    `preset-dispatch-readonly（L${preset.line}）+ tool-subagent-readonly（L${tool.line}）含 provider: spawn / toolName: subagent_readonly / agentPreset: dispatch-readonly / agentOptions: opencode-go+deepseek-v4.1-flash+high`,
   );
 }
 

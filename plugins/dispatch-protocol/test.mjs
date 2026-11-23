@@ -313,9 +313,10 @@ test('the footer states the read-only label convention', () => {
   const text = h.sections[0].text
 
   assert.match(text, /只读类子代理（评审\/复审\/勘察）的 label 一律以「只读」或「勘察」开头/,
-    '0.4.1: the label prefix is what the role table matches')
+    '0.4.1: the label prefix is what the spike role table matches')
   assert.match(text, /执行类批次的 label 不得以这两个词开头/, 'the exclusion keeps execution batches out of the read-only roles')
-  assert.match(text, /角色表按此前缀收窄沙箱与路由/, 'the sentence names the mechanism the prefix feeds')
+  assert.match(text, /label 前缀只服务 spike 的沙箱收窄/,
+    '0.22.0: the prefix now feeds only the spike sandbox; the preset pins the rest structurally')
 })
 
 test('a completed child triggers exactly one checkpoint message to its parent', () => {
@@ -3126,7 +3127,7 @@ test('0.20.0: AUTO_TEXT gates asking on evidence instead of mandating a survey f
 // 规则 4）同版冻结。`AUTO_TEXT` 保持原样——auto 档不引用只有 full 档才会注入的
 // 工具名，否则 auto 项目会看到一个不存在的工具。
 
-test('0.21.0: cordis.patch.yml declares the readonly preset and its delegation tool', () => {
+test('0.21.0/0.22.0: cordis.patch.yml declares the readonly preset and its delegation tool', () => {
   // 结构断言全部走行级文本：仓库不引 YAML 依赖（与 verify-install.mjs 同口径）。
   const yml = readFileSync(new URL('./cordis.patch.yml', import.meta.url), 'utf8')
   assert.match(yml, /^\s*- id: preset-dispatch-readonly\s*$/m, 'the readonly preset is inserted')
@@ -3151,9 +3152,19 @@ test('0.21.0: cordis.patch.yml declares the readonly preset and its delegation t
   assert.match(presetBlock, /tool-fs-search/, 'grep/glob stay available for read-only review')
   assert.doesNotMatch(presetBlock, /tool-fs[\s\S]*?read: false/,
     'read stays available: only write/edit are switched off')
+
+  // 0.22.0 路由面：agentOptions 在工具实例上钉死（创建时一致、adapter 预检、
+  // 不经会话白名单），评审角色的路由不再依赖 label 前缀命中。
+  const toolBlock = lines.slice(end).join('\n')
+  assert.match(toolBlock, /^\s*agentOptions:\s*$/m, 'the tool instance pins the child route at creation')
+  for (const line of [
+    /^\s*provider: opencode-go\s*$/m,
+    /^\s*model: deepseek-v4\.1-flash\s*$/m,
+    /^\s*reasoningEffort: high\s*$/m,
+  ]) assert.match(toolBlock, line)
 })
 
-test('0.21.0: review and recon are bound to subagent_readonly in the default text', () => {
+test('0.21.0/0.22.0: review and recon are bound to subagent_readonly in the default text', () => {
   const h = harness()
   plugin.apply(h.ctx, {})
   const text = h.sections[0].text
@@ -3162,12 +3173,12 @@ test('0.21.0: review and recon are bound to subagent_readonly in the default tex
     'rule 1 dispatches recon through the read-only tool')
   assert.match(text, /一律用 `subagent_readonly` 派发；其组合无写工具与 shell/,
     'rule 4 names the tool and why the dispatcher must land the diff first')
-  assert.match(text, /`subagent_readonly` 管工具面/,
-    'the footer splits the label prefix (routing/sandbox) from the tool surface')
-  assert.match(text, /只读 spike 要跑命令实测，不得用它，仍走普通 subagent/,
+  assert.match(text, /`subagent_readonly` 的 preset 管工具面、路由与沙箱（结构钉死，不靠 label）/,
+    '0.22.0: the footer gives the preset all three surfaces, structurally pinned')
+  assert.match(text, /spike 要跑命令实测，仍走普通 subagent/,
     'the spike exception stays on the normal subagent')
   assert.match(text, /label 仍以「勘察\/只读」开头/,
-    'the label prefix still drives routing and the read-only sandbox')
+    'the label convention survives; 0.22.0 narrows its effect to the spike sandbox')
 
   assert.match(BUSINESS_RULES[3], /评审一律用 `subagent_readonly` 派发/,
     'the business preset binds review to the tool as well')
@@ -3179,15 +3190,149 @@ test('0.21.0: review and recon are bound to subagent_readonly in the default tex
     'AUTO_TEXT names no full-only tool: auto injects no mechanism text')
 })
 
-test('0.21.0: the default text grew by a bounded amount', (t) => {
-  // 0.20.0 实测基线：六条规则 3216 字符 + footer 615 字符。0.21.0 只改规则 1/4
-  // 与 footer，预算全文增量 ≤200 字符；实测 197（规则 110 + footer 87）。区间
-  // 上下界留出措辞微调余量，超出时把实际增量报进失败信息。
+// ---------------------------------------------------------------------------
+// 0.22.0 — 只读角色路由钉死 + 结构化沙箱（spec
+// `2026-11-23-dispatch-readonly-route-sandbox.md`）：路由由工具实例 agentOptions
+// 在创建时钉死；沙箱由 readonlySandbox 按子会话的 preset 记录
+// （header.agentPreset / agent-preset/selected 事件）收窄，不再靠 label 字面前缀。
+
+test('0.22.0: readonlySandbox defaults to the dispatch-readonly preset and rejects silent breakage', () => {
+  const resolved = resolveConfig({})
+  assert.deepEqual(resolved.readonlySandbox, {
+    enabled: true,
+    presets: ['dispatch-readonly'],
+    mode: 'read-only',
+  })
+  assert.equal(resolveConfig({ readonlySandbox: { enabled: false } }).readonlySandbox.enabled, false)
+  assert.deepEqual(
+    resolveConfig({ readonlySandbox: { presets: ['other-preset'], mode: 'workspace-write' } }).readonlySandbox,
+    { enabled: true, presets: ['other-preset'], mode: 'workspace-write' },
+    'the preset list and target mode are configurable for other readonly roles')
+
+  assert.throws(() => resolveConfig({ readonlySandbox: 42 }), /readonlySandbox must be an object/)
+  assert.throws(() => resolveConfig({ readonlySandbox: { enabled: 'yes' } }), /readonlySandbox\.enabled must be a boolean/)
+  assert.throws(() => resolveConfig({ readonlySandbox: { presets: [] } }), /readonlySandbox\.presets/)
+  assert.throws(() => resolveConfig({ readonlySandbox: { presets: 'dispatch-readonly' } }), /readonlySandbox\.presets/)
+  assert.throws(() => resolveConfig({ readonlySandbox: { presets: ['  '] } }), /readonlySandbox\.presets/)
+  assert.throws(() => resolveConfig({ readonlySandbox: { mode: 'readonly' } }), /readonlySandbox\.mode/,
+    'a misspelled mode must fail loudly instead of silently disabling the narrowing')
+})
+
+/** 0.22.0 fixture: a child session with a preset record and an append log. */
+function readonlyChild(id, parentId, { preset, events = [], appended = [] } = {}) {
+  return {
+    id,
+    session: {
+      id,
+      header: {
+        origin: 'subagent', parentSession: parentId, delegationDepth: 1,
+        ...(preset === undefined ? {} : { agentPreset: preset }),
+      },
+      snapshotEvents: () => [{ type: 'subagent/descriptor', data: { label: `只读评审：${id}` } }, ...events],
+      append(type, data) { appended.push({ type, data }) },
+    },
+  }
+}
+
+test('0.22.0: a child composed from dispatch-readonly is narrowed at creation', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-readonly-sandbox-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+
+    const appended = []
+    h.created(readonlyChild('child-rs-1', 'parent-rs', { preset: 'dispatch-readonly', appended }))
+
+    assert.deepEqual(appended, [{ type: 'sandbox/mode', data: { mode: 'read-only' } }],
+      'the structural preset key appends exactly one narrowing event')
+    const row = readRows(log).find(entry => entry.kind === 'readonly-sandbox')
+    assert.equal(row.decision, 'applied')
+    assert.equal(row.mode, 'read-only')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.22.0: the preset record falls back to the agent-preset/selected event', () => {
+  const h = harness()
+  plugin.apply(h.ctx, quiet)
+
+  const appended = []
+  h.created(readonlyChild('child-rs-2', 'parent-rs', {
+    events: [{ type: 'agent-preset/selected', data: { agentPreset: 'dispatch-readonly' } }],
+    appended,
+  }))
+
+  assert.deepEqual(appended, [{ type: 'sandbox/mode', data: { mode: 'read-only' } }],
+    'the durable event identifies the preset when the header does not carry it')
+})
+
+test('0.22.0: other presets and inherited compositions are not narrowed', () => {
+  const h = harness()
+  plugin.apply(h.ctx, quiet)
+
+  const appended = []
+  h.created(readonlyChild('child-rs-3a', 'parent-rs', { preset: 'standard', appended }))
+  h.created(readonlyChild('child-rs-3b', 'parent-rs', { appended }))
+
+  assert.equal(appended.length, 0,
+    'only listed presets are narrowed; inherited children keep the delegation default')
+})
+
+test('0.22.0: an already narrowed session adds no duplicate event', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-readonly-already-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+
+    const appended = []
+    h.created(readonlyChild('child-rs-4', 'parent-rs', {
+      preset: 'dispatch-readonly',
+      events: [{ type: 'sandbox/mode', data: { mode: 'read-only' } }],
+      appended,
+    }))
+
+    assert.equal(appended.length, 0, 'idempotent against the coexisting model-pin write path')
+    const row = readRows(log).find(entry => entry.kind === 'readonly-sandbox')
+    assert.equal(row.decision, 'suppressed')
+    assert.equal(row.reason, 'already')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.22.0: root agents and a disabled section are never narrowed', () => {
+  const h = harness()
+  plugin.apply(h.ctx, quiet)
+  const appended = []
+  h.created({
+    id: 'root-rs',
+    session: {
+      id: 'root-rs', header: { origin: 'root' },
+      snapshotEvents: () => [], append: (type, data) => appended.push({ type, data }),
+    },
+  })
+  assert.equal(appended.length, 0, 'narrowing is a child-only mechanism')
+
+  const off = harness()
+  plugin.apply(off.ctx, { ...quiet, readonlySandbox: { enabled: false } })
+  const offAppended = []
+  off.created(readonlyChild('child-rs-5', 'parent-rs', { preset: 'dispatch-readonly', appended: offAppended }))
+  assert.equal(offAppended.length, 0, 'readonlySandbox.enabled:false registers nothing')
+})
+
+test('0.22.0: the default text grew by a bounded amount', (t) => {
+  // 0.21.0 实测基线：六条规则 3326 字符 + footer 702 字符。0.22.0 只改规则 1 的
+  // 括号注与 footer 末两句（前缀 → preset 的归属改词），预算增量 ≤40 字符；
+  // 实测 22（规则 18 + footer 4）。区间上下界留出措辞微调余量，超出时把实际
+  // 增量报进失败信息。
   const body = DEFAULT_RULES.reduce((sum, rule) => sum + rule.length, 0)
-  const delta = (body - 3216) + (DEFAULT_FOOTER.length - 615)
-  t.diagnostic(`DEFAULT_RULES ${body} 字符 / footer ${DEFAULT_FOOTER.length} 字符 / 0.21.0 增量 ${delta}`)
-  assert.ok(delta >= 190 && delta <= 200,
-    `0.21.0 text delta is ${delta} characters (0.20.0 baseline = 3216 body + 615 footer, budget <= 200)`)
+  const delta = (body - 3326) + (DEFAULT_FOOTER.length - 702)
+  t.diagnostic(`DEFAULT_RULES ${body} 字符 / footer ${DEFAULT_FOOTER.length} 字符 / 0.22.0 增量 ${delta}`)
+  assert.ok(delta >= 15 && delta <= 40,
+    `0.22.0 text delta is ${delta} characters (0.21.0 baseline = 3326 body + 702 footer, budget <= 40)`)
   assert.equal(DEFAULT_RULES.length, 6, 'the binding lands inside existing rules, never a seventh clause')
 })
 
