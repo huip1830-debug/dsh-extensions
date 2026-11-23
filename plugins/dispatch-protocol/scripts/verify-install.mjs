@@ -5,7 +5,8 @@
  * 用途：核验 ~/.dsh/profiles/<profile>/node_modules/dispatch-protocol/ 的安装副本
  *       是否与仓库 plugins/dispatch-protocol/ 一致，并核验 profile 的
  *       cordis.patch.yml 只读角色表未漂移（`- match: 只读` / `- match: 勘察`
- *       块内必须含 `sandbox: read-only`）。
+ *       块内必须含 `sandbox: read-only`），以及插件 bundle 的两行 0.21.0 insert
+ *       （`preset-dispatch-readonly` / `tool-subagent-readonly`）仍在。
  *
  * 依据：docs/superpowers/specs/2026-10-26-dispatch-protocol-0.4.1-patch-plan.md §6；
  *       评审主文档 §10.3-P1（profile 角色表丢失中文前缀 → 只读沙箱失守的实证）。
@@ -17,7 +18,7 @@
  *   --profile  指定 profile 名（默认 desktop），即 ~/.dsh/profiles/<name>/
  *
  * 输出：每行 [PASS] <name> — <detail> 或 [FAIL] <name> — <detail>；
- *       检查项固定为 installed-dir / version / files / profile-roles。
+ *       检查项固定为 installed-dir / version / files / profile-roles / readonly-tool。
  *       任一 FAIL → 进程退出码 1；全 PASS → 退出码 0。
  *
  * 约束：纯只读脚本，只读文件与目录，不写任何文件（无临时文件、无日志）。
@@ -279,6 +280,76 @@ function checkProfileRoles(ymlPath) {
   }
 }
 
+// ---- 0.21.0 只读评审 preset / 委派工具 --------------------------------------
+// 判定对象是**安装副本**的 cordis.patch.yml：两行 insert 由本插件 bundle patch
+// 注入，profile 自己的 cordis.patch.yml 里未必出现（files 项已比对内容，本项
+// 专门断言两行存在且关键字段正确——它们缺一，纪律文本引用的 subagent_readonly
+// 就在宿主里不存在，评审会退回普通 subagent、工具面强制静默失效）。
+
+// 返回 `- id: <id>` 所在 insert 项的行号（1 基）与块体；块到下一个缩进 <= 自身的
+// `- id:` 行为止。行级解析，注释行与空行不参与边界判定。
+export function findInsertBlock(lines, id) {
+  for (let i = 0; i < lines.length; i += 1) {
+    const head = lines[i].match(/^([ \t]*)-[ \t]*id:[ \t]*(\S+)[ \t]*(?:#.*)?$/);
+    if (!head || head[2] !== id) continue;
+    const indent = head[1].length;
+    let end = lines.length;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const s = lines[j].trim();
+      if (s === '' || s.startsWith('#')) continue;
+      const next = lines[j].match(/^([ \t]*)-[ \t]*id:/);
+      if (next && next[1].length <= indent) {
+        end = j;
+        break;
+      }
+    }
+    return { line: i + 1, body: lines.slice(i + 1, end) };
+  }
+  return null;
+}
+
+export function findInsertField(body, key, value) {
+  const pattern = new RegExp(`^[ \\t]*${key}:[ \\t]*${value}[ \\t]*$`);
+  return body.some((line) => pattern.test(line));
+}
+
+function checkReadonlyTool(installedDir) {
+  const ymlPath = path.join(installedDir, 'cordis.patch.yml');
+  let lines;
+  try {
+    lines = fs.readFileSync(ymlPath, 'utf8').split(/\r?\n/);
+  } catch {
+    fail('readonly-tool', `无法读取 ${ymlPath}`);
+    return;
+  }
+  const preset = findInsertBlock(lines, 'preset-dispatch-readonly');
+  if (!preset) {
+    fail('readonly-tool', `未找到 "- id: preset-dispatch-readonly"（${ymlPath}）`);
+    return;
+  }
+  const tool = findInsertBlock(lines, 'tool-subagent-readonly');
+  if (!tool) {
+    fail('readonly-tool', `未找到 "- id: tool-subagent-readonly"（${ymlPath}）`);
+    return;
+  }
+  const missing = [];
+  for (const [key, value] of [
+    ['provider', 'spawn'],
+    ['toolName', 'subagent_readonly'],
+    ['agentPreset', 'dispatch-readonly'],
+  ]) {
+    if (!findInsertField(tool.body, key, value)) missing.push(`${key}: ${value}`);
+  }
+  if (missing.length > 0) {
+    fail('readonly-tool', `"- id: tool-subagent-readonly"（L${tool.line}）缺 ${missing.join('、')}`);
+    return;
+  }
+  pass(
+    'readonly-tool',
+    `preset-dispatch-readonly（L${preset.line}）+ tool-subagent-readonly（L${tool.line}）含 provider: spawn / toolName: subagent_readonly / agentPreset: dispatch-readonly`,
+  );
+}
+
 // ---- 主流程 -----------------------------------------------------------------
 
 function main() {
@@ -301,6 +372,7 @@ function main() {
   checkVersion(installedDir);
   checkFiles(installedDir);
   checkProfileRoles(ymlPath);
+  checkReadonlyTool(installedDir);
 
   return results.every((r) => r.ok) ? 0 : 1;
 }

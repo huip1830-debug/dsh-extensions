@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import * as plugin from './plugin.mjs'
-import { resolveConfig, AUTO_TEXT, DEFAULT_RULES, BUSINESS_FOOTER, BUSINESS_RULES, resolveRulesPreset } from './lib/config.mjs'
+import { resolveConfig, AUTO_TEXT, DEFAULT_FOOTER, DEFAULT_RULES, BUSINESS_FOOTER, BUSINESS_RULES, resolveRulesPreset } from './lib/config.mjs'
 import {
   DEFAULT_PROJECT_SWITCH, PROJECT_MODES, readProjectMode, readProjectPolicy, writeProjectMode,
 } from './lib/project.mjs'
@@ -272,7 +272,7 @@ test('one closing paragraph states who does what and when a dispatch may be skip
   assert.match(text, /不搞全有或全无/, '0.8.1: the lane split is not all-or-nothing')
   assert.match(text, /默认派给子代理/, 'mechanical volume defaults to children')
   assert.match(text, /拆批/, 'uncertainty must map to batching')
-  assert.match(text, /勘察批一律只读/, 'the first batch is a read-only survey')
+  assert.match(text, /勘察一律用 `subagent_readonly`/, 'the first batch is a read-only survey dispatched through the readonly tool')
   assert.match(text, /可多批陆续派发/, 'several batches are allowed, split along mutually exclusive files')
   assert.match(text, /不许整包留给自己/, 'the fallback-to-self trap must be named')
   assert.match(text, /缺计划类 skill/, 'the missing-plan-skill path must be named')
@@ -1242,7 +1242,7 @@ test('writePolicy carries the 0.9.0 defaults and rejects silent breakage', () =>
     allowlist: DEFAULT_ALLOWLIST,
     overridePath: 'dispatch/override.json',
     tools: ['write', 'edit'],
-    delegationTools: ['subagent', 'subagent_fork', 'workflow'],
+    delegationTools: ['subagent', 'subagent_fork', 'workflow', 'subagent_readonly'],
   })
   assert.deepEqual(DEFAULT_ALLOWLIST, ['dispatch/', 'docs/superpowers/specs/'])
   assert.equal(DEFAULT_OVERRIDE_PATH, 'dispatch/override.json')
@@ -3118,6 +3118,77 @@ test('0.20.0: AUTO_TEXT gates asking on evidence instead of mandating a survey f
     'the permissive mid-task re-ask clause is retained verbatim')
   assert.match(AUTO_TEXT, /会不会从上面四件事中的至少一件显著受益/,
     'the benefit question survives the rewrite')
+})
+
+// ---------------------------------------------------------------------------
+// 0.21.0 — 只读评审 preset（spec `2026-11-23-dispatch-readonly-preset-design.md`）：
+// 机制面（cordis.patch.yml 两行 insert）与纪律文本面（规则 1/4、footer、business
+// 规则 4）同版冻结。`AUTO_TEXT` 保持原样——auto 档不引用只有 full 档才会注入的
+// 工具名，否则 auto 项目会看到一个不存在的工具。
+
+test('0.21.0: cordis.patch.yml declares the readonly preset and its delegation tool', () => {
+  // 结构断言全部走行级文本：仓库不引 YAML 依赖（与 verify-install.mjs 同口径）。
+  const yml = readFileSync(new URL('./cordis.patch.yml', import.meta.url), 'utf8')
+  assert.match(yml, /^\s*- id: preset-dispatch-readonly\s*$/m, 'the readonly preset is inserted')
+  assert.match(yml, /^\s*- id: tool-subagent-readonly\s*$/m, 'the Host-global delegation tool is inserted')
+  for (const line of [
+    /^\s*provider: spawn\s*$/m,
+    /^\s*toolName: subagent_readonly\s*$/m,
+    /^\s*agentPreset: dispatch-readonly\s*$/m,
+    /^\s*modelSelection: false\s*$/m,
+    /^\s*write: false\s*$/m,
+    /^\s*edit: false\s*$/m,
+  ]) assert.match(yml, line)
+
+  // 工具面强制：preset 块内不得出现 shell 工具；检索面只留只读的 grep/glob。
+  const lines = yml.split(/\r?\n/)
+  const start = lines.findIndex(line => /- id: preset-dispatch-readonly/.test(line))
+  const end = lines.findIndex(line => /- id: tool-subagent-readonly/.test(line))
+  assert.ok(start >= 0 && end > start, 'the preset block precedes the tool instance')
+  const presetBlock = lines.slice(start, end).join('\n')
+  assert.doesNotMatch(presetBlock, /tool-pwsh|tool-bash/,
+    'the readonly preset carries no shell — build/test re-runs are impossible at the tool surface')
+  assert.match(presetBlock, /tool-fs-search/, 'grep/glob stay available for read-only review')
+  assert.doesNotMatch(presetBlock, /tool-fs[\s\S]*?read: false/,
+    'read stays available: only write/edit are switched off')
+})
+
+test('0.21.0: review and recon are bound to subagent_readonly in the default text', () => {
+  const h = harness()
+  plugin.apply(h.ctx, {})
+  const text = h.sections[0].text
+
+  assert.match(text, /勘察一律用 `subagent_readonly`/,
+    'rule 1 dispatches recon through the read-only tool')
+  assert.match(text, /一律用 `subagent_readonly` 派发；其组合无写工具与 shell/,
+    'rule 4 names the tool and why the dispatcher must land the diff first')
+  assert.match(text, /`subagent_readonly` 管工具面/,
+    'the footer splits the label prefix (routing/sandbox) from the tool surface')
+  assert.match(text, /只读 spike 要跑命令实测，不得用它，仍走普通 subagent/,
+    'the spike exception stays on the normal subagent')
+  assert.match(text, /label 仍以「勘察\/只读」开头/,
+    'the label prefix still drives routing and the read-only sandbox')
+
+  assert.match(BUSINESS_RULES[3], /评审一律用 `subagent_readonly` 派发/,
+    'the business preset binds review to the tool as well')
+  assert.match(BUSINESS_RULES[3], /diff 与集成输出由派发方落盘 `dispatch\/` 后交其读取/,
+    'the business preset carries the dispatcher landing duty')
+  assert.match(BUSINESS_RULES[0], /一律用 `subagent_readonly` 派发/,
+    'the business preset binds recon to the tool as well')
+  assert.doesNotMatch(AUTO_TEXT, /subagent_readonly/,
+    'AUTO_TEXT names no full-only tool: auto injects no mechanism text')
+})
+
+test('0.21.0: the default text grew by a bounded amount', (t) => {
+  // 0.20.0 实测基线：六条规则 3216 字符 + footer 615 字符。0.21.0 只改规则 1/4
+  // 与 footer，预算全文增量 ≤200 字符；实测 197（规则 110 + footer 87）。区间
+  // 上下界留出措辞微调余量，超出时把实际增量报进失败信息。
+  const body = DEFAULT_RULES.reduce((sum, rule) => sum + rule.length, 0)
+  const delta = (body - 3216) + (DEFAULT_FOOTER.length - 615)
+  t.diagnostic(`DEFAULT_RULES ${body} 字符 / footer ${DEFAULT_FOOTER.length} 字符 / 0.21.0 增量 ${delta}`)
+  assert.ok(delta >= 190 && delta <= 200,
+    `0.21.0 text delta is ${delta} characters (0.20.0 baseline = 3216 body + 615 footer, budget <= 200)`)
+  assert.equal(DEFAULT_RULES.length, 6, 'the binding lands inside existing rules, never a seventh clause')
 })
 
 // ---------------------------------------------------------------------------

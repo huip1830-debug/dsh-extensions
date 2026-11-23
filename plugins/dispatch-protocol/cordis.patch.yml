@@ -17,7 +17,7 @@
           # allowlist: ['dispatch/', 'docs/superpowers/specs/']   # control-plane prefixes, cwd-relative, case-insensitive, word-boundary matched
           # overridePath: 'dispatch/override.json'                # the only exemption artifact: {"reason": "..."} written in this session
           # tools: ['write', 'edit']                              # tools the guard inspects (default write, edit)
-          # delegationTools: ['subagent', 'subagent_fork', 'workflow']   # shared with observation rows
+          # delegationTools: ['subagent', 'subagent_fork', 'workflow', 'subagent_readonly']   # shared with observation rows
         checkpoint:
           enabled: true       # remind the parent when a child completes (judged at the parent's next turn-stopping)
           # text: ''          # overrides DEFAULT_CHECKPOINT; supports {childId} and {label}
@@ -33,3 +33,45 @@
         #   # 0.16.0: the default is auto (a ~470-char escalation hint, no guard/checkpoints). The root
         #   # agent may ask; after the user confirms it calls `dispatch_upgrade_full`, visible only in auto, which
         #   # writes mode:"full" atomically and preserves the other policy fields. Downgrades stay user-only.
+    # 0.21.0 只读评审/勘察：Host 全局委派工具 subagent_readonly = spawn + dispatch-readonly preset。
+    # 该 preset 没有写工具、也没有 shell（只有 read / readImage / grep / glob），与 model-pin 按
+    # label 前缀收窄的只读沙箱构成「工具面 + 沙箱面」双保险；spike 要跑命令实测，仍走普通 subagent。
+    - id: preset-dispatch-readonly
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: dispatch-readonly
+        name: 只读评审/勘察
+        order: 90
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                你是派发纪律的只读子代理（评审/复审/勘察）。你的组合里没有写入工具与
+                shell：只能 read/grep/glob。输入材料（需求、冻结契约、diff、集成结果）
+                由派发词与 dispatch/ 下的文件提供；材料不足或与代码不符时停报
+                NEEDS_CONTEXT，不得扩大范围、不得尝试写文件。评审逐条给
+                PASS|FAIL + 文件:行号；勘察给「文件:行号 + 相关代码 + 结论 +
+                不确定项」。结论以 final message 回传。
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              write: false
+              edit: false
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+    - id: tool-subagent-readonly
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent_readonly
+        agentPreset: dispatch-readonly
+        modelSelection: false

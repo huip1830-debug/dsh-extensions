@@ -11,8 +11,12 @@
 // 变更动词也算——样本 session-82db5b7d 的 W-5 用 `Remove-Item` 删死代码、零
 // write/edit，被判只读而静默。
 
-/** Delegation tools: a turn that used one of these did not miss the dispatch. */
-export const DEFAULT_DELEGATION_TOOLS = ['subagent', 'subagent_fork', 'workflow']
+/**
+ * Delegation tools: a turn that used one of these did not miss the dispatch.
+ * 0.21.0: `subagent_readonly` (review/re-review/recon) is a delegation too — the
+ * read-only review child counts as "dispatched" for the observation rows.
+ */
+export const DEFAULT_DELEGATION_TOOLS = ['subagent', 'subagent_fork', 'workflow', 'subagent_readonly']
 
 /** Tools whose calls count as "touched a file" for this check. */
 export const DEFAULT_WRITE_TOOLS = ['write', 'edit']

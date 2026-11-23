@@ -139,6 +139,18 @@
 - **不采信自述**：实现者的说明、以及它自己的测试通过，都不算证据（实现与测试可能共享同一个盲点）。
 - **输出**：逐条 `PASS|FAIL + 文件:行号`；全 PASS 须说明每条例子的验证方式。可以给建议，但不得改文件；建议归派发方，裁决也归派发方。评审后任何改动（含派发方自修）只重开被判 FAIL 的那一片及其直接影响面，不重开全包。（纯文档级修复：docs-check 绿 + 断言表，见规则 1/4）
 
+## 只读评审 preset（0.21.0）
+
+评审/复审/勘察的「只读」现在有两层独立保障，任一层失效另一层仍在：
+
+- **工具面（本插件 0.21.0）**：`cordis.patch.yml` 声明 agent preset `dispatch-readonly`——`dsh-tool-fs` 的 `write`/`edit` 关闭、不挂 `tool-pwsh`/`tool-bash`，只剩 read / readImage / grep / glob；同时注册 Host 全局委派工具 **`subagent_readonly`**（`provider: spawn` + `agentPreset: dispatch-readonly` + `modelSelection: false`）。派给它的子代理组合里根本没有写工具与 shell：评审想写文件或重跑构建时得到的是「工具不存在」，而不是沙箱拒绝。
+- **沙箱面（`subagent-model-pin`）**：label 以「只读」/「勘察」开头时按角色表收窄为 `sandbox: read-only` 并路由到低成本模型。`modelSelection: false` 表示子代理路由完全交给继承链，本插件不抢模型选择。
+- **谁必须走它**：评审、复审、勘察一律用 `subagent_readonly` 派发（规则 1/4 与 `business` 规则 4 已写死）。**spike 例外**：只读 spike 要真跑命令实测环境，不能用这个无 shell 的工具，仍走普通 `subagent` + 沙箱收窄。
+- **派发方的职责**：评审组合没有 shell，读不到主控运行时之外的东西——本批白名单并集的 diff 与集成命令输出（退出码 + 输出全文）由派发方先落盘到 `dispatch/` 再交评审读取（规则 4 已写死）。
+- **成本**：该工具常驻所有会话（约数百 token/请求），是本版显式接受的取舍；动态注册（方案 B）因复刻官方委派语义风险高而放弃，工具名与文本日后可平滑演进。
+- **安装后验证**：更新插件 → 完全退出并重启 DSH → 新会话派一个「只读评审：…」任务，确认 ① 子代理工具列表里没有 write / edit / pwsh；② `list_agents` 能看到它；③ 让它尝试写文件时得到「工具不存在」；④ `node scripts/verify-install.mjs` 的 `readonly-tool` 项 PASS（两行 insert 在安装副本里）。
+- **回滚**：插件页禁用 dispatch-protocol，或在 profile patch 里给 `preset-dispatch-readonly` / `tool-subagent-readonly` 两行写 `disabled: true`；纪律文本随下一版退回。
+
 ## 项目级开关
 
 同一个 profile 里不同项目用不同档位。**默认是 `auto`**：不建标记文件的项目只注入提级提示。项目根建 `dispatch/protocol.json` 可显式选档：`{"mode":"off"}`（或 `{"enabled":false}`）全静默、`{"mode":"auto"}` 与默认相同、`{"mode":"shadow"}` 照常提醒但写入只记不拦、`{"mode":"full"}`（或 `{"enabled":true}`）完整纪律。判定在每个工具调用与回合收尾时实时读文件（`lib/project.mjs#readProjectPolicy`），**不需要重启 DSH、不需要改 profile**；标记文件只按会话 cwd 查找（`lib/project.mjs#resolveMarkerFile`），同 profile 的其它项目不受影响。
@@ -241,7 +253,7 @@
 | `writePolicy.allowlist` | `['dispatch/','docs/superpowers/specs/']` | 主控可直接写的前缀（cwd 相对、大小写不敏感；尾 `/` 前缀匹配，无尾 `/` 词边界）；命中放行且不写日志 |
 | `writePolicy.overridePath` | `dispatch/override.json` | 唯一豁免凭据（cwd 相对）；`reason` 非空且本会话写下才有效 |
 | `writePolicy.tools` | `['write','edit']` | 守卫检查的工具名 |
-| `writePolicy.delegationTools` | `['subagent','subagent_fork','workflow']` | 观测行复用的「已派发」工具名 |
+| `writePolicy.delegationTools` | `['subagent','subagent_fork','workflow','subagent_readonly']` | 观测行复用的「已派发」工具名 |
 
 表内 6 个 `writePolicy.*` 键就是 `resolveWritePolicy({})` 的叶子键；`enabled`/`order`/`rules`/`footer`/`checkpoint.*`/`observation.*`/`log`/`projectSwitch.*` 是 `resolveConfig` 的顶层键（`projectSwitch` 段默认值只在 `lib/project.mjs#DEFAULT_PROJECT_SWITCH`，校验在 `lib/config.mjs#resolveConfig`）。`gates` 段已在 0.17.0 移除：出现即加载期报错（迁移提示指向 `dispatch/runs` 与决定日志）。
 
@@ -302,6 +314,7 @@
 | `0.18.0` | 会话区控件新增未激活态与激活按钮：没有 `dispatch/protocol.json` 的项目显示 `派发纪律 未激活 [激活]`（不显示档位值与四档按钮），点击激活执行 `/dispatch init`（写 `mode:"full"` + preset + 白名单），成功重读后切成四档控件；激活失败先重读状态，并发的「已存在…未覆盖」按已初始化展示；已初始化项目与坏 JSON 行为不变；新增 `dockStateOf` 状态映射，locale 加 `inactive` / `activate` / `activateHint` / `activateFailed`；测试 115 条（新增 4 条：状态映射、未激活渲染、激活接线、失败/并发）。 |
 | `0.19.0` | `AUTO_TEXT` 重框架（spec `2026-11-22-dispatch-auto-text-reframe.md`）：针对「auto 档几乎不升级」的诊断改提示词——删首句「本项目默认不启用派发纪律」（基线框成 off 的措辞），改为中性陈述当前档位与判断责任；删「哪怕文件不少、看起来很大——不要问」的最强负例，保留降调后的反向边界；补三类典型应请示的正面情形（契约面多调用方随动 / 拆多批次需独立评审 / 用户明确要求过程纪律），场景式而非关键词触发。四件事清单、判断问句、「每需求最多问一次」、工具名与兜底文案逐字保留；明确不加 auto 观测、不做文本关键词触发（用户裁决）。行为变化只有提示段正文；测试 116 条（新增 1 条：中性框架 / 正面示例 / 负例降调 / 保留要素）。 |
 | `0.20.0` | `AUTO_TEXT` 证据门槛（spec `2026-11-22-dispatch-auto-evidence-gate.md`）：解决「判断在需求入口、手里无证据」——否掉流程式措辞（「先勘察再判断」会被模型当流程真执行，等于把 full 的阶段搬进 auto），改为门槛式：「请示只在你能说出具体受益点（哪个契约面、哪些调用方、几个批次）时提出；说不出就不要问，直接做」。配套删除首段「在收到需求时判断」的入口时点、「典型应该请示升级的情形」改「典型受益的情形」、删被门槛句涵盖的「反过来…直接做、不必问」。中途再请示仍走已有的「被拒后除非范围实质扩大」许可条款，措辞不动。行为变化只有提示段正文；测试 117 条（0.19.0 用例断言适配 + 新增 1 条：门槛存在 / 无流程措辞 / 入口时点删除 / 保留要素）。 |
+| `0.21.0` | 只读评审机制面（spec `2026-11-23-dispatch-readonly-preset-design.md`）：`cordis.patch.yml` 新增两行 insert——agent preset `dispatch-readonly`（`dsh-tool-fs` 关 `write`/`edit`、不挂 `tool-pwsh`/`tool-bash`，只留 read/grep/glob）与 Host 全局委派工具 `tool-subagent-readonly`（`provider: spawn` + `toolName: subagent_readonly` + `agentPreset: dispatch-readonly` + `modelSelection: false`）。纪律文本把评审/复审/勘察绑定到该工具（规则 1/4、footer、`business` 规则 4），footer 注明 spike 例外（要跑命令实测，仍走普通 `subagent`）；`writePolicy.delegationTools` 默认值追加 `subagent_readonly`；`verify-install.mjs` 新增 `readonly-tool` 检查项。工具面（该组合无写工具、无 shell）与沙箱面（model-pin 按 label 前缀只读）构成双保险，`AUTO_TEXT` / `BUSINESS_FOOTER` 不变；全文增量 197 字符；测试 120 条（新增 3 条：patch 结构 / 文本绑定 / 字数增量）。 |
 
 0.10.0–0.11.0 为未发布的中间提交，内容并入 0.12.0。
 
