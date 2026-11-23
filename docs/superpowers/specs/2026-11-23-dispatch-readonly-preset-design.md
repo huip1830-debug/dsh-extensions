@@ -34,8 +34,8 @@ label 字面前缀匹配本身也是脆弱点（中文 label 不命中英文前�
 - 不做 Agent Teams 任务板（dispatch/state+ledger+runs 已持久可审计，重复浪费）；
 - 不动 `subagent-model-pin`（角色表仍是路由/沙箱唯一真相源）；
 - 不给 spike 造第二个 preset（spike 要跑命令实测，仍走普通 `subagent`）；
-- auto/off 档不做动态卸载（方案 B 动态注册因复刻官方委派语义风险高而放弃，
-  接受工具常驻所有会话的约数百 token/请求成本）。
+- auto/off 档不做动态卸载：方案 B 动态注册因复刻官方委派语义风险高而放弃，
+  接受工具常驻所有会话的约数百 token/请求成本。
 
 ## 3. 机制面
 
@@ -106,9 +106,9 @@ label 字面前缀匹配本身也是脆弱点（中文 label 不命中英文前�
 
 > 勘察一律用 `subagent_readonly` 派发（该工具的子代理组合无写工具与 shell）：产出以 final message 回传，主控落盘到 `dispatch/recon/<需求>.<端>.md`（属控制面），不得要求勘察子代理写文件；label 仍以「勘察/只读」开头（前缀管路由与沙箱收窄）。
 
-**规则 4（评审句）**，在「命中 gated 的需求另派只读评审子代理」处插入绑定
-（「禁止重跑构建/测试/集成命令」原文保留——它现在同时是工具面强制，
-文本仍约束 spike 等旧路径）：
+**规则 4（评审句）**，在「命中 gated 的需求另派只读评审子代理」处插入绑定：
+「禁止重跑构建/测试/集成命令」原文保留——它现在同时是工具面强制，
+文本仍约束 spike 等旧路径。
 
 > 命中 gated 的需求另派只读评审子代理（一律用 `subagent_readonly` 派发；其组合无写工具与 shell，故本批白名单并集的 diff 与集成命令输出由主控先落盘到 `dispatch/` 再交评审读取）……
 
@@ -133,8 +133,8 @@ label 字面前缀匹配本身也是脆弱点（中文 label 不命中英文前�
 - 默认值：`resolveWritePolicy` 的 `delegationTools` 含 `subagent_readonly`；
 - 字数：全文增量 ≤200 字的实测冻结断言。
 
-**README**：新增「只读评审 preset（0.21.0）」一节——机制图（工具面+沙箱面
-双保险）、spike 例外、安装后验证步骤；变更历史表加 `0.21.0` 行。
+**README**：新增「只读评审 preset（0.21.0）」一节——机制图（工具面+沙箱面双保险）、
+spike 例外、安装后验证步骤；变更历史表加 `0.21.0` 行。
 
 **`scripts/verify-install.mjs`**：扩展核验——profile dump 中应解析出
 `preset-dispatch-readonly` 与 `tool-subagent-readonly` 两行，缺失列为
