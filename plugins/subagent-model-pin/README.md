@@ -97,7 +97,7 @@ roles:
 
 **注意前缀按字面匹配**：中文 description（如「评审后端改动」）不会命中 `Survey` / `Review` 这类英文前缀。用中文 label 的派发方应配对应中文前缀（如 `评审` / `勘察` / `只读`），或约定英文 label。
 
-**角色表职责已收缩**：dispatch-protocol 的只读评审角色（`subagent_readonly` + `dispatch-readonly` preset）路由与沙箱改由 dispatch-protocol 结构钉死，不再经过这里的 `roles`。`roles` 剩下的唯一职责是 **spike**：走普通 `subagent`、要跑命令实测的只读 spike 没有独立 preset，沙箱收窄仍按 label 前缀在这里判定。非 dispatch-protocol 宿主仍可把 `roles` 当通用角色分档用。
+**角色表职责已收缩，但有对齐前提**：dispatch-protocol 的只读评审角色（`subagent_readonly` + `dispatch-readonly` preset）路由与沙箱改由 dispatch-protocol 结构钉死——前提是 `roles` 表**不命中**这些 label，或命中的是**同一路由**。roles 命中不同路由时 R4 仍会在 `agent/created` 时 `select` 覆盖钉路：`subagent/descriptor`（创建时钉路）与运行路由不一致，且结果取决于 label 措辞（「评审…」前缀命中被覆盖，「…勘察」词尾不命中而保留钉路，2026-11-24 实证）。与 dispatch-protocol 共存时三选一：profile 按 id 整段覆盖 `tool-subagent-readonly` 的 `agentOptions` 为角色表同路由（推荐，descriptor 恢复一致）；把角色改成钉路路由；删掉只读角色。dispatch-protocol 的 `verify-install.mjs` 有 `route-alignment` 项逐台机器核验这条。`roles` 剩下的本职是 **spike**：走普通 `subagent`、要跑命令实测的只读 spike 没有独立 preset，沙箱收窄仍按 label 前缀在这里判定。非 dispatch-protocol 宿主仍可把 `roles` 当通用角色分档用。
 
 ### GUI 配置卡片
 
@@ -300,6 +300,7 @@ dump 里能看到相对插件路径被解析成 `file:///...` 绝对 URL，可�
 
 | 版本 | 要点 |
 |---|---|
+| `0.4.1` | 文档：写清 `roles` 与 dispatch-protocol 钉路的对齐前提——R4 命中不同路由仍会覆盖 `agentOptions` 钉路，及三种修法。 |
 | `0.4.0` | 默认路由换 stock 自带的 `deepseek-official/deepseek-flash`（不 pin effort）；注入感知白名单——无 `subagent/model-selection-policy` 时跳过注入、走 select 兜底，新装零手改 YAML。 |
 | `0.3.1` | 评审 / 复审 / 勘察角色的路由与沙箱上移到 dispatch-protocol，`roles` 职责收缩为 spike 沙箱；本插件代码不变。 |
 | `0.3.0` | 回退 pin 从 `agent/request` 迁到 `agent/created` + `agent.model.select()`；用 `tools/execute` 注入默认路由，descriptor / 首请求 / 冷恢复一致。宿主 0.2.2 起 `preStep` 先固定本步模型，`agent/request` 改路由会抛错。 |
