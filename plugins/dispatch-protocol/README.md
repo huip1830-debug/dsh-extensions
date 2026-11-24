@@ -157,12 +157,12 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 评审 / 复审 / 勘察的「只读」与「低成本路由」有三层独立保障，任一层失效其余仍在：
 
 - **工具面**：`cordis.patch.yml` 声明 agent preset `dispatch-readonly`——`dsh-tool-fs` 的 `write` / `edit` 关闭、不挂 `tool-pwsh` / `tool-bash`，只剩 read / readImage / grep / glob；同时注册 Host 全局委派工具 `subagent_readonly`（`provider: spawn` + `agentPreset: dispatch-readonly` + `modelSelection: false`）。评审想写文件或重跑构建时得到的是「工具不存在」，而不是沙箱拒绝。
-- **路由面**：`tool-subagent-readonly` 带 `agentOptions`，子代理路由在**创建时**钉死——`subagent/descriptor`、首请求、冷恢复三者一致，adapter 预检在委派调用时就报错，且不经会话白名单。默认路由是 stock 自带的 `deepseek-official/deepseek-flash`，不 pin effort。换路由要在 profile 层按 id 整段覆盖 `tool-subagent-readonly`。
+- **路由面**：`tool-subagent-readonly` 带 `agentOptions`，子代理路由在**创建时**钉死——`subagent/descriptor`、首请求、冷恢复三者一致，adapter 预检在委派调用时就报错，且不经会话白名单。默认路由是 stock 自带的 `deepseek-official/deepseek-flash`，不 pin effort。换路由要在 profile 层按 id 整段覆盖 `tool-subagent-readonly`，并与 model-pin 的 roles 表对齐（交互与修法见「已知坑」）。
 - **沙箱面**：`readonlySandbox` 机制按子会话的 preset 记录（`header.agentPreset` / `agent-preset/selected` 事件）把命中角色的沙箱收窄为 `read-only`——`agent/created` 时追加一条 `sandbox/mode` 事件，幂等共存、监听顺序无关。
 - **谁必须走它**：评审、复审、勘察一律用 `subagent_readonly` 派发。**spike 例外**：只读 spike 要真跑命令实测环境，不能用这个无 shell 的工具，仍走普通 `subagent`，其沙箱收窄由 model-pin 的角色表按 label 前缀提供。
 - **派发方职责**：评审组合没有 shell，读不到主控运行时之外的东西——本批 diff 与集成命令输出由派发方先落盘到 `dispatch/` 再交评审读取。
 - **成本**：该工具常驻所有会话（约数百 token/请求），是本版显式接受的取舍。
-- **安装后验证**：重启 DSH → 新会话派一个「只读评审：…」任务，确认 ① 子代理工具列表里没有 write / edit / pwsh；② `list_agents` 能看到它；③ 尝试写文件时得到「工具不存在」；④ `agent-preset/selected` = `dispatch-readonly`、`subagent/descriptor.agentModel` = 钉死路由、`sandbox/mode` 末态为 `read-only`；⑤ `verify-install.mjs` 的 `readonly-tool` 项 PASS。
+- **安装后验证**：重启 DSH → 新会话派一个「只读评审：…」任务，确认 ① 子代理工具列表里没有 write / edit / pwsh；② `list_agents` 能看到它；③ 尝试写文件时得到「工具不存在」；④ `agent-preset/selected` = `dispatch-readonly`、`subagent/descriptor.agentModel` = 钉死路由、`sandbox/mode` 末态为 `read-only`；⑤ `verify-install.mjs` 的 `readonly-tool` 与 `route-alignment` 项 PASS。
 
 ## 配置
 
@@ -226,7 +226,7 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 - **升级工具依赖宿主工具面**：`ctx.tools.register` 不存在时工具静默缺席，模型只能请用户点 dock 或输入 `/dispatch full`。
 - **无会话 / 会话未就绪时不显示控件**：该槽要求会话已打开且输入态就绪——还没选 / 建会话、会话打开中、打开失败时整行不渲染，属预期；空白新会话也算就绪；`/dispatch` 在这些状态下始终可用。
 - **profile 插件不支持热加载**：装完必须重启 DSH；`dsh plugin update` 失败可能留下半残目录（被打开的子目录进入 delete-pending），只能重启 Windows 清——先完全退出 DSH 再 update。
-- **钉死路由与兜底 pin 是两份事实**：评审角色的路由在 `cordis.patch.yml` 的 `agentOptions`（跟随仓库发布），其余子代理的默认路由在 model-pin 的 pin（插件页可改）。换低成本模型时两处都要动；两处不一致不会报错，只会让评审角色留在旧路由。
+- **钉死路由与 model-pin 角色表是两份事实**：评审/勘察角色的路由在 `tool-subagent-readonly` 的 `agentOptions`（创建时钉死），但 model-pin 的 roles 表按 label 前缀命中**不同路由**时仍会在 `agent/created` 时 select 覆盖钉路——`subagent/descriptor` 与运行路由不一致，且结果取决于 label 措辞（「评审…」前缀命中被覆盖，「…勘察」词尾不命中而保留钉路，2026-11-24 实证）。三选一修法：profile 按 id 整段覆盖 `tool-subagent-readonly` 的 `agentOptions` 为角色表同路由（config 整体替换，字段抄全）；把角色改成钉路路由；删掉只读角色（roles 只留 spike 沙箱职责）。换低成本模型时两处都要动；`verify-install.mjs` 的 `route-alignment` 项逐台机器核验一致性。
 
 ## 回滚
 
@@ -239,6 +239,7 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 
 | 版本 | 要点 |
 |---|---|
+| `0.23.2` | `verify-install.mjs` 新增 `route-alignment` 检查：model-pin 只读角色表与 `agentOptions` 钉路不一致即 FAIL 并给修法；README 修正两处「两份事实」交互的准确语义（R4 覆盖条件与漂移后果）。 |
 | `0.23.1` | 修复：只读评审 preset 给 `tool-fs-search` 补必填的 `sampleOverCapGlobResults: false`；此前缺配导致子代理启动时报 `invalid config`，评审里的 glob/grep 不可用。 |
 | `0.23.0` | 只读评审默认路由换 stock 自带的 `deepseek-official/deepseek-flash`，不 pin effort；`verify-install.mjs` 增加 `whitelist-mode` 提示项。 |
 | `0.22.0` | `subagent_readonly` 用 `agentOptions` 在创建时钉死路由；新增 `readonlySandbox`，按子会话 preset 收窄沙箱，替代 label 前缀判定。 |

@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import * as plugin from './plugin.mjs'
+import { assessRouteAlignment } from './scripts/verify-install.mjs'
 import { resolveConfig, AUTO_TEXT, DEFAULT_FOOTER, DEFAULT_RULES, BUSINESS_FOOTER, BUSINESS_RULES, resolveRulesPreset } from './lib/config.mjs'
 import {
   DEFAULT_PROJECT_SWITCH, PROJECT_MODES, readProjectMode, readProjectPolicy, writeProjectMode,
@@ -3414,6 +3415,93 @@ function settleNotice(childId) {
     },
   }
 }
+
+// ---------------------------------------------------------------------------
+// 0.23.2 route-alignment：verify-install 的钉路一致性判定（纯函数，行级 yml）
+// ---------------------------------------------------------------------------
+
+const BUNDLE_YML = [
+  '- insert:',
+  '    - id: tool-subagent-readonly',
+  "      name: '@deepseek-ai/dsh-tool-subagent'",
+  '      config:',
+  '        provider: spawn',
+  '        toolName: subagent_readonly',
+  '        agentPreset: dispatch-readonly',
+  '        modelSelection: false',
+  '        agentOptions:',
+  '          provider: deepseek-official',
+  '          model: deepseek-flash',
+]
+
+function profileYmlWithModelPin({ roles = [], direct = ['provider: opencode-go', 'model: deepseek-v4.1-flash', 'reasoningEffort: high'], override = null } = {}) {
+  const lines = ['- id: subagent-model-pin', '  config:']
+  if (roles.length > 0) {
+    lines.push('    roles:')
+    for (const role of roles) {
+      lines.push(`      - match: ${role.match}`)
+      for (const field of role.fields ?? []) lines.push(`        ${field}`)
+    }
+  }
+  for (const field of direct) lines.push(`    ${field}`)
+  if (override !== null) {
+    lines.push('- id: tool-subagent-readonly', "  name: '@deepseek-ai/dsh-tool-subagent'", '  config:', '    provider: spawn', '    toolName: subagent_readonly', '    agentPreset: dispatch-readonly', '    modelSelection: false')
+    if (override !== 'no-agentOptions') {
+      lines.push('    agentOptions:')
+      for (const field of override) lines.push(`      ${field}`)
+    }
+  }
+  return lines
+}
+
+test('route-alignment: profile 未覆盖 model-pin → no-model-pin', () => {
+  const { status } = assessRouteAlignment(['- id: other-plugin', '  config: {}'], BUNDLE_YML)
+  assert.equal(status, 'no-model-pin')
+})
+
+test('route-alignment: roles 表无只读角色 → no-roles（执行角色不算漂移面）', () => {
+  const lines = profileYmlWithModelPin({ roles: [{ match: 'Implement', fields: ['provider: opencode-go', 'model: deepseek-v4.1-flash'] }] })
+  const { status } = assessRouteAlignment(lines, BUNDLE_YML)
+  assert.equal(status, 'no-roles')
+})
+
+test('route-alignment: 只读角色与 bundle 钉路不同 → drift（0.23.0 后本机的真实形态）', () => {
+  const lines = profileYmlWithModelPin({
+    roles: [{ match: '评审', fields: ['provider: opencode-go', 'model: deepseek-v4.1-flash', 'sandbox: read-only'] }],
+  })
+  const { status, drifts } = assessRouteAlignment(lines, BUNDLE_YML)
+  assert.equal(status, 'drift')
+  assert.equal(drifts.length, 1)
+  assert.equal(drifts[0].match, '评审')
+})
+
+test('route-alignment: profile 覆盖钉路与角色同路由（含 effort 继承）→ aligned', () => {
+  const lines = profileYmlWithModelPin({
+    roles: [{ match: '评审', fields: ['provider: opencode-go', 'model: deepseek-v4.1-flash', 'sandbox: read-only'] }],
+    override: ['provider: opencode-go', 'model: deepseek-v4.1-flash', 'reasoningEffort: high'],
+  })
+  const { status, pin } = assessRouteAlignment(lines, BUNDLE_YML)
+  assert.equal(status, 'aligned')
+  assert.equal(pin.provider, 'opencode-go')
+})
+
+test('route-alignment: 覆盖行缺 agentOptions 且有只读角色 → pin-missing', () => {
+  const lines = profileYmlWithModelPin({
+    roles: [{ match: '勘察', fields: ['provider: opencode-go', 'model: deepseek-v4.1-flash'] }],
+    override: 'no-agentOptions',
+  })
+  const { status } = assessRouteAlignment(lines, BUNDLE_YML)
+  assert.equal(status, 'pin-missing')
+})
+
+test('route-alignment: 角色自带 effort 与默认不同且不等于钉路 → drift', () => {
+  const lines = profileYmlWithModelPin({
+    roles: [{ match: '只读', fields: ['provider: opencode-go', 'model: deepseek-v4.1-flash', 'reasoningEffort: low'] }],
+    override: ['provider: opencode-go', 'model: deepseek-v4.1-flash', 'reasoningEffort: high'],
+  })
+  const { status } = assessRouteAlignment(lines, BUNDLE_YML)
+  assert.equal(status, 'drift')
+})
 
 /**
  * 0.14.0: invoke the registered `/dispatch` command's handler.

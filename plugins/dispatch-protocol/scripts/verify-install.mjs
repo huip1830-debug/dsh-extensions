@@ -20,8 +20,9 @@
  *
  * 输出：每行 [PASS] <name> — <detail> 或 [FAIL] <name> — <detail>；
  *       检查项固定为 installed-dir / version / files / profile-roles /
- *       readonly-tool / whitelist-mode（0.23.0 起：profile-roles 缺失降为提示，
- *       whitelist-mode 恒 PASS 只报告注入式/兜底式）。
+ *       readonly-tool / whitelist-mode / route-alignment（0.23.0 起：profile-roles
+ *       缺失降为提示，whitelist-mode 恒 PASS 只报告注入式/兜底式；0.23.2 起
+ *       route-alignment 断言 model-pin 只读角色表与 agentOptions 钉路一致）。
  *       任一 FAIL → 进程退出码 1；全 PASS → 退出码 0。
  *
  * 约束：纯只读脚本，只读文件与目录，不写任何文件（无临时文件、无日志）。
@@ -386,6 +387,143 @@ function checkWhitelistMode(ymlPath) {
   );
 }
 
+// ---- 0.23.2 钉路一致性（route-alignment） -----------------------------------
+// 问题：评审/勘察角色的路由由 tool-subagent-readonly 的 agentOptions 在创建时
+// 钉死；model-pin 的 roles 表（R4）若把只读前缀（只读/勘察/评审…）指向另一条
+// 路由，会在 agent/created 时 select 覆盖钉路——descriptor 与运行路由不一致，
+// 且路由结果取决于 label 措辞（前缀命中才覆盖）。本项在两份 yml 上行级比对，
+// 让漂移在任何机器上可见。实证：2026-11-24 本机「评审…」被覆盖、「…勘察」
+// 词尾不命中而保留，同批派发两套路由。
+
+/** 只读角色前缀（小写）：roles 表里这些 match 会作用于 subagent_readonly 子代理。 */
+export const READONLY_ROLE_PREFIXES = ['只读', '勘察', '评审', '复审', 'survey', 'review', 'recon']
+
+// 从块体里取某个嵌套段（如 agentOptions:）内的 provider/model/reasoningEffort。
+// 段从 `key:` 行之后开始，到第一个缩进 <= key 行缩进的非空非注释行为止。
+// 键缺失返回 null（区别于「键在但值为空」——行级解析不区分 null 值）。
+export function extractNestedRoute(body, key) {
+  for (let i = 0; i < body.length; i += 1) {
+    const head = body[i].match(new RegExp(`^([ \\t]*)${key}:[ \\t]*(?:#.*)?$`))
+    if (!head) continue
+    const indent = head[1].length
+    const route = {}
+    for (let j = i + 1; j < body.length; j += 1) {
+      const s = body[j].trim()
+      if (s === '' || s.startsWith('#')) continue
+      if (INDENT_OF(body[j]) <= indent) break
+      const m = body[j].match(/^[ \t]*(provider|model|reasoningEffort):[ \t]*(\S+?)[ \t]*$/)
+      if (m && route[m[1]] === undefined) route[m[1]] = m[2].replace(/^['"]|['"]$/g, '')
+    }
+    return route
+  }
+  return null
+}
+
+// 取块体的「直接」路由字段：同键多行时取缩进最小者（嵌套段里的同名键更深）。
+export function extractDirectRoute(body) {
+  const best = {}
+  for (const line of body) {
+    const m = line.match(/^([ \t]*)(provider|model|reasoningEffort):[ \t]*(\S+?)[ \t]*$/)
+    if (!m) continue
+    const indent = m[1].length
+    if (best[m[2]] === undefined || indent < best[m[2]].indent) {
+      best[m[2]] = { indent, value: m[3].replace(/^['"]|['"]$/g, '') }
+    }
+  }
+  const route = {}
+  for (const key of ['provider', 'model', 'reasoningEffort']) {
+    if (best[key] !== undefined) route[key] = best[key].value
+  }
+  return route
+}
+
+// 取单个 roles 块的路由：块内同名字段只出现一次，直接逐行取。
+export function extractRoleRoute(blockBody) {
+  const route = {}
+  for (const line of blockBody) {
+    const m = line.replace(/\s#.*$/, '').match(/^[ \t]*(provider|model|reasoningEffort):[ \t]*(\S+?)[ \t]*$/)
+    if (m && route[m[1]] === undefined) route[m[1]] = m[2].replace(/^['"]|['"]$/g, '')
+  }
+  return route
+}
+
+const normEffort = (route) => route.reasoningEffort === undefined || route.reasoningEffort === '' ? undefined : route.reasoningEffort
+
+/**
+ * 比对 profile 的 model-pin 只读角色表与 tool-subagent-readonly 的有效钉路。
+ * 纯函数：输入两份 yml 的行数组，返回判定；不读盘、不打印。
+ * @returns `{ status, pin, drifts }`：status ∈ no-model-pin | no-roles |
+ *   pin-missing | aligned | drift；drifts 元素 `{ match, line, route }`。
+ */
+export function assessRouteAlignment(profileLines, bundleLines) {
+  const pin = (() => {
+    const overrideBlock = findInsertBlock(profileLines, 'tool-subagent-readonly')
+    if (overrideBlock !== null) {
+      const route = extractNestedRoute(overrideBlock.body, 'agentOptions')
+      return route === null ? null : { ...route, source: 'profile 覆盖' }
+    }
+    const bundleBlock = findInsertBlock(bundleLines, 'tool-subagent-readonly')
+    if (bundleBlock === null) return undefined // 安装副本缺行：readonly-tool 项已 FAIL
+    return { ...extractNestedRoute(bundleBlock.body, 'agentOptions'), source: 'bundle 默认' }
+  })()
+
+  const modelPin = findInsertBlock(profileLines, 'subagent-model-pin')
+  if (modelPin === null) return { status: 'no-model-pin', pin, drifts: [] }
+
+  const segment = findRolesSegment(profileLines)
+  const blocks = segment === null ? [] : splitMatchBlocks(profileLines, segment)
+  const defaultEffort = normEffort(extractDirectRoute(modelPin.body))
+  const readonlyRoles = blocks.filter((b) => READONLY_ROLE_PREFIXES.includes(b.match.trim().toLowerCase()))
+  if (readonlyRoles.length === 0) return { status: 'no-roles', pin, drifts: [] }
+  if (pin === null) return { status: 'pin-missing', pin, drifts: [] }
+  if (pin === undefined) return { status: 'no-roles', pin, drifts: [] } // 钉路缺失另行报告，不在本项重复 FAIL
+
+  const drifts = readonlyRoles.filter((b) => {
+    const route = extractRoleRoute(b.body)
+    // 角色的有效 effort = 自己的 ?? model-pin 默认；与钉路 effort 对齐才算一致。
+    const roleEffort = normEffort(route) ?? defaultEffort
+    return route.provider !== pin.provider || route.model !== pin.model || roleEffort !== normEffort(pin)
+  }).map((b) => ({ match: b.match, line: b.line, route: extractRoleRoute(b.body) }))
+  return { status: drifts.length === 0 ? 'aligned' : 'drift', pin, drifts }
+}
+
+const routeTextOf = (route) => `${route.provider ?? '?'}/${route.model ?? '?'}${normEffort(route) === undefined ? '' : ` effort=${normEffort(route)}`}`
+
+function checkRouteAlignment(installedDir, ymlPath) {
+  let profileLines
+  let bundleLines
+  try {
+    profileLines = fs.readFileSync(ymlPath, 'utf8').split(/\r?\n/)
+    bundleLines = fs.readFileSync(path.join(installedDir, 'cordis.patch.yml'), 'utf8').split(/\r?\n/)
+  } catch (error) {
+    fail('route-alignment', `无法读取 yml：${error.message}`)
+    return
+  }
+  const { status, pin, drifts } = assessRouteAlignment(profileLines, bundleLines)
+  if (status === 'no-model-pin') {
+    pass('route-alignment', 'profile 未覆盖 model-pin：只读角色路由由 agentOptions 钉死，无 roles 漂移面')
+    return
+  }
+  if (status === 'no-roles') {
+    pass('route-alignment', `roles 表无只读角色：评审/勘察走 ${pin === null || pin === undefined ? '继承路由（钉路缺失，见 readonly-tool 项）' : `agentOptions 钉路 ${routeTextOf(pin)}（${pin.source}）`}`)
+    return
+  }
+  if (status === 'pin-missing') {
+    fail('route-alignment', 'profile 覆盖了 tool-subagent-readonly 但缺 agentOptions：钉路被移除，只读角色退回 model-pin 角色表（descriptor 不一致的老问题回归）')
+    return
+  }
+  if (status === 'aligned') {
+    pass('route-alignment', `只读角色表与钉路一致：${routeTextOf(pin)}（${pin.source}）`)
+    return
+  }
+  for (const d of drifts) {
+    fail(
+      'route-alignment',
+      `"- match: ${d.match}"（L${d.line}）= ${routeTextOf(d.route)} ≠ 钉路 ${routeTextOf(pin)}（${pin.source}）：该角色会在 agent/created 时 select 覆盖钉路，descriptor 与运行路由不一致。修法：profile 按 id 整段覆盖 tool-subagent-readonly 的 agentOptions 为该路由，或把角色改为钉路路由，或删除该角色（roles 只留 spike 沙箱职责）`,
+    )
+  }
+}
+
 // ---- 主流程 -----------------------------------------------------------------
 
 function main() {
@@ -410,6 +548,7 @@ function main() {
   checkProfileRoles(ymlPath);
   checkReadonlyTool(installedDir);
   checkWhitelistMode(ymlPath);
+  checkRouteAlignment(installedDir, ymlPath);
 
   return results.every((r) => r.ok) ? 0 : 1;
 }
