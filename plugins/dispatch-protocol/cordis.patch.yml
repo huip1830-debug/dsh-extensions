@@ -62,6 +62,10 @@
               edit: false
           - id: tool-fs-search
             name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              # 必填且无默认值（宿主 z.boolean().required()）：缺了会在子代理启动时
+              # 报 invalid config，glob/grep 整体不可用。false = 保留按修改时间排序的前部。
+              sampleOverCapGlobResults: false
           - id: compaction
             name: cordis:group
             group: true

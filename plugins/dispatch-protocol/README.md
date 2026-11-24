@@ -239,6 +239,7 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 
 | 版本 | 要点 |
 |---|---|
+| `0.23.1` | 修复：只读评审 preset 给 `tool-fs-search` 补必填的 `sampleOverCapGlobResults: false`；此前缺配导致子代理启动时报 `invalid config`，评审里的 glob/grep 不可用。 |
 | `0.23.0` | 只读评审默认路由换 stock 自带的 `deepseek-official/deepseek-flash`，不 pin effort；`verify-install.mjs` 增加 `whitelist-mode` 提示项。 |
 | `0.22.0` | `subagent_readonly` 用 `agentOptions` 在创建时钉死路由；新增 `readonlySandbox`，按子会话 preset 收窄沙箱，替代 label 前缀判定。 |
 | `0.21.0` | 新增只读评审 preset 与 `subagent_readonly` 工具：没有写工具、没有 shell；纪律把评审 / 复审 / 勘察绑定到该工具。 |

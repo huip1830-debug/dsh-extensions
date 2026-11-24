@@ -3150,6 +3150,12 @@ test('0.21.0/0.22.0: cordis.patch.yml declares the readonly preset and its deleg
   assert.doesNotMatch(presetBlock, /tool-pwsh|tool-bash/,
     'the readonly preset carries no shell — build/test re-runs are impossible at the tool surface')
   assert.match(presetBlock, /tool-fs-search/, 'grep/glob stay available for read-only review')
+  // 0.23.1 回归：sampleOverCapGlobResults 是宿主必填项（z.boolean().required()，
+  // 无默认值）；漏配会让只读子代理启动时报 invalid config，glob/grep 整体不可用。
+  const searchEntry = presetBlock.match(/- id: tool-fs-search[\s\S]*?(?=\n\s*- id: )/)
+  assert.ok(searchEntry, 'the fs-search entry is found inside the preset block')
+  assert.match(searchEntry[0], /^\s*sampleOverCapGlobResults: (true|false)\s*$/m,
+    'fs-search carries the required sampleOverCapGlobResults boolean')
   assert.doesNotMatch(presetBlock, /tool-fs[\s\S]*?read: false/,
     'read stays available: only write/edit are switched off')
 
