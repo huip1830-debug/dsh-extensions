@@ -1,6 +1,6 @@
 # dsh-extensions
 
-本机 DeepSeek Harness（DSH）的工具链扩展集合。**与任何业务项目无关**：多个项目共用同一套扩展，插件按 DSH profile 安装，跟着开发机走。
+开源的 DeepSeek Harness（DSH）插件集合。**与任何业务项目无关**：多个项目共用同一套插件，按 DSH profile 安装到任意用户的机器上；默认值必须 stock 可用，本机定制留在 profile 层。
 
 ## 目录约定
 
