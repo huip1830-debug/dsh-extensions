@@ -24,24 +24,19 @@ CLI 等价：
 dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensions.git#path:/plugins/subagent-model-pin"
 ```
 
-装完在插件页启用，重启 DSH。升级 = 同地址重装（插件页会提供"更新"）。卸载 = 插件页移除（或 `dsh plugin --profile desktop remove subagent-model-pin`）。
+装完在插件页启用，**重启 DSH**（profile 层插件不支持热加载），**新开会话**即可用——0.4.0 起默认路由是 stock 安装自带的 `deepseek-official/deepseek-flash`，不配白名单也能用（注入自动退回 `agent/created` 兜底，见配置项 `injectDelegationDefaults` 一行）。升级 = 同地址重装（插件页会提供"更新"）。卸载 = 插件页移除（或 `dsh plugin --profile desktop remove subagent-model-pin`）。
 
-装完必须：
-
-1. **重启 DSH**（profile 层插件不支持热加载）；
-2. **新开会话**再验证（`allowedModels` 白名单按会话冻结，旧会话不受新配置影响）。
-
-本机参数与 profile 绑定，不进仓库；bundle 方式的默认值在 `cordis.patch.yml`，要改就在 profile 的 `cordis.patch.yml` 里用同 id 覆盖（`config` 整体替换，不深合并）。
+进阶（都是可选）：换 pin 路由用插件页配置卡（见「GUI 配置」）；`roles` 角色表与 profile 覆盖只能手写 YAML——在 profile 的 `cordis.patch.yml` 里用同 id 覆盖（`config` 整体替换，不深合并——手写 YAML 时务必抄全字段）。本机参数与 profile 绑定，不进仓库。
 
 ## 配置项
 
 | 键 | 必填 | 界面可改 | 说明 |
 |----|------|----------|------|
-| `provider` | 是 | ✅ | pin 到的 provider id |
-| `model` | 是 | ✅ | pin 到的模型 id |
-| `reasoningEffort` | 否 | ✅ | pin 时一并写入的 effort；换路由时会丢掉继承来的 effort，避免落在新模型不支持的档位 |
+| `provider` | 是 | ✅ | pin 到的 provider id（bundle 默认 `deepseek-official`，stock 自带） |
+| `model` | 是 | ✅ | pin 到的模型 id（bundle 默认 `deepseek-flash`） |
+| `reasoningEffort` | 否 | ✅ | pin 时一并写入的 effort（bundle 默认不 pin——stock 模型无 effort 档位）；换路由时会丢掉继承来的 effort，避免落在新模型不支持的档位 |
 | `debug` | 否 | ✅ | `true` 时写 `%TEMP%\subagent-model-pin.log`（apply / agent/created / select 决策前后，含 `label=`、`explicit=`、`cur=`、`parent=`）；路径可用环境变量 `SUBAGENT_MODEL_PIN_LOG` 覆盖 |
-| `injectDelegationDefaults` | 否 | — | 默认 `true`。在 `tools/execute` 阶段把默认路由写进委派参数，使 descriptor / 首请求 / 冷恢复三者一致；设 `false` 只保留 `agent/created` 时 select 兜底 |
+| `injectDelegationDefaults` | 否 | — | 默认 `true`。在 `tools/execute` 阶段把默认路由写进委派参数，使 descriptor / 首请求 / 冷恢复三者一致；设 `false` 只保留 `agent/created` 时 select 兜底。0.4.0 起注入感知白名单：调用会话没有 `subagent/model-selection-policy`（stock 默认关）时自动跳过注入、走 select 兜底——注入等于显式选择，无策略时委派工具只放行父路由，硬注入会被直接拒绝 |
 | `force` | 否 | — | `true` = 一律覆盖，连显式选择也 pin（回到 v5 之前的"强制"行为） |
 | `depth` | 否 | — | 只处理委派深度等于该值的子 agent |
 | `roles` | 否 | — | 按委派 `description` 前缀分档路由的数组；每项含 `match`（前缀，大小写不敏感）、`provider`、`model`，可选 `reasoningEffort`、`sandbox`。首个命中生效；未命中回落到 `provider`/`model`；委派调用里显式传的路由仍然优先。**注意前缀按字面匹配**：中文 description（如「评审后端改动」）不会命中 `Survey`/`Review` 这类英文前缀——三样本评审（`docs/reviews/2026-10-23-dispatch-pipeline-review.md` G8）里全部评审/勘察子代理因此以 `danger-full-access` 运行。用中文 label 的派发方应在角色表里配对应中文前缀（如 `评审`/`勘察`/`只读`），或约定英文 label |
@@ -76,7 +71,7 @@ roles:
 
 生效语义：
 
-- **保存立即写入** profile 的 `cordis.patch.yml`（settings 传输落盘，带 revision 冲突检测）；pin 路由的改动作用于**此后的委派**，但白名单按会话冻结——**需新开会话**，且新路由必须在「允许 Agent 为子智能体选择模型」的白名单里，否则注入式委派会被拒。
+- **保存立即写入** profile 的 `cordis.patch.yml`（settings 传输落盘，带 revision 冲突检测）；pin 路由的改动作用于**此后的委派**，但白名单按会话冻结——**需新开会话**。0.4.0 起：未启用白名单的会话自动走 `agent/created` 兜底（可用，descriptor 回到继承路由的旧语义）；启用了白名单的会话要走注入式，新路由必须在「允许 Agent 为子智能体选择模型」的白名单里，否则注入式委派会被拒。
 - **「恢复 YAML 配置」按钮**：对四个字段发 `unset`。注意 Host 的语义是「重置 = 显式钉住当前 YAML 值」（settings 的 unset 遇 inherited 值会写成显式拷贝），所以重置后立刻等于 YAML，但**之后再改 YAML 的这四个字段不会生效**——需到界面再点一次重置，或手工删 profile patch 里该行的 config。
 - 摘要行在插件页直接显示当前生效路由；存在界面覆盖时带「界面覆盖」徽标。
 
@@ -349,6 +344,7 @@ dump 里能看到相对插件路径被解析成 `file:///...` 绝对 URL，可�
 | 10 | 插件页配置卡片（0.2.0） | 已验证 | schemastery `.volatile()` 四字段 + 手写 `client.js` 注册 `plugins.bundle.config`；settings 写盘只含 volatile 子树，roles 等不可能被界面覆盖 |
 | 11 | 回退 pin 从 `agent/request` 中间件迁到 `agent/created` 时 `agent.model.select()`（0.3.0） | 离线 34 用例全绿 | 0.2.2 起 `preStep` 先固定本步模型，`agent/request` 返回不同路由会直接抛错；`select()` 追加持久 `model/selection`，created 早于首个 `preStep` |
 | 12 | 评审角色路由/沙箱上移 dispatch-protocol 0.22.0（0.3.1，文档-only） | roles 职责收缩为 spike 沙箱 | `agentOptions` 结构钉死（创建时一致、不经白名单）+ `agent-preset/selected` 结构键取代 label 字面前缀；本插件代码不变 |
+| 13 | 注入感知白名单 + stock 默认路由（0.4.0） | 新装零手改 YAML | 无 `subagent/model-selection-policy` 时注入会被当显式选择拒绝 → 跳过注入走 select 兜底；默认路由换 stock 自带的 `deepseek-official/deepseek-flash`（不 pin effort），离线 36 用例全绿 |
 
 ### 实测记录（2026-10-21）
 

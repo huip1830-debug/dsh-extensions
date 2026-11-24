@@ -3154,14 +3154,17 @@ test('0.21.0/0.22.0: cordis.patch.yml declares the readonly preset and its deleg
     'read stays available: only write/edit are switched off')
 
   // 0.22.0 路由面：agentOptions 在工具实例上钉死（创建时一致、adapter 预检、
-  // 不经会话白名单），评审角色的路由不再依赖 label 前缀命中。
+  // 不经会话白名单），评审角色的路由不再依赖 label 前缀命中。0.23.0：默认值
+  // 必须是 stock 可用的 deepseek-official/deepseek-flash，且不 pin effort
+  // （stock 模型无 effort 档位）；机器专属路由走 profile 覆盖。
   const toolBlock = lines.slice(end).join('\n')
   assert.match(toolBlock, /^\s*agentOptions:\s*$/m, 'the tool instance pins the child route at creation')
   for (const line of [
-    /^\s*provider: opencode-go\s*$/m,
-    /^\s*model: deepseek-v4\.1-flash\s*$/m,
-    /^\s*reasoningEffort: high\s*$/m,
+    /^\s*provider: deepseek-official\s*$/m,
+    /^\s*model: deepseek-flash\s*$/m,
   ]) assert.match(toolBlock, line)
+  assert.doesNotMatch(toolBlock, /reasoningEffort/,
+    '0.23.0: the stock default pins no effort — deepseek-flash declares no effort tiers')
 })
 
 test('0.21.0/0.22.0: review and recon are bound to subagent_readonly in the default text', () => {

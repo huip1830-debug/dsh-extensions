@@ -19,7 +19,9 @@
  *   --profile  指定 profile 名（默认 desktop），即 ~/.dsh/profiles/<name>/
  *
  * 输出：每行 [PASS] <name> — <detail> 或 [FAIL] <name> — <detail>；
- *       检查项固定为 installed-dir / version / files / profile-roles / readonly-tool。
+ *       检查项固定为 installed-dir / version / files / profile-roles /
+ *       readonly-tool / whitelist-mode（0.23.0 起：profile-roles 缺失降为提示，
+ *       whitelist-mode 恒 PASS 只报告注入式/兜底式）。
  *       任一 FAIL → 进程退出码 1；全 PASS → 退出码 0。
  *
  * 约束：纯只读脚本，只读文件与目录，不写任何文件（无临时文件、无日志）。
@@ -257,7 +259,9 @@ function checkProfileRoles(ymlPath) {
   }
   const segment = findRolesSegment(lines);
   if (!segment) {
-    fail('profile-roles', `未找到 roles: 段（${ymlPath}）`);
+    // 0.23.0：roles 表只服务 spike 沙箱（评审角色已由 readonlySandbox +
+    // agentOptions 结构覆盖），缺失是开源默认安装的合法形态——降为提示。
+    pass('profile-roles', '未配置 roles 表：spike 沙箱不收窄（评审角色已由 readonlySandbox + agentOptions 结构覆盖）');
     return;
   }
   const blocks = splitMatchBlocks(lines, segment);
@@ -340,10 +344,11 @@ function checkReadonlyTool(installedDir) {
     ['agentPreset', 'dispatch-readonly'],
     // 0.22.0：路由在工具实例上钉死；缺了 agentOptions 字段，评审角色的路由就
     // 退回继承 + model-pin 兜底（descriptor 不一致的老问题回归）。
+    // 0.23.0：默认路由是 stock 可用的 deepseek-official/deepseek-flash，不 pin
+    // effort；机器专属路由属于 profile 覆盖，不在安装副本的断言面内。
     ['agentOptions', ''],
-    ['provider', 'opencode-go'],
-    ['model', 'deepseek-v4\\.1-flash'],
-    ['reasoningEffort', 'high'],
+    ['provider', 'deepseek-official'],
+    ['model', 'deepseek-flash'],
   ]) {
     if (!findInsertField(tool.body, key, value)) missing.push(value === '' ? key : `${key}: ${value}`);
   }
@@ -353,7 +358,31 @@ function checkReadonlyTool(installedDir) {
   }
   pass(
     'readonly-tool',
-    `preset-dispatch-readonly（L${preset.line}）+ tool-subagent-readonly（L${tool.line}）含 provider: spawn / toolName: subagent_readonly / agentPreset: dispatch-readonly / agentOptions: opencode-go+deepseek-v4.1-flash+high`,
+    `preset-dispatch-readonly（L${preset.line}）+ tool-subagent-readonly（L${tool.line}）含 provider: spawn / toolName: subagent_readonly / agentPreset: dispatch-readonly / agentOptions: deepseek-official+deepseek-flash`,
+  );
+}
+
+// ---- 0.23.0 白名单模式提示 --------------------------------------------------
+// model-pin 0.4.0 起注入感知白名单：profile 启用了
+// subagent-model-selection-settings（enabled: true）→ 注入式（descriptor /
+// 首请求 / 冷恢复一致）；否则兜底式（agent/created select）。两种模式都能用，
+// 本项恒 PASS，只把不可见的语义差异变成可见。
+
+function checkWhitelistMode(ymlPath) {
+  let lines;
+  try {
+    lines = fs.readFileSync(ymlPath, 'utf8').split(/\r?\n/);
+  } catch {
+    fail('whitelist-mode', `无法读取 ${ymlPath}`);
+    return;
+  }
+  const row = findInsertBlock(lines, 'subagent-model-selection-settings');
+  const enabled = row !== null && findInsertField(row.body, 'enabled', 'true');
+  pass(
+    'whitelist-mode',
+    enabled
+      ? `注入式：白名单已启用（L${row.line}），model-pin 走 tools/execute 注入`
+      : '兜底式：无白名单策略，model-pin 跳过注入、走 agent/created select（可用；要 descriptor 一致就在「子智能体」设置页启用白名单）',
   );
 }
 
@@ -380,6 +409,7 @@ function main() {
   checkFiles(installedDir);
   checkProfileRoles(ymlPath);
   checkReadonlyTool(installedDir);
+  checkWhitelistMode(ymlPath);
 
   return results.every((r) => r.ok) ? 0 : 1;
 }

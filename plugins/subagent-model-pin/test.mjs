@@ -138,9 +138,20 @@ function createHarnessWith(config, { providers = [], llm = true } = {}) {
     sessions,
     session,
 
-    /** Run one tool call through the `tools/execute` listeners; returns its final arguments. */
-    async execute(name, args) {
+    /**
+     * Run one tool call through the `tools/execute` listeners; returns its
+     * final arguments. `policy: false` simulates a stock session with no
+     * recorded model-selection policy (0.4.0: the injection must step aside).
+     */
+    async execute(name, args, { policy = true } = {}) {
       const exec = { name, arguments: args }
+      if (policy) {
+        exec.agent = {
+          session: {
+            snapshotEvents: () => [{ type: 'subagent/model-selection-policy', data: { allowedModels: [] } }],
+          },
+        }
+      }
       for (const listener of rootEvents.get('tools/execute') ?? []) {
         await listener(exec, async () => 'executed')
       }
@@ -281,6 +292,29 @@ test('injectDelegationDefaults:false leaves delegation arguments untouched', asy
   const h = createHarness({ injectDelegationDefaults: false })
   const args = await h.execute('subagent', { description: 'plain', prompt: 'p' })
   assert.deepEqual(args, { description: 'plain', prompt: 'p' })
+})
+
+test('0.4.0: injection is skipped when the calling session has no model-selection policy', async () => {
+  // Stock installs keep the whitelist disabled: no policy event, so an injected
+  // route would be rejected by the delegation tool as an out-of-policy explicit
+  // selection. The injection steps aside; the created-time select() still pins
+  // the child, so availability never depends on the whitelist.
+  const h = createHarness()
+  const args = await h.execute('subagent', { description: 'plain', prompt: 'p' }, { policy: false })
+  assert.deepEqual(args, { description: 'plain', prompt: 'p' })
+
+  h.sessions.set('parent', h.session({ events: delegationCall('plain'), parentRoute: PARENT_ROUTE }))
+  const child = await h.createChild({ events: descriptor('plain'), options: { ...PARENT_ROUTE } })
+  assert.deepEqual(child.selections, [selection(PIN.provider, PIN.model, PIN.effort)],
+    'the created-time fallback still pins the route without a policy')
+})
+
+test('0.4.0: a recorded policy keeps the injection path', async () => {
+  const h = createHarness()
+  const args = await h.execute('subagent', { description: 'plain', prompt: 'p' }, { policy: true })
+  assert.equal(args.provider, PIN.provider)
+  assert.equal(args.model, PIN.model)
+  assert.equal(args.reasoning_effort, PIN.effort)
 })
 
 // --- behaviour matrix R1-R6 (agent/created select) ---------------------------

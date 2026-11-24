@@ -79,7 +79,9 @@
         modelSelection: false
         # 0.22.0：创建时钉死评审角色的低成本路由；要换路由在 profile 层按 id
         # 整段覆盖本行（config 整体替换，不深合并）。
+        # 0.23.0：默认值必须是 stock 安装可用的路由（本插件是开源分发）——
+        # deepseek-official 是官方 bundle 自带 provider；deepseek-flash 不声明
+        # reasoning effort 档位，所以默认不 pin effort。
         agentOptions:
-          provider: opencode-go
-          model: deepseek-v4.1-flash
-          reasoningEffort: high
+          provider: deepseek-official
+          model: deepseek-flash

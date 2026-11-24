@@ -6,9 +6,13 @@
     - id: subagent-model-pin
       name: subagent-model-pin
       config:
-        provider: opencode-go
-        model: deepseek-v4.1-flash
-        reasoningEffort: high
+        # 0.4.0：默认值必须是 stock 安装可用的路由（本插件是开源分发）。
+        # deepseek-official 是官方 bundle 自带的 provider，目录含 deepseek-flash；
+        # 该模型不声明 reasoning effort 档位，所以默认不 pin effort。
+        # 换便宜路由用插件页配置卡（volatile 四字段），或 profile 按 id 整段覆盖。
+        provider: deepseek-official
+        model: deepseek-flash
+        # reasoningEffort: high            # 可选：pin 时一并写入的 effort
         injectDelegationDefaults: true   # false = 关闭 tools/execute 注入，退回 agent/created 时 select 兜底
         debug: false                     # true 时写 %TEMP%\subagent-model-pin.log
         # roles:                           # 按委派 description 前缀分档；显式 provider/model 仍然优先

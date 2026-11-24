@@ -132,6 +132,30 @@ function readChildLabel(agent) {
 }
 
 /**
+ * Whether the calling session carries a recorded subagent model-selection
+ * policy (0.4.0).
+ *
+ * The settings plugin appends one durable `subagent/model-selection-policy`
+ * event per session when the route whitelist is enabled. Injection below
+ * equals an explicit route choice, and explicit choices are gated by that
+ * policy: without a recorded one the delegation tool permits only the parent
+ * route, so an injected pin would fail the delegation outright. The
+ * created-time `select()` bypasses the whitelist, so skipping the injection
+ * degrades descriptor consistency, never availability — this is what makes a
+ * stock install (whitelist off by default) work without hand configuration.
+ * @param agent - the calling agent on the `tools/execute` exec.
+ * @returns true when a policy event is committed on the calling session.
+ */
+function hasModelSelectionPolicy(agent) {
+  try {
+    const events = agent?.session?.snapshotEvents?.() ?? []
+    return events.some((event) => event?.type === 'subagent/model-selection-policy')
+  } catch {
+    return false
+  }
+}
+
+/**
  * Find the delegation call that produced this child and report whether it chose
  * a route explicitly.
  * @param parent - the delegating Session.
@@ -293,14 +317,23 @@ export function apply(ctx, config) {
           && args !== null && typeof args === 'object' && !Array.isArray(args)
           && args.provider === undefined && args.model === undefined
         if (injectable) {
-          const route = resolveRoute(args.description, config)
-          exec.arguments = {
-            ...args,
-            provider: route.provider,
-            model: route.model,
-            ...(route.reasoningEffort === undefined ? {} : { reasoning_effort: route.reasoningEffort }),
+          // 0.4.0: injection equals explicit selection, and explicit selection
+          // is gated by the session's model-selection policy. No policy → the
+          // tool would reject the injected route, so skip the injection and let
+          // the created-time select() pin the route instead (it bypasses the
+          // whitelist). Descriptor consistency is the only thing given up.
+          if (!hasModelSelectionPolicy(exec.agent)) {
+            log(`tools/execute inject skipped (no model-selection policy on the calling session) -> ${exec.name} label=${JSON.stringify(args.description)}`)
+          } else {
+            const route = resolveRoute(args.description, config)
+            exec.arguments = {
+              ...args,
+              provider: route.provider,
+              model: route.model,
+              ...(route.reasoningEffort === undefined ? {} : { reasoning_effort: route.reasoningEffort }),
+            }
+            log(`tools/execute inject ${route.provider}/${route.model} (role=${route.matched}) -> ${exec.name} label=${JSON.stringify(args.description)}`)
           }
-          log(`tools/execute inject ${route.provider}/${route.model} (role=${route.matched}) -> ${exec.name} label=${JSON.stringify(args.description)}`)
         }
       } catch (error) {
         // Injection is best-effort: never block a delegation on it.
