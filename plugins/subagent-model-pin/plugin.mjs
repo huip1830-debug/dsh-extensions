@@ -14,6 +14,12 @@
 // equals that call's `description`, so concurrent sibling delegations cannot
 // swap routes.
 //
+// 0.5.0 retired the role table and the label-prefix route tiers. A child whose
+// tool pins its own route at creation (`subagent_readonly`, `subagent_spike`,
+// any future tool with `agentOptions`) must never be re-selected here: it
+// carries a `subagent/descriptor` label and no delegating tool call matches it,
+// so the created handler keeps the creation-time route (R4' below).
+//
 // Why the injection instead of preset config: in the web/desktop profile the
 // top-level `tool-subagent` entry is disabled and the live tool is mounted inside
 // `preset-standard`, whose `plugins` list is plain config data — profile patches
@@ -54,7 +60,7 @@
 import { appendFileSync } from 'node:fs'
 import { join } from 'node:path'
 import z from '@deepseek-ai/schemastery'
-import { SANDBOX_MODES, readOptionalString, readVolatile, resolveRoute, validateRoles } from './lib/routes.mjs'
+import { SANDBOX_MODES, readOptionalString, readVolatile } from './lib/routes.mjs'
 
 /** Delegation tools whose arguments carry model-facing route fields. */
 const DELEGATION_TOOLS = new Set(['subagent', 'subagent_fork'])
@@ -82,6 +88,14 @@ const sandboxSchema = z.union([
   z.const('danger-full-access'),
 ])
 
+/**
+ * The retired role-table entry shape.
+ *
+ * Kept in the schema on purpose (0.5.0): old profiles still carry `roles`, and a
+ * load-time rejection would take the whole plugin down. The field is accepted
+ * and ignored at runtime — `apply()` warns once and never reads an entry. The
+ * next major version removes the field (load-time error with migration advice).
+ */
 const roleSchema = z.object({
   match: z.string().required(),
   provider: z.string().required(),
@@ -98,8 +112,8 @@ const roleSchema = z.object({
  * non-volatile paths, and the Host updates volatile references in place when
  * the profile patch changes — no remount, no restart. Every read of a volatile
  * field must go through `readVolatile`/`readOptionalString` at call time.
- * `roles`, `force`, `depth`, `sandbox` and `injectDelegationDefaults` stay
- * YAML-only by construction.
+ * `roles` (retired, ignored), `force`, `depth`, `sandbox` and
+ * `injectDelegationDefaults` stay YAML-only by construction.
  */
 export const Config = z.object({
   provider: z.string().default('').volatile(),
@@ -188,17 +202,35 @@ function readDelegationChoice(parent, label) {
 }
 
 /**
- * Narrow one child session to the sandbox mode its role names.
+ * Read the top-level default route.
+ *
+ * The three fields are `.volatile()`, so they are re-read on every call: the
+ * Plugins-page config card swaps the references in place and the next
+ * delegation must see the new route without a restart.
+ * @param config - plugin config.
+ * @returns `{ provider, model, reasoningEffort }` with unset fields undefined.
+ */
+function readDefaultRoute(config) {
+  return {
+    provider: readOptionalString(config?.provider),
+    model: readOptionalString(config?.model),
+    reasoningEffort: readOptionalString(config?.reasoningEffort),
+  }
+}
+
+/**
+ * Narrow one child session to the top-level `sandbox` mode.
  *
  * The child's permission scope is fixed when the delegation starts and can
  * never be widened from inside; `session.append('sandbox/mode', …)` is the
  * durable write path and the last event wins, so appending here (before the
- * child's first tool call) confines it without touching the parent.
+ * child's first tool call) confines it without touching the parent. The retired
+ * role table no longer supplies a mode: `roles[].sandbox` is ignored.
  * @param agent - the newly created child agent.
  * @param mode - the sandbox mode to append.
  * @param log - diagnostic sink.
  */
-function applyRoleSandbox(agent, mode, log) {
+function applyPinnedSandbox(agent, mode, log) {
   try {
     const session = agent?.session
     if (session === undefined || typeof session.append !== 'function') return
@@ -287,15 +319,30 @@ export function apply(ctx, config) {
   const depth = config?.depth
   // `force: true` restores the old always-override behavior (no escape hatch).
   const force = config?.force === true
+  // The only sandbox narrowing left (0.5.0): the top-level field, applied to
+  // every subagent at the configured depth. YAML-only, not volatile.
+  const sandbox = config?.sandbox
 
   if (provider === undefined) throw new Error('subagent-model-pin: config.provider is required')
   if (model === undefined) throw new Error('subagent-model-pin: config.model is required')
-  validateRoles(config?.roles)
-  if (config?.sandbox !== undefined && !SANDBOX_MODES.includes(config.sandbox)) {
+  if (sandbox !== undefined && !SANDBOX_MODES.includes(sandbox)) {
     throw new Error(`subagent-model-pin: config.sandbox must be one of ${SANDBOX_MODES.join(', ')}`)
   }
 
-  log(`apply() called with provider=${provider} model=${model} effort=${readOptionalString(config?.reasoningEffort) ?? '-'} roles=${(config?.roles ?? []).length} force=${force}`)
+  // 0.5.0: the role table is retired. Old profiles keep loading (the schema
+  // still accepts `roles`), but every entry is ignored at runtime. Warn once per
+  // activation — a silent loss matters most for `roles[].sandbox`, whose failure
+  // direction is a *widened* sandbox.
+  const roles = readVolatile(config?.roles)
+  if (Array.isArray(roles) && roles.length > 0) {
+    try {
+      ctx.logger?.warn?.('subagent-model-pin: roles 已退役——只读评审/勘察/spike 的路由与沙箱由 dispatch-protocol 的组合结构钉死；普通 subagent 角色分档删除，默认路由见顶层 provider/model；详见 README 版本历史 0.5.0')
+    } catch {
+      // A logger hiccup must never block activation.
+    }
+  }
+
+  log(`apply() called with provider=${provider} model=${model} effort=${readOptionalString(config?.reasoningEffort) ?? '-'} roles=${Array.isArray(roles) ? roles.length : 0} (retired, ignored) force=${force}`)
 
   // Fill the default route into the delegation arguments *before* the child is
   // created. `subagent/descriptor.agentModel` snapshots the creation-time
@@ -325,14 +372,14 @@ export function apply(ctx, config) {
           if (!hasModelSelectionPolicy(exec.agent)) {
             log(`tools/execute inject skipped (no model-selection policy on the calling session) -> ${exec.name} label=${JSON.stringify(args.description)}`)
           } else {
-            const route = resolveRoute(args.description, config)
+            const route = readDefaultRoute(config)
             exec.arguments = {
               ...args,
               provider: route.provider,
               model: route.model,
               ...(route.reasoningEffort === undefined ? {} : { reasoning_effort: route.reasoningEffort }),
             }
-            log(`tools/execute inject ${route.provider}/${route.model} (role=${route.matched}) -> ${exec.name} label=${JSON.stringify(args.description)}`)
+            log(`tools/execute inject ${route.provider}/${route.model} -> ${exec.name} label=${JSON.stringify(args.description)}`)
           }
         }
       } catch (error) {
@@ -364,44 +411,61 @@ export function apply(ctx, config) {
 
     const parentId = header.parentSession
     const label = readChildLabel(agent)
-    const target = resolveRoute(label, config)
+    const target = readDefaultRoute(config)
     const explicit = readDelegationChoice(ctx.get('sessions')?.get?.(parentId), label)
     const cur = readCurrentRoute(agent)
     const parentRoute = readParentRoute(parentId)
-    log(`delegation label=${JSON.stringify(label)} explicit=${explicit} role=${target.matched} cur=${routeText(cur)} parent=${routeText(parentRoute)}`)
+    log(`delegation label=${JSON.stringify(label)} explicit=${explicit} cur=${routeText(cur)} parent=${routeText(parentRoute)} default=${routeText(target)}`)
 
-    // Sandbox narrowing happens here, before the child's first tool call: the
-    // role table is the only place a mode can come from, because the delegation
-    // tool carries no sandbox field.
-    if (target.sandbox !== undefined) applyRoleSandbox(agent, target.sandbox, log)
+    // Sandbox narrowing happens here, before the child's first tool call. The
+    // delegation tool carries no sandbox field, so the top-level `sandbox` is
+    // the only source left (the role table is retired).
+    if (sandbox !== undefined) applyPinnedSandbox(agent, sandbox, log)
 
-    // Behavior matrix, first hit wins. `explicit` is the only evidence of a
-    // model-facing choice: the arguments of the delegating tool call, matched to
-    // this child by descriptor label. Every branch that keeps `cur` must not
-    // append a `model/selection` event, so an already-correct route stays silent.
+    // Select branch table (spec §4.2 of the 2026-11-25 structural-ownership
+    // design), first hit wins:
+    //   R2  force                              -> select the default route
+    //   R3  explicit === true                  -> keep (the call chose)
+    //   R4' label && explicit === undefined    -> keep (tool-pinned child)
+    //   R5  explicit === undefined && cur ≠ parent -> keep
+    //   R6' otherwise                          -> select the default route
+    // `explicit` is the only evidence of a model-facing choice: the arguments of
+    // the delegating tool call, matched to this child by descriptor label. Every
+    // keep branch must stay silent — no `model/selection` event.
+    const toolPinned = label !== undefined && explicit === undefined
+    const inheritedElsewhere = explicit === undefined && parentRoute !== undefined && !sameRoute(cur, parentRoute)
+    let select = false
     let reason
     if (force) {
       // R2: `force: true` restores the old always-override behavior.
+      select = true
       reason = 'force'
     } else if (explicit === true) {
       // R3: an explicit choice on the delegation call always wins, even when it
       // happens to equal the parent route (the upgrade-to-parent-model case).
-      reason = undefined
-    } else if (target.matched) {
-      // R4: a role route outranks the inherited-route heuristic — the label says
-      // what this child is for, so it decides the model family.
-      reason = sameRoute(cur, target) ? undefined : 'role'
-    } else if (explicit === undefined && parentRoute !== undefined && !sameRoute(cur, parentRoute)) {
+      reason = 'explicit'
+    } else if (toolPinned) {
+      // R4': a tool that pins its own route at creation (`subagent_readonly`,
+      // `subagent_spike`, any future `agentOptions` tool) has a descriptor label
+      // but no matching delegation call. Its creation-time route is final, and
+      // R5's parent-route comparison cannot see it when the pin equals the
+      // parent's route — that was the old R4 drift.
+      reason = 'tool-pinned'
+    } else if (inheritedElsewhere) {
       // R5: no matching delegation call but the child already carries a route
       // that differs from the parent's — keep that existing choice.
-      reason = undefined
+      reason = 'route-differs'
+    } else if (sameRoute(cur, target)) {
+      // R6': the default path, already in place.
+      reason = 'already-default'
     } else {
-      // R6: default path.
-      reason = sameRoute(cur, target) ? undefined : 'default'
+      // R6': the default path.
+      select = true
+      reason = 'default'
     }
 
-    if (reason === undefined) {
-      log(`keep ${routeText(cur)} (explicit=${explicit} role=${target.matched} already=${sameRoute(cur, target)})`)
+    if (!select) {
+      log(`keep ${routeText(cur)} (${reason}, explicit=${explicit})`)
       return
     }
     if (typeof agent?.model?.select !== 'function') {

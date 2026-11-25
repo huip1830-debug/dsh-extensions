@@ -2,6 +2,10 @@
 
 DSH profile 插件：**子 agent 默认跑低成本模型，需要时在委派调用里显式升级**。
 
+## 长期定位
+
+本插件是**过渡补丁**：宿主目前没有「子代理默认路由」的一等配置点，预设内的工具条目又不可 patch，只能靠运行时补默认值。上游一旦提供一等配置（例如 `subagent/descriptor` 记录路由来源 provenance），本插件即废弃——它的健康指标是**功能持续做减法**（0.5.0 已删角色路由与角色沙箱、删 label 前缀契约），而不是越做越重。
+
 - 不传路由 → 子 agent 用 `provider` / `model`（含 effort）的 pin。
 - 显式传了 `provider` / `model` / `reasoning_effort` → 放行，即使与父 agent 同款也能升级（`force: true` 时除外）。
 - 本仓库的 `plugin.mjs` 是**唯一真源**；安装到 profile 后是 pnpm 管理的副本，改代码要重装才生效。
@@ -16,6 +20,17 @@ DSH 默认让子 agent **继承父 agent 的路由**——复杂主会话派生�
 - **用 patch 改子 agent 模型有三个坑**：顶层 `tool-subagent` 被 web-app bundle 设成 `disabled: true`，真正的工具在 `standard` 预设的 `plugins` 列表里；预设内条目不可 patch，且 `config` 整体替换、不深合并；新增条目必须用 `insert`，写成 `- id: <新 id>` 会「未知目标、静默跳过」。
 
 本插件因此不改官方工具，而是在委派时补默认路由，并把「没人选才 pin」作为默认策略：主路径在 `tools/execute` 注入，回退路径在 `agent/created` 时 select。正确写法见包内 `cordis.patch.yml`（bundle 层，安装后自动生效）。
+
+## 与 dispatch-protocol 的关系
+
+职责分工一句话：**dispatch-protocol 管流程纪律与专用组合**（只读评审 `subagent_readonly`、只读实测 `subagent_spike`，工具面 / 路由 / 沙箱都钉在 preset 与工具实例上），**model-pin 管普通委派的默认路由**（`subagent` / `subagent_fork` / `workflow`，运行时补默认值）。两者**无加载期依赖**：任意组合可装，可独立启停与回滚；关掉一层，下面的层还在。
+
+| | 有 model-pin | 无 model-pin |
+|---|---|---|
+| 有 dispatch-protocol | 全功能 | 只读评审 / spike 仍跑钉路（钉在工具实例上，不经白名单、不依赖本插件）；普通 `subagent` 回到继承父路由 |
+| 无 dispatch-protocol | 只读评审 / spike 工具随纪律消失；普通 `subagent` / `workflow` 仍有默认 pin | stock 原生：全部继承父路由；换路由只能逐次显式传参（需先配白名单） |
+
+分层看：L0 宿主原生（继承父路由 + 调用显式传参 + workflow 显式）→ L1 官方白名单（无白名单时显式选路被宿主限制为只能选父路由）→ L2 本插件的全局默认路由 → L3 dispatch-protocol 的专用组合。
 
 ## 安装
 
@@ -35,7 +50,7 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 
 升级 = 同地址重装，或 `dsh plugin --profile desktop update subagent-model-pin`；卸载 = 插件页移除，或 `dsh plugin --profile desktop remove subagent-model-pin`。
 
-进阶配置都是可选的：换 pin 路由用插件页配置卡；`roles` 角色表与 profile 覆盖只能手写 YAML——在 profile 的 `cordis.patch.yml` 用同 id 覆盖（`config` 整体替换，不深合并，手写时抄全字段）。本机参数与 profile 绑定，不进仓库。
+进阶配置都是可选的：换 pin 路由用插件页配置卡；profile 覆盖只能手写 YAML——在 profile 的 `cordis.patch.yml` 用同 id 覆盖（`config` 整体替换，不深合并，手写时抄全字段）。`roles` 字段已退役，仅为兼容老 profile 保留，见「`roles` 已退役」。本机参数与 profile 绑定，不进仓库。
 
 ## 使用
 
@@ -71,33 +86,39 @@ workflow 同理：`agent(prompt, { provider, model })`。`subagent` 的显式路
 | `provider` | 是 | ✅ | pin 到的 provider id（bundle 默认 `deepseek-official`，stock 自带） |
 | `model` | 是 | ✅ | pin 到的模型 id（bundle 默认 `deepseek-flash`） |
 | `reasoningEffort` | 否 | ✅ | pin 时一并写入的 effort（默认不 pin——stock 模型无 effort 档位）；换路由时会丢掉继承来的 effort，避免落在新模型不支持的档位 |
-| `debug` | 否 | ✅ | `true` 时写 `%TEMP%\subagent-model-pin.log`（apply / agent/created / select 决策前后，含 `label=`、`explicit=`、`cur=`、`parent=`）；路径可用环境变量 `SUBAGENT_MODEL_PIN_LOG` 覆盖 |
+| `debug` | 否 | ✅ | `true` 时写 `%TEMP%\subagent-model-pin.log`（apply / agent/created / select 决策前后，含 `label=`、`explicit=`、`cur=`、`parent=`、`default=`；判定分支写 reason ∈ `force` / `explicit` / `tool-pinned` / `route-differs` / `already-default` / `default`）；路径可用环境变量 `SUBAGENT_MODEL_PIN_LOG` 覆盖 |
 | `injectDelegationDefaults` | 否 | — | 默认 `true`。在 `tools/execute` 阶段把默认路由写进委派参数，使 descriptor / 首请求 / 冷恢复三者一致；设 `false` 只保留 `agent/created` 时 select 兜底。没有 `subagent/model-selection-policy` 的会话会自动跳过注入 |
 | `force` | 否 | — | `true` = 一律覆盖，连显式选择也 pin（回到旧的「强制」行为） |
 | `depth` | 否 | — | 只处理委派深度等于该值的子 agent |
-| `roles` | 否 | — | 按委派 `description` 前缀分档路由的数组，见下节 |
+| `sandbox` | 否 | — | 顶层沙箱收窄：给该深度的每个子 agent 追加 `sandbox/mode`，未写则继承父会话，见「顶层沙箱」 |
+| `roles` | 否 | — | **已退役（0.5.0）**：字段保留以免老 profile 加载失败，运行时完全忽略，`apply()` 时 warn 一次；迁移见「`roles` 已退役」 |
 
 「界面可改」= 插件页配置卡片可编辑；这四个字段在 Config schema 里标了 `.volatile()`，settings 系统只允许界面写 volatile 路径，所以 `roles` 等其余字段**从机制上**不可能被界面覆盖。
 
 配置有三条途径：插件页配置卡（4 个 volatile 字段，写入 profile patch）、bundle 自带的 `cordis.patch.yml` 作默认值、profile 的 `cordis.patch.yml` 用同 id 覆盖（`config` 整体替换，不深合并，手写时抄全字段）。界面保存立即写入 profile patch，pin 路由的改动作用于**此后的委派**，但白名单按会话冻结——**需新开会话**。
 
-### `roles`：按角色分档
+### `roles` 已退役（deprecated，0.5.0）
+
+`roles` 数组**字段仍在 Config schema 里，但运行时被完全忽略**：老 profile 照常加载（不会在加载期炸掉），`apply()` 命中非空 `roles` 时只 `warn` 一次迁移提示，插件不读任何条目。角色路由与角色沙箱都在 0.5.0 消失：
+
+- **角色路由**：只读评审 / 勘察 / spike 的路由钉在 dispatch-protocol 的工具实例上（`subagent_readonly` / `subagent_spike` 的 `agentOptions`），不再需要也不允许 `roles` 覆盖；普通 `subagent` 不再分档，统一用顶层 `provider` / `model` / `reasoningEffort`。
+- **角色沙箱**：spike / 勘察由 dispatch-protocol 的 `dispatch-spike` preset + `readonlySandbox` 结构收窄；本插件只剩顶层 `sandbox`。
+
+迁移方向**不对称，必须分开看**：
+
+- 失效的是**路由**时方向安全——少一次覆盖，只读子代理恒为钉路。纯路由角色在 `verify-install.mjs` 的 `roles-migration` 项里只是 WARN。
+- 失效的是**沙箱**时方向是**放宽**——`roles[].sandbox` 一删，原本被收窄的 spike / 勘察子代理回到继承父沙箱。所以 `verify-install.mjs` 对**带 `sandbox` 字段的角色报 FAIL**，不许静默。
+- 迁移做法：把需要收窄的子代理改派 `subagent_spike` / `subagent_readonly`（结构收窄），或临时用顶层 `sandbox` 兜住；随后从 profile 删掉 `roles` 段。
+- 下个大版本会删掉 `roles` 字段，届时老配置在加载期报错并给迁移指引。
 
 ```yaml
+# 老配置（0.5.0 起无效，仅作迁移对照）
 roles:
   - match: Survey
     provider: deepseek-official
     model: deepseek-flash
-  - match: Review
-    provider: deepseek-official
-    model: deepseek-flash
+    sandbox: read-only      # 不再收窄任何子代理——这是需要人工确认的一项
 ```
-
-匹配规则：取子代理的 `description`（即 descriptor label），去掉首尾空白、转小写后做 `startsWith`。所以派发时按 `Survey …` / `Implement …` / `Review …` 命名即可自动分档；不按约定命名则落回默认路由。`roles` 非法（非数组、`match` 为空、缺 `provider` / `model`）在插件加载时直接报错。
-
-**注意前缀按字面匹配**：中文 description（如「评审后端改动」）不会命中 `Survey` / `Review` 这类英文前缀。用中文 label 的派发方应配对应中文前缀（如 `评审` / `勘察` / `只读`），或约定英文 label。
-
-**角色表职责已收缩，但有对齐前提**：dispatch-protocol 的只读评审角色（`subagent_readonly` + `dispatch-readonly` preset）路由与沙箱改由 dispatch-protocol 结构钉死——前提是 `roles` 表**不命中**这些 label，或命中的是**同一路由**。roles 命中不同路由时 R4 仍会在 `agent/created` 时 `select` 覆盖钉路：`subagent/descriptor`（创建时钉路）与运行路由不一致，且结果取决于 label 措辞（「评审…」前缀命中被覆盖，「…勘察」词尾不命中而保留钉路，2026-11-24 实证）。与 dispatch-protocol 共存时三选一：profile 按 id 整段覆盖 `tool-subagent-readonly` 的 `agentOptions` 为角色表同路由（推荐，descriptor 恢复一致）；把角色改成钉路路由；删掉只读角色。dispatch-protocol 的 `verify-install.mjs` 有 `route-alignment` 项逐台机器核验这条。`roles` 剩下的本职是 **spike**：走普通 `subagent`、要跑命令实测的只读 spike 没有独立 preset，沙箱收窄仍按 label 前缀在这里判定。非 dispatch-protocol 宿主仍可把 `roles` 当通用角色分档用。
 
 ### GUI 配置卡片
 
@@ -111,23 +132,26 @@ roles:
 
 ## 行为矩阵
 
-判定全部发生在 `agent/created`，首个命中生效；命中「pin」时调一次 `agent.model.select()`（`(provider, model)` 相同的跳过分支不产生事件）。`cur` = `agent.model.current()`，`target` = 按 label 解析出的目标路由。
+判定全部发生在 `agent/created`（`plugin.mjs#apply` 注册的监听器），首个命中生效；命中「select」时调一次 `agent.model.select()`（`(provider, model)` 相同的跳过分支不产生事件）。`cur` = `agent.model.current()`，`target` = 顶层 `provider` / `model` / `reasoningEffort`，`label` = 子会话 `subagent/descriptor.label`，`explicit` = 父会话 `tool/call` 里能否找到同 `description` 的委派调用并读到路由字段（`plugin.mjs#readDelegationChoice`）。
 
 | # | 场景 | 行为 |
 |---|---|---|
-| R1 | 非子会话，或 depth 不匹配 | 不动 |
+| R1 | 非子会话，或 depth 不匹配 | 不动（起源过滤） |
 | R2 | `force: true` | 一律 `select(target)` |
-| R3 | 委托调用显式传了路由 | **放行**（含「与父路由相同」的升级；按 label 回查父会话 `tool/call`） |
-| R4 | 角色命中 | `cur` ≠ 角色路由 → `select`；相同 → 跳过 |
-| R5 | 找不到委派调用且 `cur` ≠ 父路由 | **放行**（保留旧启发：已有主选择） |
-| R6 | 其余（默认） | `cur` ≠ `target` → `select`；相同 → 跳过（含 resume 已恢复场景） |
+| R3 | `explicit === true`：委派调用显式传了路由 / effort | **放行**（含「与父路由相同」的升级） |
+| R4' | `label !== undefined && explicit === undefined`：自带钉路的工具子代理（`subagent_readonly`、`subagent_spike`，及未来任何用 `agentOptions` 钉路的委派工具） | **放行**：创建时路由即最终路由，不碰（reason `tool-pinned`） |
+| R5 | `explicit === undefined` 且 `cur` 与父路由不同 | **放行**（workflow 显式选路的保护伞；reason `route-differs`） |
+| R6' | 其余 | `cur` ≠ `target` → `select`；相同 → 跳过（reason `default` / `already-default`） |
+
+R6' 的实际负载收窄为：没有 descriptor label 的 workflow 未选路子代理，以及无白名单会话里普通委派的未选路子代理。
 
 补充：
 
 | 场景 | 行为 |
 |---|---|
-| workflow 子级 / 父事件未提交 | `explicit` 未知：`cur` 有差异才放行，等于父路由则 pin |
-| 父会话已不存在 / 路由不可读 | 回退为 pin（宁可用便宜模型，也不放任继承） |
+| 普通委派 + 父 `tool/call` 未提交（父回合中断 / 崩溃） | 子代理带 label 但找不到匹配的委派调用 → 落 **R4' keep**：跑继承路由、失去默认 pin。接受的权衡（spec §4.2）：场景罕见，方向是「少用一次最贵的兜底」 |
+| workflow 子级（无 label） | `explicit` 未知：`cur` 与父路由有差异才放行（R5）；等于父路由或父路由不可读则 R6' pin |
+| 父会话已不存在 / 路由不可读 | 普通委派仍带 label → R4' keep；workflow 子级无 label → R6' pin |
 | 配置的 provider 没有 adapter 注册 | 跳过 select 并写 debug log（见「路由合法性」） |
 | 两条委派 `description` 重复且并发 | 可能串路由（概率极低，写清唯一 description） |
 | 想恢复「一律强制」 | 配置加 `force: true` |
@@ -151,29 +175,19 @@ roles:
 | 关闭期间建的会话（之后重新开启） | 仍然没有选择能力：恢复时 `firstLiveSeq > 0`，不会补写 policy，只能新建对话 |
 | workflow 显式路由 | 不受影响 |
 
-## 角色沙箱
+## 顶层沙箱
 
-同一个角色表也能收窄子 agent 的沙箱：`sandbox` 取 `read-only` / `workspace-write` / `danger-full-access`，未写则继承父会话。
+顶层 `sandbox` 是 0.5.0 唯一保留的沙箱收窄：取 `read-only` / `workspace-write` / `danger-full-access`，未写则继承父会话。它按委派深度作用于**每个**子 agent（不区分 label / 角色），语义清晰、非 label 驱动。
 
 ```yaml
 - id: subagent-model-pin
   config:
     provider: deepseek-official
     model: deepseek-flash
-    roles:
-      - match: Survey
-        provider: deepseek-official
-        model: deepseek-flash
-        sandbox: read-only      # 只读勘察：写盘被文件沙箱直接拒绝
+    sandbox: read-only      # 该深度的子 agent 统一收窄：写盘被文件沙箱直接拒绝
 ```
 
-实现方式：在 `agent/created` 里对匹配的子会话追加一条 `sandbox/mode` 事件（子会话权限在委派开始时固定、不能自行放宽，只能从外部收窄）。委派工具没有 sandbox 字段，所以沙箱只能由角色表决定；显式 `provider/model` 仍只影响路由。
-
-已验证（headless E2E，mock provider 驱动真实 agent 循环）：
-
-- 子会话事件序列：`sandbox/mode workspace-write source=delegation` → `approval/policy never source=delegation` → `sandbox/mode read-only`（插件追加）；
-- 子 agent 的 `write` 返回 `[sandbox: file access denied under read-only mode]`，目标文件未生成；
-- 对照组（角色不带 `sandbox`）：同一委派下写盘成功。
+实现方式：在 `agent/created` 里对命中的子会话追加一条 `sandbox/mode` 事件（`plugin.mjs#applyPinnedSandbox`）——子会话权限在委派开始时固定、不能自行放宽，只能从外部收窄；当前已是目标档位时跳过，不产生重复事件。委派工具没有 sandbox 字段，所以沙箱只能来自这里，或来自 dispatch-protocol 的 `readonlySandbox` 按 preset 收窄。
 
 注意：宿主若禁用了 child model selection，而调用会话里仍有 `subagent/model-selection-policy` 事件，注入会被拒；这时设 `injectDelegationDefaults: false`，只走 `agent/created` 的 select 兜底。0.4.0 起没有 policy 的会话会自动跳过注入。
 
@@ -183,10 +197,10 @@ roles:
 
 ```powershell
 npm ci          # 或 pnpm install（0.2.0 起有 schemastery 依赖，首次需要）
-node test.mjs   # 36 个用例，在插件目录内执行
+node test.mjs   # 在插件目录内执行
 ```
 
-覆盖 R1–R6 行为矩阵各条、workflow 场景零 `agent/request` 注册、select 的 effort 透传与缺省、provider 合法性校验、显式「没选」、非委派工具、`injectDelegationDefaults:false`、非子 agent、角色沙箱，以及 volatile 字段的覆盖即时生效 / 回落 / 空串 effort / debug 热切换。离线 harness 用 `AgentModel` stub 与 `llm.listProviders()` stub。
+覆盖 R1 / R2 / R3 / R4' / R5 / R6' 行为矩阵各分支、`roles` 配置加载不报错且运行时忽略并 warn 一次、自带钉路子代理不 select（含「钉路 == 父路由」的旧 R4 漂移回归）、workflow 场景零 `agent/request` 注册、select 的 effort 透传与缺省、provider 合法性校验、显式「没选」、非委派工具、`injectDelegationDefaults:false`、非子 agent、顶层沙箱收窄，以及 volatile 字段的覆盖即时生效 / 回落 / 空串 effort / debug 热切换。离线 harness 用 `AgentModel` stub 与 `llm.listProviders()` stub。
 
 ### 看日志确认生效
 
@@ -235,10 +249,11 @@ dump 里能看到相对插件路径被解析成 `file:///...` 绝对 URL，可�
 
 | 现象 | 说明 |
 |---|---|
+| 任何工具 `agentOptions` 钉死的路由不再被本插件覆盖（R4'） | `subagent_readonly`、`subagent_spike` 及未来任何自带钉路的委派工具，其子代理带 label 且找不到匹配的委派调用，落 R4' keep：顶层 pin 不会覆盖它。要换它们的路由，改 dispatch-protocol 对应工具行的 `agentOptions`；本插件的 `provider` / `model` 对它们无效 |
 | 显式路由需先进白名单 | 白名单只列了配置里的路由，想升级到别处必须先放开 |
 | 白名单改动对旧会话 / 分支无效 | 会话创建时冻结；改完需**新开会话** |
 | workflow 子级显式升级到「与父相同」的路由仍可能被 pin | workflow 不经过 `subagent` 工具，无 `description` 可匹配；回退分支只认「路由不同」 |
-| 冷恢复的子会话按 `cur` 比对处理 | 恢复时 descriptor 路由已在 setup 阶段入账，等于目标就零 select，否则按 R5 / R6 判定 |
+| 冷恢复的子会话按 `cur` 比对处理 | 恢复时 descriptor 路由已在 setup 阶段入账，等于目标就零 select，否则按 R5 / R6' 判定 |
 | 中途手动改模型不再被覆盖 | 只在 `agent/created`（含 resume 再激活）pin 一次；有意为之 |
 | 未注册的 provider 不会 pin | 插件跳过 select 并写 debug log，子会话保留继承路由；写错 model 仍需配置自证 |
 | 主 agent 不受影响 | `agent/created` 被 `origin` 判断过滤掉 |
@@ -279,7 +294,7 @@ dump 里能看到相对插件路径被解析成 `file:///...` 绝对 URL，可�
 
 **判定「有没有人选」不能靠路由比对。** DSH 的 `resolveChildAgentOptions()` 会把父路由**无条件**合并进子 agent 的 options，`agent/created` 时的 `agent.model.current()` 也不携带「这是显式选的还是继承的」信息。因此「显式传了与父路由相同的路由」（最常见场景：升级到主 agent 同款强模型）和「纯继承」在事件层完全同形，早期按 `resolved ≠ 父路由` 判断会把前者误 pin。
 
-可靠信号只在**父会话的 `tool/call` 事件**里：委派工具的 `arguments` 原样保留了模型写的 `provider` / `model` / `reasoning_effort`，且 `description` 等于子会话 `subagent/descriptor` 的 `label`，可用作唯一匹配键（并发委派也不会串）。回退分支只用于「找不到对应委派调用」的少数场景；此时路由有差异才放行，与父路由相同则保守 pin。
+可靠信号只在**父会话的 `tool/call` 事件**里：委派工具的 `arguments` 原样保留了模型写的 `provider` / `model` / `reasoning_effort`，且 `description` 等于子会话 `subagent/descriptor` 的 `label`，可用作唯一匹配键（并发委派也不会串）。找不到对应委派调用时按矩阵分流：带 label 的子代理视为自带钉路、直接 keep（R4'）；无 label 的 workflow 子级只在路由有差异时放行（R5），与父路由相同则保守 pin（R6'）。
 
 ### 注入代价
 
@@ -292,14 +307,16 @@ dump 里能看到相对插件路径被解析成 `file:///...` 绝对 URL，可�
 
 ## 回滚
 
-- 临时停用：插件页关掉该组合包，或在 profile 的 `cordis.patch.yml` 给该行加 `disabled: true`。
+- 临时停用：在插件页停用本插件（或在 profile 的 `cordis.patch.yml` 该条目加 `disabled: true`）；或退版本 `dsh plugin --profile <profile> update subagent-model-pin` 选旧版。
 - 彻底移除：插件页移除，或 `dsh plugin --profile desktop remove subagent-model-pin`。
-- 两种都需重启 DSH。YAML 是明文，记事本可改。移除后子 agent 回到继承父路由的默认行为；已写入 profile patch 的界面覆盖会随该行一起消失。
+- 回滚到 0.5.0 之前：`dsh plugin --profile <profile> update subagent-model-pin` 选旧版，或用旧提交的 Git 地址重装（本仓库不发 npm 包），再重启 DSH。0.4.x 的 `roles` 角色分档与角色沙箱随版本回来；0.5.0 期间从 profile 删掉的 `roles` 段需一并恢复。
+- 以上操作都要重启 DSH。YAML 是明文，记事本可改。移除后子 agent 回到继承父路由的默认行为；已写入 profile patch 的界面覆盖会随该行一起消失。
 
 ## 版本历史
 
 | 版本 | 要点 |
 |---|---|
+| `0.5.0` | **`roles` 表退役**：schema 字段保留、运行时完全忽略、apply 时 warn 一次；select 分支表改为 R1 / R2 / R3 / R4'（自带钉路工具子代理 keep）/ R5 / R6'，从机制上消除「角色路由覆盖 `agentOptions` 钉路」的漂移；沙箱只剩顶层 `sandbox`。迁移注意失效方向不对称：路由项安全，**角色沙箱项是放宽**（`verify-install.mjs` 对带 `sandbox` 的 roles 报 FAIL）。 |
 | `0.4.1` | 文档：写清 `roles` 与 dispatch-protocol 钉路的对齐前提——R4 命中不同路由仍会覆盖 `agentOptions` 钉路，及三种修法。 |
 | `0.4.0` | 默认路由换 stock 自带的 `deepseek-official/deepseek-flash`（不 pin effort）；注入感知白名单——无 `subagent/model-selection-policy` 时跳过注入、走 select 兜底，新装零手改 YAML。 |
 | `0.3.1` | 评审 / 复审 / 勘察角色的路由与沙箱上移到 dispatch-protocol，`roles` 职责收缩为 spike 沙箱；本插件代码不变。 |

@@ -2,13 +2,19 @@
 //
 //   node test.mjs
 //
-// The harness fakes the two extension points the plugin uses:
+// The harness fakes the extension points the plugin uses:
 //   - `tools/execute`   (waterfall around a delegation tool call)
 //   - `agent/created`   (per-child setup)
+//   - `ctx.logger`      (the one-time roles-retired migration warning)
 // plus the per-agent `agent.model` (AgentModel) the created handler pins:
 // `current()`, `select()`, and the durable `model/selection` events a select
 // appends. The `llm` service is faked too, because the plugin asks
 // `listProviders()` before selecting a route.
+//
+// 0.5.0 branch table under test (spec §4.2): R2 force; R3 explicit===true keep;
+// R4' label!==undefined && explicit===undefined keep (tool-pinned child); R5
+// explicit===undefined && cur≠parent keep; R6' otherwise select the default
+// route. A child with no `subagent/descriptor` label is a workflow child.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -20,6 +26,10 @@ import * as plugin from './plugin.mjs'
 
 const PIN = { provider: 'opencode-go', model: 'deepseek-v4.1-flash', effort: 'high' }
 const PARENT_ROUTE = { provider: 'deepseek-official', model: 'deepseek-flash' }
+
+/** A retired role table entry: must load, must never drive a route. */
+const SURVEY_ROLE = { match: 'Survey', provider: 'deepseek-official', model: 'deepseek-flash' }
+const SANDBOX_ROLE = { ...SURVEY_ROLE, sandbox: 'read-only' }
 
 /**
  * Build a fake host context around the plugin.
@@ -110,6 +120,7 @@ function createAgentModel({ options, recorded, append }) {
 function createHarnessWith(config, { providers = [], llm = true } = {}) {
   const rootEvents = new Map()
   const sessions = new Map()
+  const warnings = []
 
   const ctx = {
     on(name, listener) {
@@ -125,6 +136,11 @@ function createHarnessWith(config, { providers = [], llm = true } = {}) {
       }
       return undefined
     },
+    logger: {
+      warn(message) {
+        warnings.push(String(message))
+      },
+    },
   }
 
   plugin.apply(ctx, config)
@@ -137,6 +153,8 @@ function createHarnessWith(config, { providers = [], llm = true } = {}) {
   return {
     sessions,
     session,
+    /** Everything the plugin passed to `ctx.logger.warn` (migration notices). */
+    warnings,
 
     /**
      * Run one tool call through the `tools/execute` listeners; returns its
@@ -161,9 +179,10 @@ function createHarnessWith(config, { providers = [], llm = true } = {}) {
     /**
      * Create a child agent, run the `agent/created` listeners, and report what
      * the plugin did to it.
-     * @param options - child id, session header, pre-existing session events,
-     *   creation-time route (`options`) and an already-recorded selection
-     *   (`recorded`, for resume).
+     * @param options - child id, session header, pre-existing session events
+     *   (`events`), creation-time route (`options`) and an already-recorded
+     *   selection (`recorded`, for resume). No `subagent/descriptor` in
+     *   `events` models a workflow child (no label).
      */
     async createChild({
       id = 'child-1',
@@ -223,52 +242,59 @@ const delegationCall = (description, args = {}) => [{
   type: 'tool/call',
   data: { name: 'subagent', arguments: JSON.stringify({ description, ...args }) },
 }]
+const sandboxEvents = (child) => child.appended.filter((event) => event.type === 'sandbox/mode')
 
-const SURVEY_ROLE = { match: 'Survey', provider: 'deepseek-official', model: 'deepseek-flash' }
-/** A role whose route differs from both the pin and the parent route. */
-const ROLE_ROUTE = { match: 'Survey', provider: 'deepseek-official', model: 'deepseek-reasoner' }
+// --- roles retirement (0.5.0) ----------------------------------------------
 
-test('roles route a delegation by description prefix and fall back to the default route', async () => {
-  const h = createHarness({ roles: [SURVEY_ROLE] })
+test('0.5.0: a retired roles table loads, is ignored at runtime, and warns once', async () => {
+  const h = createHarness({ roles: [SURVEY_ROLE, SANDBOX_ROLE] })
+  assert.equal(h.warnings.length, 1, 'exactly one migration warning per activation')
+  assert.match(h.warnings[0], /roles 已退役/)
+  assert.match(h.warnings[0], /README/)
+
+  // Injection has no role tiers: every description gets the same default route.
+  const survey = await h.execute('subagent', { description: 'Survey W14', prompt: 'p' })
+  const impl = await h.execute('subagent', { description: 'Implement W14', prompt: 'p' })
+  assert.equal(survey.provider, PIN.provider)
+  assert.equal(survey.model, PIN.model)
+  assert.deepEqual(impl, { ...survey, description: 'Implement W14' })
+
+  // No label-driven sandbox narrowing and no label-driven select (R4' keeps a
+  // tool-pinned child). The warning still fires only once.
+  h.sessions.set('parent', h.session({ parentRoute: PARENT_ROUTE }))
+  const child = await h.createChild({ events: descriptor('Survey the repo'), options: { ...PARENT_ROUTE } })
+  assert.deepEqual(sandboxEvents(child), [])
+  assert.equal(child.selectCalls(), 0)
+  assert.equal(h.warnings.length, 1)
+})
+
+test('0.5.0: no roles (or an empty table) means no migration warning', () => {
+  assert.deepEqual(createHarness().warnings, [])
+  assert.deepEqual(createHarness({ roles: [] }).warnings, [])
+})
+
+test('0.5.0: the Config schema still accepts a retired roles table', () => {
+  // The field is kept for old profiles: a load-time rejection would take the
+  // whole plugin down, so the schema stays and the runtime ignores the entries.
+  const { warnings } = createSchemaHarness({ roles: [SANDBOX_ROLE] })
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /roles 已退役/)
+})
+
+// --- injection path (tools/execute) ----------------------------------------
+
+test('injects the same default route for any description (no role tiers)', async () => {
+  const h = createHarness()
+  const expected = { provider: PIN.provider, model: PIN.model, reasoning_effort: PIN.effort }
 
   const survey = await h.execute('subagent', { description: 'Survey W14 code', prompt: 'p' })
-  assert.equal(survey.provider, 'deepseek-official')
-  assert.equal(survey.model, 'deepseek-flash')
+  assert.deepEqual(survey, { description: 'Survey W14 code', prompt: 'p', ...expected })
 
   const impl = await h.execute('subagent', { description: 'Implement W14', prompt: 'p' })
-  assert.equal(impl.provider, PIN.provider)
-  assert.equal(impl.model, PIN.model)
+  assert.deepEqual(impl, { description: 'Implement W14', prompt: 'p', ...expected })
 })
 
-test('role matching ignores case and leading whitespace', async () => {
-  const h = createHarness({ roles: [{ ...SURVEY_ROLE, match: 'survey' }] })
-  const args = await h.execute('subagent', { description: '  SURVEY the code', prompt: 'p' })
-  assert.equal(args.model, 'deepseek-flash')
-})
-
-test('invalid role configuration fails at load', () => {
-  assert.throws(() => createHarness({ roles: [{ match: '', provider: 'p', model: 'm' }] }), /roles/)
-  assert.throws(() => createHarness({ roles: [{ match: 'X', provider: 'p' }] }), /model/)
-  assert.throws(() => createHarness({ roles: 'nope' }), /roles/)
-})
-
-test('injects the pin route into a delegation call that omitted a route', async () => {
-  const h = createHarness()
-  const args = await h.execute('subagent', { description: 'plain', prompt: 'p' })
-  assert.deepEqual(args, {
-    description: 'plain',
-    prompt: 'p',
-    provider: PIN.provider,
-    model: PIN.model,
-    reasoning_effort: PIN.effort,
-  })
-})
-
-test('an explicit route still beats a role route', async () => {
-  // The role matches the label, so only the explicit delegation arguments can
-  // keep the stronger route — this is the injection-path counterpart of R3
-  // outranking R4. The explicit route differs from the role route *and* from the
-  // pin route, so an injector that overrode it (with either) would show up here.
+test('an explicit route still beats the injected default route', async () => {
   const h = createHarness({ roles: [SURVEY_ROLE] })
   const args = await h.execute('subagent', {
     description: 'Survey upgrade',
@@ -317,7 +343,7 @@ test('0.4.0: a recorded policy keeps the injection path', async () => {
   assert.equal(args.reasoning_effort, PIN.effort)
 })
 
-// --- behaviour matrix R1-R6 (agent/created select) ---------------------------
+// --- select branch table R1/R2/R3/R4'/R5/R6' --------------------------------
 
 test('R1: a non-subagent agent is left alone', async () => {
   const h = createHarness()
@@ -371,9 +397,7 @@ test('R3: keeps an explicit upgrade that happens to equal the parent route', asy
 
 test('R3: keeps an explicit route that differs from both pin and parent', async () => {
   const explicit = { provider: 'somewhere', model: 'strong-model' }
-  // The label also hits a role, so this anchors the matrix order: an explicit
-  // choice wins over R4 as well, and the created handler selects nothing.
-  const h = createHarness({ roles: [SURVEY_ROLE] })
+  const h = createHarness()
   h.sessions.set('parent', h.session({
     events: delegationCall('Survey audit', { provider: explicit.provider, model: explicit.model }),
     parentRoute: PARENT_ROUTE,
@@ -384,39 +408,71 @@ test('R3: keeps an explicit route that differs from both pin and parent', async 
   assert.deepEqual(child.current(), explicit)
 })
 
-test('R4: a role route is selected over the inherited parent route', async () => {
-  const h = createHarness({ roles: [ROLE_ROUTE] })
+test("R4': a tool-pinned child is never re-selected, even when its route equals the parent's", async () => {
+  // The old R4 drift: a label-prefix role matched `Survey …` and overrode the
+  // route a tool had pinned at creation. R5's parent-route comparison cannot
+  // rescue it (pin == parent), so R4' must keep it on `explicit === undefined`.
+  const h = createHarness({ roles: [SURVEY_ROLE] })
   h.sessions.set('parent', h.session({ parentRoute: PARENT_ROUTE }))
-  const child = await h.createChild({ events: descriptor('Survey Task 1'), options: { ...PARENT_ROUTE } })
-
-  // The role names no effort, so it inherits the default pin effort.
-  assert.deepEqual(child.selections, [selection(ROLE_ROUTE.provider, ROLE_ROUTE.model, PIN.effort)])
-})
-
-test('R4: a role route already in place produces no selection event', async () => {
-  const h = createHarness({ roles: [ROLE_ROUTE] })
-  h.sessions.set('parent', h.session({ parentRoute: PARENT_ROUTE }))
-  const child = await h.createChild({
-    events: descriptor('Survey settled'),
-    options: { provider: ROLE_ROUTE.provider, model: ROLE_ROUTE.model },
-  })
+  const child = await h.createChild({ events: descriptor('Survey the code'), options: { ...PARENT_ROUTE } })
 
   assert.deepEqual(child.selections, [])
-  // The route is already in place because the creation-time options already
-  // match the role; dedupe would also swallow a redundant select, so count the
-  // calls themselves: the created handler must not even try.
-  assert.equal(child.selectCalls(), 0)
+  assert.equal(child.selectCalls(), 0, 'the created handler must not even try to select')
+  assert.deepEqual(child.current(), PARENT_ROUTE)
 })
 
-test('R5: keeps a differing current route when no delegation call matches (workflow / cold resume)', async () => {
+test("R4': a tool-pinned child with an uncommitted parent call keeps its own route", async () => {
+  // Accepted edge (spec §4.2): no committed parent `tool/call` means `explicit`
+  // is unknown, so a labelled child is treated as tool-pinned. It loses the
+  // default pin — the safe direction (one fewer override), never a widened one.
   const h = createHarness()
-  h.sessions.set('parent', h.session({ parentRoute: PARENT_ROUTE }))
+  h.sessions.set('parent', h.session({ events: [], parentRoute: PARENT_ROUTE }))
   const child = await h.createChild({
-    events: descriptor('workflow child 9'),
+    events: descriptor('Upgrade everything'),
     options: { provider: 'somewhere', model: 'other-model' },
   })
 
   assert.deepEqual(child.selections, [])
+})
+
+test("R4': a resumed tool-pinned child already on its route selects nothing", async () => {
+  const h = createHarness()
+  h.sessions.set('parent', h.session({ parentRoute: PARENT_ROUTE }))
+  const child = await h.createChild({
+    events: [...descriptor('plain'), { type: 'model/selection', data: selection(PIN.provider, PIN.model, PIN.effort) }],
+    options: { ...PARENT_ROUTE },
+    recorded: selection(PIN.provider, PIN.model, PIN.effort),
+  })
+
+  assert.deepEqual(child.selections, [])
+  assert.equal(child.selectCalls(), 0)
+})
+
+test('R5: a workflow child (no label) keeps a current route that differs from the parent', async () => {
+  const h = createHarness()
+  h.sessions.set('parent', h.session({ parentRoute: PARENT_ROUTE }))
+  const child = await h.createChild({ options: { provider: 'somewhere', model: 'other-model' } })
+
+  assert.deepEqual(child.selections, [])
+})
+
+test("R6': a workflow child with no label and an inherited route is pinned", async () => {
+  const h = createHarness()
+  h.sessions.set('parent', h.session({ parentRoute: PARENT_ROUTE }))
+  const child = await h.createChild({ options: { ...PARENT_ROUTE } })
+
+  assert.deepEqual(child.selections, [selection(PIN.provider, PIN.model, PIN.effort)])
+  assert.deepEqual(child.current(), selection(PIN.provider, PIN.model, PIN.effort))
+  assert.deepEqual(child.requestListeners(), [])
+})
+
+test("R6': a workflow child already on the default route selects nothing", async () => {
+  const h = createHarness()
+  h.sessions.set('parent', h.session({ parentRoute: PARENT_ROUTE }))
+  const child = await h.createChild({ options: { provider: PIN.provider, model: PIN.model } })
+
+  assert.deepEqual(child.selections, [])
+  assert.equal(child.selectCalls(), 0)
 })
 
 test('R6: pins when the delegation call explicitly asked for nothing', async () => {
@@ -428,32 +484,10 @@ test('R6: pins when the delegation call explicitly asked for nothing', async () 
   assert.deepEqual(child.current(), selection(PIN.provider, PIN.model, PIN.effort))
 })
 
-test('R6: a resumed child already on the pin route selects nothing', async () => {
-  const h = createHarness()
-  h.sessions.set('parent', h.session({ parentRoute: PARENT_ROUTE }))
-  const child = await h.createChild({
-    events: [...descriptor('plain'), { type: 'model/selection', data: selection(PIN.provider, PIN.model, PIN.effort) }],
-    options: { ...PARENT_ROUTE },
-    recorded: selection(PIN.provider, PIN.model, PIN.effort),
-  })
-
-  assert.deepEqual(child.selections, [])
-})
-
-test('workflow child with an uncommitted parent call is pinned and never touches agent/request', async () => {
-  const h = createHarness()
-  // Parent session exists but carries no delegated `tool/call` for this label.
-  h.sessions.set('parent', h.session({ events: [], parentRoute: PARENT_ROUTE }))
-  const child = await h.createChild({ events: descriptor('workflow child 1'), options: { ...PARENT_ROUTE } })
-
-  assert.deepEqual(child.selections, [selection(PIN.provider, PIN.model, PIN.effort)])
-  assert.deepEqual(child.requestListeners(), [])
-})
-
 test('select carries the configured reasoning effort', async () => {
   const h = createHarness({ reasoningEffort: 'minimal' })
   h.sessions.set('parent', h.session({ parentRoute: PARENT_ROUTE }))
-  const child = await h.createChild({ events: descriptor('plain'), options: { ...PARENT_ROUTE } })
+  const child = await h.createChild({ options: { ...PARENT_ROUTE } })
 
   assert.deepEqual(child.selections, [selection(PIN.provider, PIN.model, 'minimal')])
 })
@@ -461,7 +495,7 @@ test('select carries the configured reasoning effort', async () => {
 test('an empty configured effort produces a selection without an effort field', async () => {
   const h = createHarness({ reasoningEffort: '' })
   h.sessions.set('parent', h.session({ parentRoute: PARENT_ROUTE }))
-  const child = await h.createChild({ events: descriptor('plain'), options: { ...PARENT_ROUTE } })
+  const child = await h.createChild({ options: { ...PARENT_ROUTE } })
 
   assert.equal(child.selections.length, 1)
   assert.equal(child.selections[0].provider, PIN.provider)
@@ -474,7 +508,7 @@ test('an empty configured effort produces a selection without an effort field', 
 test('selects when the pin provider is registered with the llm service', async () => {
   const h = createHarness({}, { providers: [PIN.provider, PARENT_ROUTE.provider] })
   h.sessions.set('parent', h.session({ parentRoute: PARENT_ROUTE }))
-  const child = await h.createChild({ events: descriptor('plain'), options: { ...PARENT_ROUTE } })
+  const child = await h.createChild({ options: { ...PARENT_ROUTE } })
 
   assert.deepEqual(child.selections, [selection(PIN.provider, PIN.model, PIN.effort)])
 })
@@ -482,7 +516,7 @@ test('selects when the pin provider is registered with the llm service', async (
 test('skips the pin when no adapter serves the configured provider', async () => {
   const h = createHarness({}, { providers: [PARENT_ROUTE.provider] })
   h.sessions.set('parent', h.session({ parentRoute: PARENT_ROUTE }))
-  const child = await h.createChild({ events: descriptor('plain'), options: { ...PARENT_ROUTE } })
+  const child = await h.createChild({ options: { ...PARENT_ROUTE } })
 
   assert.deepEqual(child.selections, [])
   assert.deepEqual(child.current(), PARENT_ROUTE)
@@ -491,44 +525,44 @@ test('skips the pin when no adapter serves the configured provider', async () =>
 test('selects anyway when the runtime cannot answer the provider question', async () => {
   const h = createHarness({}, { llm: false })
   h.sessions.set('parent', h.session({ parentRoute: PARENT_ROUTE }))
-  const child = await h.createChild({ events: descriptor('plain'), options: { ...PARENT_ROUTE } })
+  const child = await h.createChild({ options: { ...PARENT_ROUTE } })
 
   assert.deepEqual(child.selections, [selection(PIN.provider, PIN.model, PIN.effort)])
 })
 
-// --- role sandbox -----------------------------------------------------------
+// --- sandbox narrowing ------------------------------------------------------
 
-const SANDBOX_ROLE = { ...SURVEY_ROLE, sandbox: 'read-only' }
-
-const sandboxEvents = (child) => child.appended.filter((event) => event.type === 'sandbox/mode')
-
-test('roles[].sandbox narrows the matching child before its first tool call', async () => {
-  const h = createHarness({ roles: [SANDBOX_ROLE] })
+test('the top-level sandbox narrows a child before its first tool call', async () => {
+  const h = createHarness({ sandbox: 'read-only' })
   const child = await h.createChild({ events: descriptor('Survey the repo') })
 
   assert.deepEqual(sandboxEvents(child), [{ type: 'sandbox/mode', data: { mode: 'read-only' } }])
 })
 
-test('no sandbox event for an unmatched label or a role without sandbox', async () => {
-  const h = createHarness({ roles: [SANDBOX_ROLE] })
-  const impl = await h.createChild({ events: descriptor('Implement something') })
-  assert.deepEqual(sandboxEvents(impl), [])
-
-  const h2 = createHarness({ roles: [SURVEY_ROLE] })
-  const survey = await h2.createChild({ events: descriptor('Survey something') })
-  assert.deepEqual(sandboxEvents(survey), [])
-})
-
-test('sandbox is not re-appended when the child already sits in that mode', async () => {
-  const h = createHarness({ roles: [SANDBOX_ROLE] })
+test('the top-level sandbox is not re-appended when the child already sits in that mode', async () => {
+  const h = createHarness({ sandbox: 'read-only' })
   const child = await h.createChild({
     events: [...descriptor('Survey settled'), { type: 'sandbox/mode', data: { mode: 'read-only' } }],
   })
+
   assert.deepEqual(sandboxEvents(child), [])
 })
 
-test('unknown sandbox modes fail at load', () => {
-  assert.throws(() => createHarness({ roles: [{ ...SURVEY_ROLE, sandbox: 'nope' }] }), /sandbox/)
+test('the top-level sandbox does not touch a non-subagent', async () => {
+  const h = createHarness({ sandbox: 'read-only' })
+  const child = await h.createChild({ header: {} })
+
+  assert.deepEqual(sandboxEvents(child), [])
+})
+
+test('roles[].sandbox no longer narrows anything (retired)', async () => {
+  const h = createHarness({ roles: [SANDBOX_ROLE] })
+  const child = await h.createChild({ events: descriptor('Survey the repo') })
+
+  assert.deepEqual(sandboxEvents(child), [])
+})
+
+test('an unknown top-level sandbox fails at load', () => {
   assert.throws(() => createHarness({ sandbox: 'nope' }), /sandbox/)
 })
 
@@ -564,7 +598,7 @@ test('a volatile route swap also changes the route selected at agent/created', a
 
   const h = createHarnessWith(config)
   h.sessions.set('parent', h.session({ parentRoute: PARENT_ROUTE }))
-  const child = await h.createChild({ events: descriptor('plain'), options: { ...PARENT_ROUTE } })
+  const child = await h.createChild({ options: { ...PARENT_ROUTE } })
 
   assert.deepEqual(child.selections, [selection(swapped.provider, swapped.model, swapped.effort)])
 })
@@ -590,15 +624,14 @@ test("an empty volatile effort means 'no pinned effort' again", async () => {
   assert.equal('reasoning_effort' in args, false)
 })
 
-test('a role route still beats the volatile default route', async () => {
+test('a retired role table does not beat the volatile default route', async () => {
   const { config, execute } = createSchemaHarness({ roles: [SURVEY_ROLE] })
   updateVolatile(config.provider, createVolatile(GUI_ROUTE.provider))
   updateVolatile(config.model, createVolatile(GUI_ROUTE.model))
 
   const survey = await execute('subagent', { description: 'Survey W14', prompt: 'p' })
-  assert.equal(survey.model, SURVEY_ROLE.model)
-  const plain = await execute('subagent', { description: 'Implement W14', prompt: 'p' })
-  assert.equal(plain.provider, GUI_ROUTE.provider)
+  assert.equal(survey.provider, GUI_ROUTE.provider)
+  assert.equal(survey.model, GUI_ROUTE.model)
 })
 
 test('schema-built config still refuses an empty provider/model at apply', () => {

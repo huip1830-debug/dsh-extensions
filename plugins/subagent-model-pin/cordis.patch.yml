@@ -15,12 +15,8 @@
         # reasoningEffort: high            # 可选：pin 时一并写入的 effort
         injectDelegationDefaults: true   # false = 关闭 tools/execute 注入，退回 agent/created 时 select 兜底
         debug: false                     # true 时写 %TEMP%\subagent-model-pin.log
-        # roles:                           # 按委派 description 前缀分档；显式 provider/model 仍然优先
-        #   - match: Survey                # 前缀匹配，大小写不敏感
-        #     provider: deepseek-official
-        #     model: deepseek-flash
-        #     sandbox: read-only           # 可选：收窄该角色子会话的沙箱（read-only/workspace-write/danger-full-access）
-        #   - match: Implement
-        #     provider: opencode-go
-        #     model: deepseek-v4.1-flash
+        # roles 已退役（0.5.0）：老 profile 的 roles 仍可加载（schema 保留），但运行期
+        # 完全忽略，apply 时只发一次迁移提示。只读评审/勘察/spike 的路由与沙箱由
+        # dispatch-protocol 的组合结构钉死；普通 subagent 不再按角色分档，默认路由
+        # 见顶层 provider/model。迁移说明见 README「版本历史」0.5.0。
 
