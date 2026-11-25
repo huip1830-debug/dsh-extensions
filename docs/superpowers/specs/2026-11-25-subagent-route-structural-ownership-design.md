@@ -168,6 +168,17 @@ R6' 否则 → select 默认路由（实际负载收窄为：无 descriptor 的 
 
 `cordis.patch.yml` 删 model-pin `roles` 全表（含只读角色与 spike 角色）；新增 `tool-subagent-spike` 覆盖段（同 readonly 的覆盖模式）；`subagent-model-selection-settings` 白名单不变。
 
+### 6.5 插件独立性（2×2 矩阵）
+
+两插件无加载期依赖，任意组合可用；「关掉一层，下面的层还在」。子代理模型的配置能力分层：L0 宿主原生（继承父路由 + 显式传参 + workflow 显式）→ L1 官方白名单（无白名单时显式选路被宿主限制为只能选父路由）→ L2 model-pin 全局默认路由 → L3 dispatch-protocol 专用组合（钉路写在工具实例上，不经白名单、不依赖 model-pin）。
+
+| | 有 model-pin | 无 model-pin |
+|---|---|---|
+| **有纪律** | 全功能 | readonly/spike 仍跑钉路（钉在工具上）；普通 `subagent` 回到继承父路由 |
+| **无纪律** | readonly/spike 工具随纪律消失；普通 `subagent`/workflow 仍有默认 pin | stock 原生：全部继承父路由；换路由只能逐次显式传参（需先配白名单） |
+
+此矩阵同步进 model-pin README「与 dispatch-protocol 的关系」一节，防止误读依赖方向。
+
 ## 7. 测试计划
 
 **model-pin test.mjs**（改写/新增）
@@ -192,6 +203,7 @@ R6' 否则 → select 默认路由（实际负载收窄为：无 descriptor 的 
 ## 8. 后续（不在本 spec 范围）
 
 - **上游登记**：向 DSH 提 `subagent/descriptor`（或 child options）记录 `routeSource: 'inherited' | 'tool-configured' | 'call-explicit'` 的需求。落地后 model-pin 的 tool/call 扫描、R5 启发式、R4' 的 label 判定全部可退役。
+- **长期定位（写进 model-pin README 开篇）**：本插件是宿主缺口（无「子代理默认路由」配置点、预设内工具不可 patch）的**过渡补丁**，上游落地一等配置后即废弃；其健康指标是「功能持续做减法」，而非越做越重。
 - **下个大版本**：model-pin Config schema 删除 `roles` 字段（加载期抛错给迁移指引，与 dispatch-protocol 废弃配置先例一致）。
 - **观察项**：`subagent_spike` 的 read-only 沙箱在真实 spike 中的卡点（临时文件需求）；若频繁触发，评估 spike 专属 mode 默认 `workspace-write` 的利弊（写约束从沙箱退回纪律文本，需证据支撑再改）。
 
