@@ -129,8 +129,8 @@ R6' 否则 → select 默认路由（实际负载收窄为：无 descriptor 的 
 
 - `DEFAULT_FOOTER`（lib/config.mjs）：「label 前缀只服务 spike 的沙箱收窄——spike 要跑命令实测，仍走普通 subagent」→「只读实测（spike）一律用 `subagent_spike` 派发：带 shell 的只读组合，路由与沙箱结构钉死」。
 - **删除**「只读类子代理 label 一律以『只读』或『勘察』开头，执行类批次不得以这两个词开头」——roles 退役后 label 前缀不再驱动任何机制（checkpoint 判定走 `ranReadOnly` 行为信号，不读 label）。符合「用证据删机制」。
-- 规则 1「先派只读勘察（一律用 `subagent_readonly`）」补充半句区分：「要跑命令实测外部环境的用 `subagent_spike`」。
-- AUTO_TEXT 同步一句（spike 工具名）；business 规则预设同步。
+- 规则 1「先派只读勘察（一律用 `subagent_readonly`）」补充半句区分：「要跑命令实测外部环境的用 `subagent_spike`」；`BUSINESS_RULES` 规则 1 同步。
+- **AUTO_TEXT 与 BUSINESS_FOOTER 不改**：勘察确认两者均不含 label/spike 内容（spec 初稿「AUTO_TEXT 同步一句」系误写，以 dispatch/recon/subagent-route-ownership.dispatch-protocol.md 为准）。
 - KV 缓存注意：规则文本变化影响缓存命中，随版本一次性发布，不迭代改字。
 
 ### 5.5 writePolicy.delegationTools
