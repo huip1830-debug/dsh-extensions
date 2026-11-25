@@ -159,7 +159,7 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 - **工具面**：`cordis.patch.yml` 声明 agent preset `dispatch-readonly`——`dsh-tool-fs` 的 `write` / `edit` 关闭、不挂 `tool-pwsh` / `tool-bash`，只剩 read / readImage / grep / glob；同时注册 Host 全局委派工具 `subagent_readonly`（`provider: spawn` + `agentPreset: dispatch-readonly` + `modelSelection: false`）。评审想写文件或重跑构建时得到的是「工具不存在」，而不是沙箱拒绝。
 - **路由面**：`tool-subagent-readonly` 带 `agentOptions`，子代理路由在**创建时**钉死——`subagent/descriptor`、首请求、冷恢复三者一致，adapter 预检在委派调用时就报错，且不经会话白名单。默认路由是 stock 自带的 `deepseek-official/deepseek-flash`，不 pin effort。换路由要在 profile 层按 id 整段覆盖 `tool-subagent-readonly`，并与 model-pin 的 roles 表对齐（交互与修法见「已知坑」）。
 - **沙箱面**：`readonlySandbox` 机制按子会话的 preset 记录（`header.agentPreset` / `agent-preset/selected` 事件）把命中角色的沙箱收窄为 `read-only`——`agent/created` 时追加一条 `sandbox/mode` 事件，幂等共存、监听顺序无关。
-- **谁必须走它**：评审、复审、勘察一律用 `subagent_readonly` 派发。**spike 例外**：只读 spike 要真跑命令实测环境，不能用这个无 shell 的工具，仍走普通 `subagent`，其沙箱收窄由 model-pin 的角色表按 label 前缀提供。
+- **谁必须走它**：评审、复审、勘察一律用 `subagent_readonly` 派发。**工具按产出物而非批次名选择**：要新建或修改任何文件的批次（含**评审修复批**）一律用普通 `subagent`——批次名含「评审/复审」不改变工具选择，拿不准时用 `subagent`（评审误走它只损失一层沙箱保险；修复批误走 `subagent_readonly` 会被无写工具的 preset 整批钉死）。**spike 例外**：只读 spike 要真跑命令实测环境，不能用这个无 shell 的工具，仍走普通 `subagent`，其沙箱收窄由 model-pin 的角色表按 label 前缀提供。
 - **派发方职责**：评审组合没有 shell，读不到主控运行时之外的东西——本批 diff 与集成命令输出由派发方先落盘到 `dispatch/` 再交评审读取。
 - **成本**：该工具常驻所有会话（约数百 token/请求），是本版显式接受的取舍。
 - **安装后验证**：重启 DSH → 新会话派一个「只读评审：…」任务，确认 ① 子代理工具列表里没有 write / edit / pwsh；② `list_agents` 能看到它；③ 尝试写文件时得到「工具不存在」；④ `agent-preset/selected` = `dispatch-readonly`、`subagent/descriptor.agentModel` = 钉死路由、`sandbox/mode` 末态为 `read-only`；⑤ `verify-install.mjs` 的 `readonly-tool` 与 `route-alignment` 项 PASS。
@@ -198,7 +198,7 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 
 | 命令 | 期望 |
 |---|---|
-| `node plugins/dispatch-protocol/test.mjs` | 126 pass / fail 0，exit 0 |
+| `node plugins/dispatch-protocol/test.mjs` | 132 pass / fail 0，exit 0 |
 | `node plugins/dispatch-protocol/scripts/docs-check.mjs` | 无参扫仓库根，`fail=0`，exit 0 |
 | `node plugins/dispatch-protocol/scripts/check-anchors.mjs` | 无参扫 `README.md` 与 `plugins/*/README.md`，`fail=0`，exit 0 |
 | `node plugins/dispatch-protocol/scripts/docs-check.mjs --self-test` | `fail=0`，exit 0 |
@@ -239,6 +239,7 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 
 | 版本 | 要点 |
 |---|---|
+| `0.24.0` | 规则 4 与 business 预设补工具消歧：派发工具按产出物（要不要写文件）而非批次名选择，评审修复批一律走 `subagent`，拿不准时用 `subagent`——修复「评审修复」类批次被误派到 `subagent_readonly` 后整批无写工具的问题。 |
 | `0.23.2` | `verify-install.mjs` 新增 `route-alignment` 检查：model-pin 只读角色表与 `agentOptions` 钉路不一致即 FAIL 并给修法；README 修正两处「两份事实」交互的准确语义（R4 覆盖条件与漂移后果）。 |
 | `0.23.1` | 修复：只读评审 preset 给 `tool-fs-search` 补必填的 `sampleOverCapGlobResults: false`；此前缺配导致子代理启动时报 `invalid config`，评审里的 glob/grep 不可用。 |
 | `0.23.0` | 只读评审默认路由换 stock 自带的 `deepseek-official/deepseek-flash`，不 pin effort；`verify-install.mjs` 增加 `whitelist-mode` 提示项。 |

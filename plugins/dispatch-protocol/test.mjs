@@ -3190,8 +3190,19 @@ test('0.21.0/0.22.0: review and recon are bound to subagent_readonly in the defa
   assert.match(text, /label 仍以「勘察\/只读」开头/,
     'the label convention survives; 0.22.0 narrows its effect to the spike sandbox')
 
+  // 0.24.0 工具消歧：判定键是产出物（要不要写文件），不是批次名——「评审修复批」
+  // 是执行批，误走 subagent_readonly 会被无写工具的 preset 整批钉死。
+  assert.match(text, /工具按产出物而非批次名选择：只回传结论、不写任何文件的批次才用 `subagent_readonly`/,
+    '0.24.0: the tool choice key is the artifact, not the batch name')
+  assert.match(text, /含评审修复批）一律用 `subagent`/,
+    '0.24.0: review-fix batches go through the normal subagent')
+  assert.match(text, /批次名含「评审\/复审」不改变工具选择，拿不准时用 `subagent`/,
+    '0.24.0: a name containing 评审 never flips the tool; doubt resolves to subagent')
+
   assert.match(BUSINESS_RULES[3], /评审一律用 `subagent_readonly` 派发/,
     'the business preset binds review to the tool as well')
+  assert.match(BUSINESS_RULES[3], /批次名含「评审\/复审」不改变选择，拿不准时用 `subagent`/,
+    '0.24.0: the business preset carries the same disambiguation')
   assert.match(BUSINESS_RULES[3], /diff 与集成输出由派发方落盘 `dispatch\/` 后交其读取/,
     'the business preset carries the dispatcher landing duty')
   assert.match(BUSINESS_RULES[0], /一律用 `subagent_readonly` 派发/,
@@ -3333,16 +3344,16 @@ test('0.22.0: root agents and a disabled section are never narrowed', () => {
   assert.equal(offAppended.length, 0, 'readonlySandbox.enabled:false registers nothing')
 })
 
-test('0.22.0: the default text grew by a bounded amount', (t) => {
+test('0.22.0/0.24.0: the default text grew by a bounded amount', (t) => {
   // 0.21.0 实测基线：六条规则 3326 字符 + footer 702 字符。0.22.0 只改规则 1 的
-  // 括号注与 footer 末两句（前缀 → preset 的归属改词），预算增量 ≤40 字符；
-  // 实测 22（规则 18 + footer 4）。区间上下界留出措辞微调余量，超出时把实际
-  // 增量报进失败信息。
+  // 括号注与 footer 末两句（前缀 → preset 的归属改词），增量 22；0.24.0 在规则 4
+  // 加一句工具消歧（产出物判定 + 评审修复批例外 + 拿不准走 subagent），增量约
+  // 155。区间上下界留出措辞微调余量，超出时把实际增量报进失败信息。
   const body = DEFAULT_RULES.reduce((sum, rule) => sum + rule.length, 0)
   const delta = (body - 3326) + (DEFAULT_FOOTER.length - 702)
-  t.diagnostic(`DEFAULT_RULES ${body} 字符 / footer ${DEFAULT_FOOTER.length} 字符 / 0.22.0 增量 ${delta}`)
-  assert.ok(delta >= 15 && delta <= 40,
-    `0.22.0 text delta is ${delta} characters (0.21.0 baseline = 3326 body + 702 footer, budget <= 40)`)
+  t.diagnostic(`DEFAULT_RULES ${body} 字符 / footer ${DEFAULT_FOOTER.length} 字符 / 累计增量 ${delta}`)
+  assert.ok(delta >= 150 && delta <= 220,
+    `text delta is ${delta} characters (0.21.0 baseline = 3326 body + 702 footer; 0.22.0 grew 22, 0.24.0 budget <= 200)`)
   assert.equal(DEFAULT_RULES.length, 6, 'the binding lands inside existing rules, never a seventh clause')
 })
 
