@@ -15,8 +15,10 @@
  * Delegation tools: a turn that used one of these did not miss the dispatch.
  * 0.21.0: `subagent_readonly` (review/re-review/recon) is a delegation too — the
  * read-only review child counts as "dispatched" for the observation rows.
+ * 0.25.0: `subagent_spike` (read-only measurement with a shell) counts the same
+ * way, so the guard exemption and the observation rows share one list.
  */
-export const DEFAULT_DELEGATION_TOOLS = ['subagent', 'subagent_fork', 'workflow', 'subagent_readonly']
+export const DEFAULT_DELEGATION_TOOLS = ['subagent', 'subagent_fork', 'workflow', 'subagent_readonly', 'subagent_spike']
 
 /** Tools whose calls count as "touched a file" for this check. */
 export const DEFAULT_WRITE_TOOLS = ['write', 'edit']

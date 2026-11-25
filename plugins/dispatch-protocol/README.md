@@ -45,6 +45,8 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 
 改默认值：在 profile 的 `cordis.patch.yml` 用同 id 覆盖；`config` 整体替换，不深合并，手写时抄全字段。
 
+**从 0.24.x 升级到 0.25.0**：spike 从「普通 `subagent` + label 前缀」改成独立工具 `subagent_spike`（`dispatch-spike` preset）。若 profile 覆盖过 `readonlySandbox.presets`，老配置里只有 `dispatch-readonly`，spike **不会被收窄**（fail-open，继承父沙箱）——在覆盖里自行加上 `dispatch-spike`；`verify-install.mjs` 的 `presets-override` 项会 WARN 提醒。model-pin 的 `roles` 表已退役，两插件不再共享任何 label 前缀约定。`subagent_spike` 只在新会话可派发（纪律文本按会话冻结，旧会话行为不变）。
+
 ## 四档与项目策略
 
 | 档位 | 提示词段 | 写入守卫 | 完成检查点 | 观测行 |
@@ -152,17 +154,24 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 - **不采信自述**：实现者的说明、以及它自己的测试通过，都不算证据。
 - **输出**：逐条 `PASS|FAIL + 文件:行号`；全 PASS 须说明每条例子的验证方式。可以给建议，但不得改文件；裁决归派发方。改完只重开被判 FAIL 的那一片及其直接影响面。
 
-### 只读评审 preset
+### 只读组合：评审与 spike
 
-评审 / 复审 / 勘察的「只读」与「低成本路由」有三层独立保障，任一层失效其余仍在：
+评审 / 复审 / 勘察（`subagent_readonly`）与只读实测 spike（`subagent_spike`）各有自己的 preset 与工具实例，三层保障都挂在结构上，任一层失效其余仍在：
 
-- **工具面**：`cordis.patch.yml` 声明 agent preset `dispatch-readonly`——`dsh-tool-fs` 的 `write` / `edit` 关闭、不挂 `tool-pwsh` / `tool-bash`，只剩 read / readImage / grep / glob；同时注册 Host 全局委派工具 `subagent_readonly`（`provider: spawn` + `agentPreset: dispatch-readonly` + `modelSelection: false`）。评审想写文件或重跑构建时得到的是「工具不存在」，而不是沙箱拒绝。
-- **路由面**：`tool-subagent-readonly` 带 `agentOptions`，子代理路由在**创建时**钉死——`subagent/descriptor`、首请求、冷恢复三者一致，adapter 预检在委派调用时就报错，且不经会话白名单。默认路由是 stock 自带的 `deepseek-official/deepseek-flash`，不 pin effort。换路由要在 profile 层按 id 整段覆盖 `tool-subagent-readonly`，并与 model-pin 的 roles 表对齐（交互与修法见「已知坑」）。
-- **沙箱面**：`readonlySandbox` 机制按子会话的 preset 记录（`header.agentPreset` / `agent-preset/selected` 事件）把命中角色的沙箱收窄为 `read-only`——`agent/created` 时追加一条 `sandbox/mode` 事件，幂等共存、监听顺序无关。
-- **谁必须走它**：评审、复审、勘察一律用 `subagent_readonly` 派发。**工具按产出物而非批次名选择**：要新建或修改任何文件的批次（含**评审修复批**）一律用普通 `subagent`——批次名含「评审/复审」不改变工具选择，拿不准时用 `subagent`（评审误走它只损失一层沙箱保险；修复批误走 `subagent_readonly` 会被无写工具的 preset 整批钉死）。**spike 例外**：只读 spike 要真跑命令实测环境，不能用这个无 shell 的工具，仍走普通 `subagent`，其沙箱收窄由 model-pin 的角色表按 label 前缀提供。
-- **派发方职责**：评审组合没有 shell，读不到主控运行时之外的东西——本批 diff 与集成命令输出由派发方先落盘到 `dispatch/` 再交评审读取。
-- **成本**：该工具常驻所有会话（约数百 token/请求），是本版显式接受的取舍。
-- **安装后验证**：重启 DSH → 新会话派一个「只读评审：…」任务，确认 ① 子代理工具列表里没有 write / edit / pwsh；② `list_agents` 能看到它；③ 尝试写文件时得到「工具不存在」；④ `agent-preset/selected` = `dispatch-readonly`、`subagent/descriptor.agentModel` = 钉死路由、`sandbox/mode` 末态为 `read-only`；⑤ `verify-install.mjs` 的 `readonly-tool` 与 `route-alignment` 项 PASS。
+- **工具面**：`cordis.patch.yml` 声明两个 agent preset——`dispatch-readonly`：`dsh-tool-fs` 的 `write` / `edit` 关闭、不挂 shell；`dispatch-spike`：同样没有写工具，但**双挂** `tool-bash` + `tool-pwsh`（与 stock standard preset 同款，各平台自我裁剪）。两者都只剩 read / readImage / grep / glob，spike 另有 shell。同时注册两个 Host 全局委派工具：`subagent_readonly`（`provider: spawn` + `agentPreset: dispatch-readonly` + `modelSelection: false`）与 `subagent_spike`（同款，`agentPreset: dispatch-spike`）。评审想写文件或重跑构建时得到的是「工具不存在」，而不是沙箱拒绝。
+- **路由面**：两个工具都带 `agentOptions`，子代理路由在**创建时**钉死——`subagent/descriptor`、首请求、冷恢复三者一致，adapter 预检在委派调用时就报错，且不经会话白名单。默认路由是 stock 自带的 `deepseek-official/deepseek-flash`，不 pin effort。换路由要在 profile 层按 id 整段覆盖对应的 `tool-subagent-readonly` / `tool-subagent-spike` 行（`config` 整体替换，字段抄全）。
+- **沙箱面**：`readonlySandbox` 机制按子会话的 preset 记录（`header.agentPreset` / `agent-preset/selected` 事件）把命中 preset 的子代理沙箱收窄——`agent/created` 时追加一条 `sandbox/mode` 事件，幂等共存、监听顺序无关。默认收窄 `['dispatch-readonly', 'dispatch-spike']`：spike 有 shell，工具面管不住 `echo > file`，沙箱是它唯一的写约束。
+- **分工一句**：只审不跑命令用 `subagent_readonly`；要跑命令实测外部环境（版本 / 端口 / 库表 / 接口形状）用 `subagent_spike`。
+- **谁必须走它**：评审、复审、勘察一律用 `subagent_readonly`；要跑命令实测的 spike 一律用 `subagent_spike`。**工具按产出物而非批次名选择**：要新建或修改任何文件的批次（含**评审修复批**）一律用普通 `subagent`——批次名含「评审/复审」不改变工具选择，拿不准时用 `subagent`（评审误走只读工具只损失一层沙箱保险；修复批误走 `subagent_readonly` 会被无写工具的 preset 整批钉死）。**label 前缀契约已退役**：不再有任何机制消费 label 前缀，派发时写不写「勘察 / 只读」都不影响工具选择与沙箱收窄（checkpoint 的只读判定走行为信号，不读 label）。
+- **派发方职责**：两个组合都没有写工具——本批 diff 与集成命令输出由派发方先落盘到 `dispatch/` 再交评审读取；spike 的产物（实测契约表：事实 + 命令 + 退出码 + 输出摘录）以 final message 回传。
+- **成本**：两个工具常驻所有会话（每个约数百 token/请求），是本版显式接受的取舍。
+- **安装后验证**：重启 DSH → 新会话派一个「只读评审：…」任务，确认 ① 子代理工具列表里没有 write / edit / pwsh；② `list_agents` 能看到它；③ 尝试写文件时得到「工具不存在」；④ `agent-preset/selected` = `dispatch-readonly`、`subagent/descriptor.agentModel` = 钉死路由、`sandbox/mode` 末态为 `read-only`；⑤ 再派一个 spike 任务确认工具列表里有 shell、`agent-preset/selected` = `dispatch-spike`；⑥ `verify-install.mjs` 的 `readonly-tool` / `spike-tool` / `route-coverage` 项 PASS 或按提示 WARN。
+
+### readonlySandbox：按 preset 收窄沙箱
+
+默认 `readonlySandbox.presets = ['dispatch-readonly', 'dispatch-spike']`、`mode = read-only`（`lib/config.mjs#DEFAULT_READONLY_SANDBOX_PRESETS`）。判定键是子会话的 preset 记录，不是 label 文本；命中后追加一条 `sandbox/mode` 事件，已是目标档位则跳过、不产生重复事件。
+
+**已知坑（spike 的 read-only 沙箱）**：spike 在 `read-only` 下写不了临时探测脚本文件，沙箱直接拒绝写盘，探测命令会失败。用内联命令（`node -e "…"` / `pwsh -Command "…"`）或把内容打到 stdout 回传；确需落盘时在 profile 层覆盖 `readonlySandbox.mode: workspace-write`——`config` 整体替换，`presets` / `enabled` 等字段要抄全。
 
 ## 配置
 
@@ -178,7 +187,7 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 | `observation.enabled` | `true` | 是否写回合观测行（不是门禁） |
 | `observation.dir` | `dispatch/runs` | 观测行目录（相对会话 cwd）；`false` 关闭 |
 | `readonlySandbox.enabled` | `true` | 是否按子会话 preset 收窄沙箱 |
-| `readonlySandbox.presets` | `['dispatch-readonly']` | 收窄哪些 preset 的子代理（非空字符串数组） |
+| `readonlySandbox.presets` | `['dispatch-readonly', 'dispatch-spike']` | 收窄哪些 preset 的子代理（非空字符串数组） |
 | `readonlySandbox.mode` | `read-only` | 收窄目标档位（`read-only` / `workspace-write` / `danger-full-access`） |
 | `log` | `%TEMP%\dispatch-protocol-decisions.jsonl` | checkpoint / 写入守卫 / 沙箱收窄共用的决定日志；`false` 都不记 |
 | `projectSwitch.enabled` | `true` | 项目级开关总闸；`false` 时完全回到旧行为（不读标记文件） |
@@ -188,7 +197,7 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 | `writePolicy.allowlist` | `['dispatch/','docs/superpowers/specs/']` | 主控可直接写的前缀（cwd 相对、大小写不敏感；尾 `/` 前缀匹配，无尾 `/` 词边界）；命中放行且不写日志 |
 | `writePolicy.overridePath` | `dispatch/override.json` | 唯一豁免凭据（cwd 相对）；`reason` 非空且本会话写下才有效 |
 | `writePolicy.tools` | `['write','edit']` | 守卫检查的工具名 |
-| `writePolicy.delegationTools` | `['subagent','subagent_fork','workflow','subagent_readonly']` | 观测行复用的「已派发」工具名 |
+| `writePolicy.delegationTools` | `['subagent','subagent_fork','workflow','subagent_readonly','subagent_spike']` | 观测行复用的「已派发」工具名 |
 
 非法配置在插件加载时直接报错，不会静默降级：`order` 非有限数字、`rules` 为空 / 非数组、`footer` 或 `checkpoint.*` 非字符串、`log` 既非非空路径也非 `false`、`observation.dir` 非非空字符串也非 `false`、`nudge` / `gates` 段出现、`writePolicy.mode` 不是 `enforce` / `shadow`、`writePolicy.allowlist` / `tools` / `delegationTools` 为空数组或含空白串、`writePolicy.overridePath` 空白、`projectSwitch` 非对象 / `projectSwitch.enabled` 非布尔 / `projectSwitch.path` 空白、`readonlySandbox` 非对象 / `readonlySandbox.enabled` 非布尔 / `readonlySandbox.presets` 为空数组或含空白串 / `readonlySandbox.mode` 不在三值档位内。`gates` 段已在旧版本移除：出现即加载期报错，迁移提示指向 `dispatch/runs` 与决定日志。
 
@@ -198,7 +207,7 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 
 | 命令 | 期望 |
 |---|---|
-| `node plugins/dispatch-protocol/test.mjs` | 132 pass / fail 0，exit 0 |
+| `node plugins/dispatch-protocol/test.mjs` | 全绿（fail 0、exit 0） |
 | `node plugins/dispatch-protocol/scripts/docs-check.mjs` | 无参扫仓库根，`fail=0`，exit 0 |
 | `node plugins/dispatch-protocol/scripts/check-anchors.mjs` | 无参扫 `README.md` 与 `plugins/*/README.md`，`fail=0`，exit 0 |
 | `node plugins/dispatch-protocol/scripts/docs-check.mjs --self-test` | `fail=0`，exit 0 |
@@ -226,12 +235,14 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 - **升级工具依赖宿主工具面**：`ctx.tools.register` 不存在时工具静默缺席，模型只能请用户点 dock 或输入 `/dispatch full`。
 - **无会话 / 会话未就绪时不显示控件**：该槽要求会话已打开且输入态就绪——还没选 / 建会话、会话打开中、打开失败时整行不渲染，属预期；空白新会话也算就绪；`/dispatch` 在这些状态下始终可用。
 - **profile 插件不支持热加载**：装完必须重启 DSH；`dsh plugin update` 失败可能留下半残目录（被打开的子目录进入 delete-pending），只能重启 Windows 清——先完全退出 DSH 再 update。
-- **钉死路由与 model-pin 角色表是两份事实**：评审/勘察角色的路由在 `tool-subagent-readonly` 的 `agentOptions`（创建时钉死），但 model-pin 的 roles 表按 label 前缀命中**不同路由**时仍会在 `agent/created` 时 select 覆盖钉路——`subagent/descriptor` 与运行路由不一致，且结果取决于 label 措辞（「评审…」前缀命中被覆盖，「…勘察」词尾不命中而保留钉路，2026-11-24 实证）。三选一修法：profile 按 id 整段覆盖 `tool-subagent-readonly` 的 `agentOptions` 为角色表同路由（config 整体替换，字段抄全）；把角色改成钉路路由；删掉只读角色（roles 只留 spike 沙箱职责）。换低成本模型时两处都要动；`verify-install.mjs` 的 `route-alignment` 项逐台机器核验一致性。
+- **三处钉路换路由要改多处**：只读评审的 `tool-subagent-readonly.agentOptions`、spike 的 `tool-subagent-spike.agentOptions`、model-pin 的顶层 `provider` / `model` 各写一份。它们不再互相踩踏——model-pin 0.5.0 起对带 label 的工具子代理落 R4' keep，不会覆盖钉路；不一致只剩运维统一性问题，`verify-install.mjs` 的 `route-coverage` 项只 WARN 提示。0.23.2 的 `route-alignment` 已随 0.25.0 退役：「钉死路由与 model-pin 角色表是两份事实」的坑已消除（model-pin 的 `roles` 表退役，无两份可比对）。
+- **spike 的 read-only 沙箱写不了临时文件**：见「readonlySandbox」节的已知坑；用内联命令或 stdout 回传，确需落盘走 profile 覆盖 `mode: workspace-write`。
 
 ## 回滚
 
 - 临时停用：插件页关掉组合包，或在 profile 的 `cordis.patch.yml` 给该行加 `disabled: true`；重启 DSH 后规则段、写入守卫、检查点全部消失。
 - 只退只读评审：给 `preset-dispatch-readonly` / `tool-subagent-readonly` 两行加 `disabled: true`；单关沙箱收窄用 `readonlySandbox: { enabled: false }`。
+- 停用 spike：profile 同 id 覆盖 `tool-subagent-spike` 与 `preset-dispatch-spike` 两段各加 `disabled: true`（或删除这两段覆盖行退回 bundle 默认）。
 - 退到旧版本：用旧提交的 Git 地址重新安装（本仓库不发 npm 包）；旧配置里的 `gates` 段要先删掉，否则加载期报错。
 - 回滚只需重启 DSH，不改用户项目；`dispatch/` 下的台账与观测文件可保留。
 
@@ -239,6 +250,7 @@ dsh plugin --profile desktop add "https://github.com/huip1830-debug/dsh-extensio
 
 | 版本 | 要点 |
 |---|---|
+| `0.25.0` | spike 工具化：新增 `dispatch-spike` preset（只读文件工具 + `tool-bash` / `tool-pwsh` 双挂）与 `subagent_spike` 工具（`modelSelection: false` + 钉死 stock 路由），`readonlySandbox.presets` 默认收窄两个 preset；label 前缀契约退役（roles 表在 model-pin 0.5.0 同步退役，不再有任何机制消费 label）；`DEFAULT_FOOTER` / 规则 1 / business 预设改指 `subagent_spike`；`writePolicy.delegationTools` 默认加 `subagent_spike`；`verify-install.mjs` 退役 `route-alignment`，改为 `route-coverage`（WARN）+ `roles-migration` / `presets-override` / `spike-tool` 检查。 |
 | `0.24.0` | 规则 4 与 business 预设补工具消歧：派发工具按产出物（要不要写文件）而非批次名选择，评审修复批一律走 `subagent`，拿不准时用 `subagent`——修复「评审修复」类批次被误派到 `subagent_readonly` 后整批无写工具的问题。 |
 | `0.23.2` | `verify-install.mjs` 新增 `route-alignment` 检查：model-pin 只读角色表与 `agentOptions` 钉路不一致即 FAIL 并给修法；README 修正两处「两份事实」交互的准确语义（R4 覆盖条件与漂移后果）。 |
 | `0.23.1` | 修复：只读评审 preset 给 `tool-fs-search` 补必填的 `sampleOverCapGlobResults: false`；此前缺配导致子代理启动时报 `invalid config`，评审里的 glob/grep 不可用。 |

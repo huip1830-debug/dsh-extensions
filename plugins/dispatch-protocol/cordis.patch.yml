@@ -17,7 +17,7 @@
           # allowlist: ['dispatch/', 'docs/superpowers/specs/']   # control-plane prefixes, cwd-relative, case-insensitive, word-boundary matched
           # overridePath: 'dispatch/override.json'                # the only exemption artifact: {"reason": "..."} written in this session
           # tools: ['write', 'edit']                              # tools the guard inspects (default write, edit)
-          # delegationTools: ['subagent', 'subagent_fork', 'workflow', 'subagent_readonly']   # shared with observation rows
+          # delegationTools: ['subagent', 'subagent_fork', 'workflow', 'subagent_readonly', 'subagent_spike']   # shared with observation rows
         checkpoint:
           enabled: true       # remind the parent when a child completes (judged at the parent's next turn-stopping)
           # text: ''          # overrides DEFAULT_CHECKPOINT; supports {childId} and {label}
@@ -37,7 +37,10 @@
     # 该 preset 没有写工具、也没有 shell（只有 read / readImage / grep / glob）。
     # 0.22.0：agentOptions 在创建时钉死路由（descriptor / 首请求 / 冷恢复三者一致，
     # adapter 预检、不经会话白名单）；沙箱收窄改由本插件 readonlySandbox 按
-    # agent-preset/selected 结构判定。spike 要跑命令实测，仍走普通 subagent。
+    # agent-preset/selected 结构判定。spike 曾走普通 subagent；0.25.0 起由 dispatch-spike preset + subagent_spike 结构接管（见下）。
+    # 0.25.0：spike 获得结构锚点——带 shell 的只读组合（本文件末尾的
+    # preset-dispatch-spike）由 subagent_spike 工具实例钉死工具面与路由，沙箱收窄
+    # 由 readonlySandbox 按 preset 判定；label 前缀契约退役（不再有机制读 label）。
     - id: preset-dispatch-readonly
       name: '@deepseek-ai/dsh-agent-preset'
       config:
@@ -84,6 +87,63 @@
         # 0.22.0：创建时钉死评审角色的低成本路由；要换路由在 profile 层按 id
         # 整段覆盖本行（config 整体替换，不深合并）。
         # 0.23.0：默认值必须是 stock 安装可用的路由（本插件是开源分发）——
+        # deepseek-official 是官方 bundle 自带 provider；deepseek-flash 不声明
+        # reasoning effort 档位，所以默认不 pin effort。
+        agentOptions:
+          provider: deepseek-official
+          model: deepseek-flash
+    - id: preset-dispatch-spike
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: dispatch-spike
+        name: 只读实测（spike）
+        order: 91
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                你是派发纪律的只读实测子代理（spike）。你的组合里没有写入工具；
+                shell 只用于只读探测命令（版本、端口、库表、接口形状）。产物是实测
+                契约表：事实 + 命令 + 退出码 + 关键输出摘录，以 final message 回传，
+                不落盘、不改环境。需要写临时脚本时用内联命令（node -e / pwsh
+                -Command）或 stdout 回传。材料不足停报 NEEDS_CONTEXT，不得扩大范围。
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              write: false
+              edit: false
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              # 必填且无默认值（宿主 z.boolean().required()）：缺了会在子代理启动时
+              # 报 invalid config，glob/grep 整体不可用。false = 保留按修改时间排序的前部。
+              sampleOverCapGlobResults: false
+          # 0.25.0：shell 双挂，与 stock standard preset 同款（各平台自我裁剪）——
+          # spike 的全部价值就是跑只读探测命令；写约束由沙箱（read-only）承担，
+          # 工具面只剩 write/edit 关闭。
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+    - id: tool-subagent-spike
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent_spike
+        agentPreset: dispatch-spike
+        modelSelection: false
+        # 0.25.0：与 tool-subagent-readonly 同口径——spike 组合在创建时钉死路由；
+        # 要换路由在 profile 层按 id 整段覆盖本行（config 整体替换，不深合并）。
+        # 默认值必须是 stock 安装可用的路由（本插件是开源分发）——
         # deepseek-official 是官方 bundle 自带 provider；deepseek-flash 不声明
         # reasoning effort 档位，所以默认不 pin effort。
         agentOptions:

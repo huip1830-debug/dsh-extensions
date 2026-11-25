@@ -3,27 +3,33 @@
  * verify-install.mjs — dispatch-protocol 安装核验（发布流程防漂移）
  *
  * 用途：核验 ~/.dsh/profiles/<profile>/node_modules/dispatch-protocol/ 的安装副本
- *       是否与仓库 plugins/dispatch-protocol/ 一致，并核验 profile 的
- *       cordis.patch.yml 只读角色表未漂移（`- match: 只读` / `- match: 勘察`
- *       块内必须含 `sandbox: read-only`），以及插件 bundle 的两行 0.21.0 insert
- *       （`preset-dispatch-readonly` / `tool-subagent-readonly`）仍在，且
- *       0.22.0 起后者带 `agentOptions` 路由钉（provider / model / reasoningEffort）。
+ *       是否与仓库 plugins/dispatch-protocol/ 一致，以及两组 0.21.0/0.25.0 insert
+ *       （`preset-dispatch-readonly` + `tool-subagent-readonly`、
+ *       `preset-dispatch-spike` + `tool-subagent-spike`）仍在且带 `agentOptions`
+ *       路由钉。profile 侧另核 0.25.0 的 roles 退役迁移（roles 表运行时忽略：
+ *       纯路由角色是 WARN，带 `sandbox` 字段的角色失效方向是放宽约束，必须 FAIL）
+ *       与 `readonlySandbox.presets` 是否仍收窄 spike。
  *
- * 依据：docs/superpowers/specs/2026-10-26-dispatch-protocol-0.4.1-patch-plan.md §6；
- *       评审主文档 §10.3-P1（profile 角色表丢失中文前缀 → 只读沙箱失守的实证）。
+ * 依据：docs/superpowers/specs/2026-11-25-subagent-route-structural-ownership-design.md
+ *       §4.1（roles 退役：路由失效安全、沙箱失效放宽）、§6.3（检查项清单）、
+ *       §9（三处钉路不再互相踩踏，不一致只剩运维统一性问题，故 route-coverage 只 WARN）；
+ *       0.4.1 patch plan §6 / 评审主文档 §10.3-P1（只读沙箱失守的实证）。
  *       本脚本是发布流程的防漂移核验：插件走 GitHub 依赖安装到 profile 后，
- *       用本脚本在发布前后各跑一次，确认「版本 / 文件内容 / 只读角色表」三项未漂移。
+ *       用本脚本在发布前后各跑一次。
  *
  * 用法：
  *   node plugins/dispatch-protocol/scripts/verify-install.mjs [--profile <name>]
  *   --profile  指定 profile 名（默认 desktop），即 ~/.dsh/profiles/<name>/
  *
- * 输出：每行 [PASS] <name> — <detail> 或 [FAIL] <name> — <detail>；
- *       检查项固定为 installed-dir / version / files / profile-roles /
- *       readonly-tool / whitelist-mode / route-alignment（0.23.0 起：profile-roles
- *       缺失降为提示，whitelist-mode 恒 PASS 只报告注入式/兜底式；0.23.2 起
- *       route-alignment 断言 model-pin 只读角色表与 agentOptions 钉路一致）。
- *       任一 FAIL → 进程退出码 1；全 PASS → 退出码 0。
+ * 输出：每行 [PASS] <name> — <detail> / [WARN] <name> — <detail> /
+ *       [FAIL] <name> — <detail>；WARN 只提示，不计 fail。检查项为
+ *       installed-dir / version / files / readonly-tool / spike-tool /
+ *       whitelist-mode / route-coverage / roles-migration / presets-override
+ *       （whitelist-mode 恒 PASS 只报告注入式/兜底式；0.25.0 起 route-alignment
+ *       退役——两份事实已由结构钉路消除，改为 route-coverage 的 WARN 级一致性
+ *       提示；profile-roles 随 model-pin 0.5.0 的 roles 退役一并删除，roles 面
+ *       由 roles-migration 承担）。
+ *       任一 FAIL → 进程退出码 1；无 FAIL → 退出码 0。
  *
  * 约束：纯只读脚本，只读文件与目录，不写任何文件（无临时文件、无日志）。
  *       行级解析 cordis.patch.yml，不引 YAML 依赖。
@@ -50,6 +56,12 @@ function pass(name, detail) {
 function fail(name, detail) {
   results.push({ ok: false });
   console.log(`[FAIL] ${name} ${EM_DASH} ${detail}`);
+}
+
+// 0.25.0：WARN 级只提示、不影响退出码（results 不记账）。用于「两份事实已消除、
+// 不一致只是运维不统一」的场景（spec §9）——不把提示升级成发布闸门。
+function warn(name, detail) {
+  console.log(`[WARN] ${name} ${EM_DASH} ${detail}`);
 }
 
 function isDirectory(p) {
@@ -162,11 +174,6 @@ export function splitMatchBlocks(lines, segment) {
   return blocks;
 }
 
-export function hasReadOnlySandbox(body) {
-  // 行级判定，但忽略 `#` 后的注释：注释掉的 `sandbox: read-only` 不生效，不算数。
-  return body.some((line) => /sandbox:\s*read-only\b/.test(line.replace(/\s#.*$/, '')));
-}
-
 // ---- 内容比较 ---------------------------------------------------------------
 
 // 文本归一：把缓冲区按 UTF-8 解码为字符串，并把 CRLF / 孤立 CR 统一为 LF。
@@ -248,42 +255,6 @@ function checkFiles(installedDir) {
     return;
   }
   pass('files', `${relFiles.length} 个文件与 installed 内容一致（文本按 UTF-8 归一后比较，忽略 CRLF/LF 差异）`);
-}
-
-function checkProfileRoles(ymlPath) {
-  let lines;
-  try {
-    lines = fs.readFileSync(ymlPath, 'utf8').split(/\r?\n/);
-  } catch {
-    fail('profile-roles', `无法读取 ${ymlPath}`);
-    return;
-  }
-  const segment = findRolesSegment(lines);
-  if (!segment) {
-    // 0.23.0：roles 表只服务 spike 沙箱（评审角色已由 readonlySandbox +
-    // agentOptions 结构覆盖），缺失是开源默认安装的合法形态——降为提示。
-    pass('profile-roles', '未配置 roles 表：spike 沙箱不收窄（评审角色已由 readonlySandbox + agentOptions 结构覆盖）');
-    return;
-  }
-  const blocks = splitMatchBlocks(lines, segment);
-  const existing = blocks.map((b) => b.match).join(', ') || '（空）';
-
-  for (const role of ['只读', '勘察']) {
-    const matched = blocks.filter((b) => b.match === role);
-    if (matched.length === 0) {
-      fail('profile-roles', `roles 段未找到 "- match: ${role}" 块（现有 match: ${existing}）`);
-      continue;
-    }
-    const missing = matched.filter((b) => !hasReadOnlySandbox(b.body));
-    if (missing.length > 0) {
-      fail(
-        'profile-roles',
-        `"- match: ${role}" 块（L${missing.map((b) => b.line).join(',')}）缺 sandbox: read-only`,
-      );
-      continue;
-    }
-    pass('profile-roles', `"- match: ${role}" 块含 sandbox: read-only（L${matched.map((b) => b.line).join(',')}）`);
-  }
 }
 
 // ---- 0.21.0 只读评审 preset / 委派工具 --------------------------------------
@@ -387,21 +358,16 @@ function checkWhitelistMode(ymlPath) {
   );
 }
 
-// ---- 0.23.2 钉路一致性（route-alignment） -----------------------------------
-// 问题：评审/勘察角色的路由由 tool-subagent-readonly 的 agentOptions 在创建时
-// 钉死；model-pin 的 roles 表（R4）若把只读前缀（只读/勘察/评审…）指向另一条
-// 路由，会在 agent/created 时 select 覆盖钉路——descriptor 与运行路由不一致，
-// 且路由结果取决于 label 措辞（前缀命中才覆盖）。本项在两份 yml 上行级比对，
-// 让漂移在任何机器上可见。实证：2026-11-24 本机「评审…」被覆盖、「…勘察」
-// 词尾不命中而保留，同批派发两套路由。
+// ---- 0.25.0 钉路覆盖（route-coverage，WARN 级）与 roles 退役迁移 --------------
+// 0.25.0 起三处钉路各自独立、不再互相踩踏：
+//   tool-subagent-readonly.agentOptions / tool-subagent-spike.agentOptions /
+//   model-pin 顶层 provider+model。不一致只剩运维统一性问题（spec §9），所以只
+//   WARN；任一处缺失时降级为单项提示，不 FAIL、不崩脚本。
 
-/** 只读角色前缀（小写）：roles 表里这些 match 会作用于 subagent_readonly 子代理。 */
-export const READONLY_ROLE_PREFIXES = ['只读', '勘察', '评审', '复审', 'survey', 'review', 'recon']
-
-// 从块体里取某个嵌套段（如 agentOptions:）内的 provider/model/reasoningEffort。
+// 取块体内某个嵌套段（如 agentOptions:）的路由字段。
 // 段从 `key:` 行之后开始，到第一个缩进 <= key 行缩进的非空非注释行为止。
 // 键缺失返回 null（区别于「键在但值为空」——行级解析不区分 null 值）。
-export function extractNestedRoute(body, key) {
+function extractRouteBlock(body, key) {
   for (let i = 0; i < body.length; i += 1) {
     const head = body[i].match(new RegExp(`^([ \\t]*)${key}:[ \\t]*(?:#.*)?$`))
     if (!head) continue
@@ -419,8 +385,8 @@ export function extractNestedRoute(body, key) {
   return null
 }
 
-// 取块体的「直接」路由字段：同键多行时取缩进最小者（嵌套段里的同名键更深）。
-export function extractDirectRoute(body) {
+// 取块体的「顶层」路由字段：同键多行时取缩进最小者（roles 等嵌套段里的同名键更深）。
+function extractTopRoute(body) {
   const best = {}
   for (const line of body) {
     const m = line.match(/^([ \t]*)(provider|model|reasoningEffort):[ \t]*(\S+?)[ \t]*$/)
@@ -437,91 +403,329 @@ export function extractDirectRoute(body) {
   return route
 }
 
-// 取单个 roles 块的路由：块内同名字段只出现一次，直接逐行取。
-export function extractRoleRoute(blockBody) {
-  const route = {}
-  for (const line of blockBody) {
-    const m = line.replace(/\s#.*$/, '').match(/^[ \t]*(provider|model|reasoningEffort):[ \t]*(\S+?)[ \t]*$/)
-    if (m && route[m[1]] === undefined) route[m[1]] = m[2].replace(/^['"]|['"]$/g, '')
-  }
-  return route
-}
-
 const normEffort = (route) => route.reasoningEffort === undefined || route.reasoningEffort === '' ? undefined : route.reasoningEffort
 
-/**
- * 比对 profile 的 model-pin 只读角色表与 tool-subagent-readonly 的有效钉路。
- * 纯函数：输入两份 yml 的行数组，返回判定；不读盘、不打印。
- * @returns `{ status, pin, drifts }`：status ∈ no-model-pin | no-roles |
- *   pin-missing | aligned | drift；drifts 元素 `{ match, line, route }`。
- */
-export function assessRouteAlignment(profileLines, bundleLines) {
-  const pin = (() => {
-    const overrideBlock = findInsertBlock(profileLines, 'tool-subagent-readonly')
-    if (overrideBlock !== null) {
-      const route = extractNestedRoute(overrideBlock.body, 'agentOptions')
-      return route === null ? null : { ...route, source: 'profile 覆盖' }
-    }
-    const bundleBlock = findInsertBlock(bundleLines, 'tool-subagent-readonly')
-    if (bundleBlock === null) return undefined // 安装副本缺行：readonly-tool 项已 FAIL
-    return { ...extractNestedRoute(bundleBlock.body, 'agentOptions'), source: 'bundle 默认' }
-  })()
+const routeTextOf = (route) => route === null
+  ? '缺失'
+  : `${route.provider ?? '?'}/${route.model ?? '?'}${normEffort(route) === undefined ? '' : ` effort=${normEffort(route)}`}`
 
-  const modelPin = findInsertBlock(profileLines, 'subagent-model-pin')
-  if (modelPin === null) return { status: 'no-model-pin', pin, drifts: [] }
-
-  const segment = findRolesSegment(profileLines)
-  const blocks = segment === null ? [] : splitMatchBlocks(profileLines, segment)
-  const defaultEffort = normEffort(extractDirectRoute(modelPin.body))
-  const readonlyRoles = blocks.filter((b) => READONLY_ROLE_PREFIXES.includes(b.match.trim().toLowerCase()))
-  if (readonlyRoles.length === 0) return { status: 'no-roles', pin, drifts: [] }
-  if (pin === null) return { status: 'pin-missing', pin, drifts: [] }
-  if (pin === undefined) return { status: 'no-roles', pin, drifts: [] } // 钉路缺失另行报告，不在本项重复 FAIL
-
-  const drifts = readonlyRoles.filter((b) => {
-    const route = extractRoleRoute(b.body)
-    // 角色的有效 effort = 自己的 ?? model-pin 默认；与钉路 effort 对齐才算一致。
-    const roleEffort = normEffort(route) ?? defaultEffort
-    return route.provider !== pin.provider || route.model !== pin.model || roleEffort !== normEffort(pin)
-  }).map((b) => ({ match: b.match, line: b.line, route: extractRoleRoute(b.body) }))
-  return { status: drifts.length === 0 ? 'aligned' : 'drift', pin, drifts }
+// 三处钉路是否同一条路由：provider/model 必须相等，effort 按「未 pin = undefined」比较。
+function sameRoute(a, b) {
+  return a.provider === b.provider && a.model === b.model && normEffort(a) === normEffort(b)
 }
 
-const routeTextOf = (route) => `${route.provider ?? '?'}/${route.model ?? '?'}${normEffort(route) === undefined ? '' : ` effort=${normEffort(route)}`}`
+// 工具实例的有效钉路：profile 覆盖优先，缺省取安装副本（bundle）默认值。
+// 重要（config 整体替换语义）：profile 覆盖段存在但缺 agentOptions 时该工具**没有
+// 钉路**，子代理继承父路由——bundle 默认根本不会生效，不能回退成 bundle 路由。
+// 返回 `{ route, source, line }`；无钉路时 route 为 null（覆盖缺字段或两侧都没有）。
+function effectiveToolRoute(profileLines, bundleLines, id) {
+  const override = findInsertBlock(profileLines, id)
+  if (override !== null) {
+    const route = extractRouteBlock(override.body, 'agentOptions')
+    if (route !== null) return { route, source: 'profile 覆盖', line: override.line }
+    return { route: null, source: 'profile 覆盖缺 agentOptions', line: override.line }
+  }
+  if (bundleLines !== null) {
+    const bundle = findInsertBlock(bundleLines, id)
+    if (bundle !== null) {
+      const route = extractRouteBlock(bundle.body, 'agentOptions')
+      if (route !== null) return { route, source: 'bundle 默认', line: bundle.line }
+    }
+  }
+  return null
+}
 
-function checkRouteAlignment(installedDir, ymlPath) {
-  let profileLines
-  let bundleLines
+// model-pin 顶层路由：profile 覆盖优先，缺省取 model-pin 安装副本（bundle）的
+// cordis.patch.yml（安装副本是 profiles 目录外的另一份 bundle，不在本插件安装目录内）。
+function effectiveModelPinRoute(profileLines, modelPinBundleLines) {
+  const override = findInsertBlock(profileLines, 'subagent-model-pin')
+  if (override !== null) {
+    const route = extractTopRoute(override.body)
+    if (route.provider !== undefined && route.model !== undefined) {
+      return { route, source: 'profile 覆盖', line: override.line }
+    }
+  }
+  if (modelPinBundleLines !== null) {
+    const bundle = findInsertBlock(modelPinBundleLines, 'subagent-model-pin')
+    if (bundle !== null) {
+      const route = extractTopRoute(bundle.body)
+      if (route.provider !== undefined && route.model !== undefined) {
+        return { route, source: 'bundle 默认', line: bundle.line }
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * 比对三处钉路：readonly 工具、spike 工具、model-pin 顶层路由。
+ * 纯函数：输入 yml 行数组，返回判定；不读盘、不打印。
+ * @param profileLines - profile 的 cordis.patch.yml 行
+ * @param bundleLines - dispatch-protocol 安装副本的行（可为 null）
+ * @param modelPinBundleLines - subagent-model-pin 安装副本的行（可为 null）
+ * @returns `{ level, status, routes }`：status ∈ aligned | drift | incomplete |
+ *   override-without-pin；level ∈ pass | warn；routes 每项 `{ route, source, line }`
+ *   （无钉路的覆盖段 route 为 null）或 null。
+ */
+export function assessRouteCoverage(profileLines, bundleLines, modelPinBundleLines) {
+  const routes = {
+    readonly: effectiveToolRoute(profileLines, bundleLines, 'tool-subagent-readonly'),
+    spike: effectiveToolRoute(profileLines, bundleLines, 'tool-subagent-spike'),
+    modelPin: effectiveModelPinRoute(profileLines, modelPinBundleLines),
+  }
+  const entries = Object.values(routes)
+  const hasRoute = (entry) => entry !== null && entry.route !== null
+    && entry.route.provider !== undefined && entry.route.model !== undefined
+  // profile 覆盖段存在但缺 agentOptions：运行时该工具没有钉路，子代理继承父路由
+  // （config 整体替换，bundle 默认不生效）。0.5.0 起 R4' 不再覆盖它，只剩「子代理
+  // 跑父路由」的成本问题，所以只 WARN、不报一致性。
+  if (entries.some((entry) => entry !== null && entry.route === null)) {
+    return { level: 'warn', status: 'override-without-pin', routes }
+  }
+  // 其余缺失：降级为单项提示（readonly-tool / spike-tool 已各自断言安装副本，这里不重复 FAIL）。
+  if (!entries.every(hasRoute)) return { level: 'pass', status: 'incomplete', routes }
+  const aligned = entries.every((entry) => sameRoute(entry.route, entries[0].route))
+  return { level: aligned ? 'pass' : 'warn', status: aligned ? 'aligned' : 'drift', routes }
+}
+
+/**
+ * 0.25.0 roles 退役迁移判定（spec §4.1）。纯函数：只读行数组，不读盘、不打印。
+ * 失效方向不对称：角色路由失效安全（少一次覆盖），角色沙箱失效是**放宽约束**
+ * （spike 不再收窄）——所以含 sandbox 字段的角色必须是 FAIL 级。
+ * @returns `{ level, status, roles }`：status ∈ no-model-pin | no-roles |
+ *   routing-only | sandbox | mixed；roles 元素 `{ match, line, sandbox }`（line 为文件行号）。
+ */
+export function assessRolesMigration(profileLines) {
+  const modelPin = findInsertBlock(profileLines, 'subagent-model-pin')
+  if (modelPin === null) return { level: 'pass', status: 'no-model-pin', roles: [] }
+  const segment = findRolesSegment(modelPin.body)
+  if (segment === null) return { level: 'pass', status: 'no-roles', roles: [] }
+  const roles = splitMatchBlocks(modelPin.body, segment).map((block) => ({
+    match: block.match,
+    line: modelPin.line + block.line,
+    sandbox: hasSandboxField(block.body),
+  }))
+  if (roles.length === 0) return { level: 'pass', status: 'no-roles', roles: [] }
+  const sandboxed = roles.filter((role) => role.sandbox)
+  if (sandboxed.length === 0) return { level: 'warn', status: 'routing-only', roles }
+  return { level: 'fail', status: sandboxed.length === roles.length ? 'sandbox' : 'mixed', roles }
+}
+
+/** `sandbox:` 字段是否真的生效（注释掉的键不算）。 */
+function hasSandboxField(body) {
+  return body.some((line) => {
+    const s = line.trim()
+    if (s === '' || s.startsWith('#')) return false
+    return /^\s*sandbox:\s*\S/.test(line.replace(/\s#.*$/, ''))
+  })
+}
+
+/** 取块体内某个键的嵌套段（0 基行号范围 + key 行号，相对入参数组）。 */
+function findKeySegment(body, key) {
+  for (let i = 0; i < body.length; i += 1) {
+    if (!new RegExp(`^\\s*${key}:\\s*(?:#.*)?$`).test(body[i])) continue
+    const indent = INDENT_OF(body[i])
+    let end = body.length
+    for (let j = i + 1; j < body.length; j += 1) {
+      const s = body[j].trim()
+      if (s === '' || s.startsWith('#')) continue
+      if (INDENT_OF(body[j]) <= indent) {
+        end = j
+        break
+      }
+    }
+    return { start: i + 1, end, keyLine: i }
+  }
+  return null
+}
+
+/** 读嵌套段内的 `presets:` 列表；inline `[a, b]` 与块状 `- a` 两种写法都认。 */
+function parsePresets(body, segment) {
+  for (let i = segment.start; i < segment.end; i += 1) {
+    const line = body[i].replace(/\s#.*$/, '')
+    const inline = line.match(/^\s*presets:\s*\[(.*?)\]\s*$/)
+    if (inline) {
+      return inline[1].split(',').map((item) => item.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
+    }
+    if (!/^\s*presets:\s*$/.test(line)) continue
+    const indent = INDENT_OF(body[i])
+    const presets = []
+    for (let j = i + 1; j < segment.end; j += 1) {
+      const s = body[j].trim()
+      if (s === '' || s.startsWith('#')) continue
+      if (INDENT_OF(body[j]) <= indent) break
+      const item = body[j].match(/^\s*-\s*(\S+)\s*$/)
+      if (item) presets.push(item[1].replace(/^['"]|['"]$/g, ''))
+    }
+    return presets
+  }
+  return null
+}
+
+/**
+ * 0.25.0 `readonlySandbox.presets` 覆盖判定（spec §5.3/§6.3）。纯函数。
+ * 无覆盖 → 默认含 dispatch-spike；覆盖了且不含 → spike 子代理不收窄（fail-open）。
+ * @returns `{ level, status, presets, line }`：status ∈ no-override |
+ *   no-readonly-sandbox | no-presets | ok | missing-spike。
+ */
+export function assessPresetsOverride(profileLines) {
+  const override = findInsertBlock(profileLines, 'dispatch-protocol')
+  if (override === null) return { level: 'pass', status: 'no-override', presets: null, line: null }
+  const segment = findKeySegment(override.body, 'readonlySandbox')
+  if (segment === null) return { level: 'pass', status: 'no-readonly-sandbox', presets: null, line: null }
+  const line = override.line + segment.keyLine
+  const presets = parsePresets(override.body, segment)
+  if (presets === null) return { level: 'pass', status: 'no-presets', presets: null, line }
+  return presets.includes('dispatch-spike')
+    ? { level: 'pass', status: 'ok', presets, line }
+    : { level: 'warn', status: 'missing-spike', presets, line }
+}
+
+/**
+ * 0.25.0 spike 结构锚点（spec §5.1/§5.2）。纯函数：只读 cordis.patch.yml 行数组。
+ * @returns `{ level, status, preset, tool, missing }`：status ∈
+ *   missing（块缺失） | incomplete（字段缺失） | ok。
+ */
+export function assessSpikeTool(lines) {
+  const preset = findInsertBlock(lines, 'preset-dispatch-spike')
+  const tool = findInsertBlock(lines, 'tool-subagent-spike')
+  if (preset === null || tool === null) return { level: 'fail', status: 'missing', preset, tool, missing: [] }
+  const missing = []
+  for (const [key, value] of [
+    ['provider', 'spawn'],
+    ['toolName', 'subagent_spike'],
+    ['agentPreset', 'dispatch-spike'],
+    ['modelSelection', 'false'],
+    // 0.25.0：与 readonly 同口径——spike 组合在创建时钉死 stock 路由；profile
+    // 覆盖不属于安装副本的断言面。
+    ['agentOptions', ''],
+    ['provider', 'deepseek-official'],
+    ['model', 'deepseek-flash'],
+  ]) {
+    if (!findInsertField(tool.body, key, value)) missing.push(value === '' ? key : `${key}: ${value}`)
+  }
+  return missing.length === 0
+    ? { level: 'pass', status: 'ok', preset, tool, missing }
+    : { level: 'fail', status: 'incomplete', preset, tool, missing }
+}
+
+/** 逐条读 yml 行；不可读返回 null（0.25.0 新增项共用）。 */
+function readYmlLines(ymlPath) {
   try {
-    profileLines = fs.readFileSync(ymlPath, 'utf8').split(/\r?\n/)
-    bundleLines = fs.readFileSync(path.join(installedDir, 'cordis.patch.yml'), 'utf8').split(/\r?\n/)
-  } catch (error) {
-    fail('route-alignment', `无法读取 yml：${error.message}`)
-    return
+    return fs.readFileSync(ymlPath, 'utf8').split(/\r?\n/)
+  } catch {
+    return null
   }
-  const { status, pin, drifts } = assessRouteAlignment(profileLines, bundleLines)
-  if (status === 'no-model-pin') {
-    pass('route-alignment', 'profile 未覆盖 model-pin：只读角色路由由 agentOptions 钉死，无 roles 漂移面')
-    return
+}
+
+/** route-coverage：三处钉路一致性，只 WARN（不一致不 FAIL、不崩脚本）。 */
+function checkRouteCoverage(installedDir, ymlPath) {
+  const profileLines = readYmlLines(ymlPath)
+  if (profileLines === null) {
+    fail('route-coverage', `无法读取 ${ymlPath}`);
+    return;
   }
-  if (status === 'no-roles') {
-    pass('route-alignment', `roles 表无只读角色：评审/勘察走 ${pin === null || pin === undefined ? '继承路由（钉路缺失，见 readonly-tool 项）' : `agentOptions 钉路 ${routeTextOf(pin)}（${pin.source}）`}`)
-    return
+  const bundleLines = readYmlLines(path.join(installedDir, 'cordis.patch.yml'));
+  // model-pin 是同一 profile 的另一份安装副本（profiles 目录之外的独立 bundle），
+  // 不在本插件安装目录内：取 node_modules/subagent-model-pin/cordis.patch.yml。
+  const modelPinBundleLines = readYmlLines(path.join(installedDir, '..', 'subagent-model-pin', 'cordis.patch.yml'));
+  const { status, routes } = assessRouteCoverage(profileLines, bundleLines, modelPinBundleLines);
+  const detailOf = (name, entry) => {
+    if (entry === null) return `${name}=缺失`;
+    if (entry.route === null) return `${name}=无钉路（${entry.source}，L${entry.line}）`;
+    return `${name}=${routeTextOf(entry.route)}（${entry.source}，L${entry.line}）`;
+  };
+  const detail = [detailOf('readonly', routes.readonly), detailOf('spike', routes.spike), detailOf('model-pin', routes.modelPin)].join('；');
+  if (status === 'override-without-pin') {
+    warn('route-coverage', `profile 覆盖段缺 agentOptions：config 整体替换语义下该工具没有钉路，子代理继承父路由（bundle 默认不生效；model-pin 0.5.0 起 R4' 不再覆盖它，只是成本问题）：${detail}`);
+    return;
   }
-  if (status === 'pin-missing') {
-    fail('route-alignment', 'profile 覆盖了 tool-subagent-readonly 但缺 agentOptions：钉路被移除，只读角色退回 model-pin 角色表（descriptor 不一致的老问题回归）')
-    return
+  if (status === 'incomplete') {
+    pass('route-coverage', `钉路未取齐，降级为单项提示（readonly-tool / spike-tool 已各自断言安装副本）：${detail}`);
+    return;
   }
   if (status === 'aligned') {
-    pass('route-alignment', `只读角色表与钉路一致：${routeTextOf(pin)}（${pin.source}）`)
-    return
+    pass('route-coverage', `三处钉路一致：${detail}`);
+    return;
   }
-  for (const d of drifts) {
-    fail(
-      'route-alignment',
-      `"- match: ${d.match}"（L${d.line}）= ${routeTextOf(d.route)} ≠ 钉路 ${routeTextOf(pin)}（${pin.source}）：该角色会在 agent/created 时 select 覆盖钉路，descriptor 与运行路由不一致。修法：profile 按 id 整段覆盖 tool-subagent-readonly 的 agentOptions 为该路由，或把角色改为钉路路由，或删除该角色（roles 只留 spike 沙箱职责）`,
-    )
+  warn('route-coverage', `三处钉路不一致（不再互相踩踏，只是运维不统一；要统一就按 id 整段覆盖对应工具或 model-pin 顶层路由）：${detail}`);
+}
+
+/** roles-migration：roles 表已退役；带 sandbox 的角色必须 FAIL（失效方向是放宽约束）。 */
+function checkRolesMigration(ymlPath) {
+  const lines = readYmlLines(ymlPath)
+  if (lines === null) {
+    fail('roles-migration', `无法读取 ${ymlPath}`);
+    return;
   }
+  const { status, roles } = assessRolesMigration(lines);
+  if (status === 'no-model-pin') {
+    pass('roles-migration', 'profile 未覆盖 subagent-model-pin：无 roles 迁移面');
+    return;
+  }
+  if (status === 'no-roles') {
+    pass('roles-migration', 'model-pin 未配置 roles 表：无迁移面');
+    return;
+  }
+  const locate = (list) => list.map((role) => `"- match: ${role.match}"（L${role.line}）`).join('、');
+  const sandboxed = roles.filter((role) => role.sandbox);
+  if (sandboxed.length > 0) {
+    fail('roles-migration', `model-pin 0.5.0 起 roles 表运行时忽略，角色沙箱的失效方向是放宽约束（spike 不再收窄）：${locate(sandboxed)} 含 sandbox 字段。修法：删除 roles 表；spike 沙箱由 dispatch-protocol readonlySandbox 按 preset 收窄，只读路由由工具的 agentOptions 钉死`);
+  }
+  const routingOnly = roles.filter((role) => !role.sandbox);
+  if (routingOnly.length > 0) {
+    warn('roles-migration', `model-pin 0.5.0 起 roles 表运行时忽略，以下角色的 provider/model 不再生效（只读子代理恒为工具钉路）：${locate(routingOnly)}。修法：删除 roles 表，默认路由改用顶层 provider/model`);
+  }
+}
+
+/** spike-tool：bundle 的 preset-dispatch-spike + tool-subagent-spike 结构锚点。 */
+function checkSpikeTool(installedDir) {
+  const ymlPath = path.join(installedDir, 'cordis.patch.yml');
+  const lines = readYmlLines(ymlPath);
+  if (lines === null) {
+    fail('spike-tool', `无法读取 ${ymlPath}`);
+    return;
+  }
+  const { status, preset, tool, missing } = assessSpikeTool(lines);
+  if (status === 'missing') {
+    const found = [
+      preset === null ? '"- id: preset-dispatch-spike"' : null,
+      tool === null ? '"- id: tool-subagent-spike"' : null,
+    ].filter(Boolean);
+    fail('spike-tool', `未找到 ${found.join('、')}（${ymlPath}）`);
+    return;
+  }
+  if (status === 'incomplete') {
+    fail('spike-tool', `"- id: tool-subagent-spike"（L${tool.line}）缺 ${missing.join('、')}`);
+    return;
+  }
+  pass(
+    'spike-tool',
+    `preset-dispatch-spike（L${preset.line}）+ tool-subagent-spike（L${tool.line}）含 provider: spawn / toolName: subagent_spike / agentPreset: dispatch-spike / modelSelection: false / agentOptions: deepseek-official+deepseek-flash`,
+  );
+}
+
+/** presets-override：profile 覆盖了 presets 却漏了 dispatch-spike → spike 不收窄，WARN。 */
+function checkPresetsOverride(ymlPath) {
+  const lines = readYmlLines(ymlPath);
+  if (lines === null) {
+    fail('presets-override', `无法读取 ${ymlPath}`);
+    return;
+  }
+  const { status, presets, line } = assessPresetsOverride(lines);
+  if (status === 'no-override') {
+    pass('presets-override', 'profile 未覆盖 dispatch-protocol：readonlySandbox 用默认 presets（含 dispatch-spike）');
+    return;
+  }
+  if (status === 'no-readonly-sandbox' || status === 'no-presets') {
+    pass('presets-override', 'profile 覆盖了 dispatch-protocol 但未覆盖 readonlySandbox.presets：默认含 dispatch-spike，spike 仍收窄');
+    return;
+  }
+  if (status === 'ok') {
+    pass('presets-override', `readonlySandbox.presets（L${line}）含 dispatch-spike：${presets.join(', ')}`);
+    return;
+  }
+  warn('presets-override', `readonlySandbox.presets（L${line}）= ${presets.join(', ')} 不含 dispatch-spike：spike 子代理不收窄（fail-open，继承父沙箱）。修法：把 dispatch-spike 加进 presets，或删除该覆盖用默认值`);
 }
 
 // ---- 主流程 -----------------------------------------------------------------
@@ -545,10 +749,12 @@ function main() {
   checkInstalledDir(installedDir);
   checkVersion(installedDir);
   checkFiles(installedDir);
-  checkProfileRoles(ymlPath);
   checkReadonlyTool(installedDir);
+  checkSpikeTool(installedDir);
   checkWhitelistMode(ymlPath);
-  checkRouteAlignment(installedDir, ymlPath);
+  checkRouteCoverage(installedDir, ymlPath);
+  checkRolesMigration(ymlPath);
+  checkPresetsOverride(ymlPath);
 
   return results.every((r) => r.ok) ? 0 : 1;
 }

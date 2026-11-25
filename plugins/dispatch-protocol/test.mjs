@@ -18,8 +18,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import * as plugin from './plugin.mjs'
-import { assessRouteAlignment } from './scripts/verify-install.mjs'
-import { resolveConfig, AUTO_TEXT, DEFAULT_FOOTER, DEFAULT_RULES, BUSINESS_FOOTER, BUSINESS_RULES, resolveRulesPreset } from './lib/config.mjs'
+import { resolveConfig, AUTO_TEXT, DEFAULT_FOOTER, DEFAULT_RULES, BUSINESS_FOOTER, BUSINESS_RULES, DEFAULT_READONLY_SANDBOX_PRESETS, resolveRulesPreset } from './lib/config.mjs'
 import {
   DEFAULT_PROJECT_SWITCH, PROJECT_MODES, readProjectMode, readProjectPolicy, writeProjectMode,
 } from './lib/project.mjs'
@@ -30,6 +29,9 @@ import {
 import {
   DEFAULT_ALLOWLIST, DEFAULT_OVERRIDE_PATH, DEFAULT_WRITE_POLICY_MODE, resolveWritePolicy,
 } from './lib/write-policy.mjs'
+import {
+  assessPresetsOverride, assessRolesMigration, assessRouteCoverage, assessSpikeTool,
+} from './scripts/verify-install.mjs'
 
 // Reminder behaviour is asserted from the harness messages. Decision logging
 // stays off so a test run never appends to the real `%TEMP%` decision log; the
@@ -308,16 +310,22 @@ test('the first rule scopes the main agent to the control plane', () => {
   assert.match(text, /禁止把「调研 X 然后实现」/, 'research-then-implement must not be dispatched to an execution child')
 })
 
-test('the footer states the read-only label convention', () => {
+test('the footer retires the label convention in favour of the structural spike tool', () => {
   const h = harness()
   plugin.apply(h.ctx, {})
   const text = h.sections[0].text
 
-  assert.match(text, /只读类子代理（评审\/复审\/勘察）的 label 一律以「只读」或「勘察」开头/,
-    '0.4.1: the label prefix is what the spike role table matches')
-  assert.match(text, /执行类批次的 label 不得以这两个词开头/, 'the exclusion keeps execution batches out of the read-only roles')
-  assert.match(text, /label 前缀只服务 spike 的沙箱收窄/,
-    '0.22.0: the prefix now feeds only the spike sandbox; the preset pins the rest structurally')
+  assert.doesNotMatch(text, /只读类子代理（评审\/复审\/勘察）的 label 一律以「只读」或「勘察」开头/,
+    '0.25.0: no mechanism reads a label prefix any more, so the convention is gone')
+  assert.doesNotMatch(text, /执行类批次的 label 不得以这两个词开头/, 'the exclusion goes with the convention')
+  assert.doesNotMatch(text, /label 前缀只服务 spike 的沙箱收窄/,
+    '0.25.0: the spike sandbox is narrowed by preset, not by a label prefix')
+  assert.doesNotMatch(text, /spike 要跑命令实测，仍走普通 subagent/,
+    '0.25.0: the spike has its own tool instance instead of the plain subagent')
+  assert.match(text, /`subagent_readonly` 与 `subagent_spike` 的 preset 管工具面、路由与沙箱（结构钉死，不靠 label）/,
+    '0.25.0: both read-only tools own their surface structurally')
+  assert.match(text, /要跑命令实测外部环境的只读 spike 一律用 `subagent_spike` 派发/,
+    '0.25.0: a spike that must run commands is dispatched through its own tool')
 })
 
 test('a completed child triggers exactly one checkpoint message to its parent', () => {
@@ -1244,7 +1252,7 @@ test('writePolicy carries the 0.9.0 defaults and rejects silent breakage', () =>
     allowlist: DEFAULT_ALLOWLIST,
     overridePath: 'dispatch/override.json',
     tools: ['write', 'edit'],
-    delegationTools: ['subagent', 'subagent_fork', 'workflow', 'subagent_readonly'],
+    delegationTools: ['subagent', 'subagent_fork', 'workflow', 'subagent_readonly', 'subagent_spike'],
   })
   assert.deepEqual(DEFAULT_ALLOWLIST, ['dispatch/', 'docs/superpowers/specs/'])
   assert.equal(DEFAULT_OVERRIDE_PATH, 'dispatch/override.json')
@@ -3128,11 +3136,13 @@ test('0.20.0: AUTO_TEXT gates asking on evidence instead of mandating a survey f
 // 规则 4）同版冻结。`AUTO_TEXT` 保持原样——auto 档不引用只有 full 档才会注入的
 // 工具名，否则 auto 项目会看到一个不存在的工具。
 
-test('0.21.0/0.22.0: cordis.patch.yml declares the readonly preset and its delegation tool', () => {
+test('0.21.0/0.22.0/0.25.0: cordis.patch.yml declares the readonly and spike presets and their delegation tools', () => {
   // 结构断言全部走行级文本：仓库不引 YAML 依赖（与 verify-install.mjs 同口径）。
   const yml = readFileSync(new URL('./cordis.patch.yml', import.meta.url), 'utf8')
   assert.match(yml, /^\s*- id: preset-dispatch-readonly\s*$/m, 'the readonly preset is inserted')
   assert.match(yml, /^\s*- id: tool-subagent-readonly\s*$/m, 'the Host-global delegation tool is inserted')
+  assert.match(yml, /^\s*- id: preset-dispatch-spike\s*$/m, 'the spike preset is inserted')
+  assert.match(yml, /^\s*- id: tool-subagent-spike\s*$/m, 'the spike delegation tool is inserted')
   for (const line of [
     /^\s*provider: spawn\s*$/m,
     /^\s*toolName: subagent_readonly\s*$/m,
@@ -3164,7 +3174,11 @@ test('0.21.0/0.22.0: cordis.patch.yml declares the readonly preset and its deleg
   // 不经会话白名单），评审角色的路由不再依赖 label 前缀命中。0.23.0：默认值
   // 必须是 stock 可用的 deepseek-official/deepseek-flash，且不 pin effort
   // （stock 模型无 effort 档位）；机器专属路由走 profile 覆盖。
-  const toolBlock = lines.slice(end).join('\n')
+  const spikeStart = lines.findIndex(line => /- id: preset-dispatch-spike/.test(line))
+  const spikeToolStart = lines.findIndex(line => /- id: tool-subagent-spike/.test(line))
+  assert.ok(spikeStart > end && spikeToolStart > spikeStart,
+    '0.25.0: the spike preset and its tool instance are appended after the readonly pair')
+  const toolBlock = lines.slice(end, spikeStart).join('\n')
   assert.match(toolBlock, /^\s*agentOptions:\s*$/m, 'the tool instance pins the child route at creation')
   for (const line of [
     /^\s*provider: deepseek-official\s*$/m,
@@ -3172,6 +3186,237 @@ test('0.21.0/0.22.0: cordis.patch.yml declares the readonly preset and its deleg
   ]) assert.match(toolBlock, line)
   assert.doesNotMatch(toolBlock, /reasoningEffort/,
     '0.23.0: the stock default pins no effort — deepseek-flash declares no effort tiers')
+
+  // 0.25.0 spike 结构锚点：带 shell 的只读组合 + 独立工具实例。shell 双挂就是
+  // spike 的价值（只读探测命令）；写约束落在 readonlySandbox（read-only 默认），
+  // 不再依赖 label 前缀命中的 model-pin 角色表。
+  const spikePresetBlock = lines.slice(spikeStart, spikeToolStart).join('\n')
+  for (const line of [
+    /^\s*id: dispatch-spike\s*$/m,
+    /^\s*name: 只读实测（spike）\s*$/m,
+    /^\s*order: 91\s*$/m,
+    /^\s*- id: tool-bash\s*$/m,
+    /^\s*name: '@deepseek-ai\/dsh-tool-bash'\s*$/m,
+    /^\s*- id: tool-pwsh\s*$/m,
+    /^\s*name: '@deepseek-ai\/dsh-tool-pwsh'\s*$/m,
+    /^\s*write: false\s*$/m,
+    /^\s*edit: false\s*$/m,
+    /^\s*sampleOverCapGlobResults: false\s*$/m,
+  ]) assert.match(spikePresetBlock, line)
+  assert.match(spikePresetBlock, /只读实测子代理（spike）/,
+    'the persona names the spike composition and its reporting format')
+  assert.doesNotMatch(spikePresetBlock, /reasoningEffort/)
+
+  const spikeToolBlock = lines.slice(spikeToolStart).join('\n')
+  for (const line of [
+    /^\s*provider: spawn\s*$/m,
+    /^\s*toolName: subagent_spike\s*$/m,
+    /^\s*agentPreset: dispatch-spike\s*$/m,
+    /^\s*modelSelection: false\s*$/m,
+    /^\s*provider: deepseek-official\s*$/m,
+    /^\s*model: deepseek-flash\s*$/m,
+  ]) assert.match(spikeToolBlock, line)
+  assert.doesNotMatch(spikeToolBlock, /reasoningEffort/,
+    '0.25.0: the spike tool pins the stock route with no effort')
+  assert.match(spikeToolBlock, /^\s*agentOptions:\s*$/m,
+    'the spike route is pinned at creation, not selected after it')
+})
+
+// ---------------------------------------------------------------------------
+// 0.25.0 — verify-install 检查项（spec §6.3）：route-alignment 退役，改为
+// route-coverage（WARN 级三处钉路一致性）、roles-migration（含 sandbox 的角色
+// FAIL）、spike-tool（结构锚点）与 presets-override（spike 不收窄提示）。
+// 纯函数断言行级 yml，不读盘、不启动 DSH。
+
+const linesOf = (...rows) => rows.flat()
+
+const dispatchBundleFixture = linesOf(
+  '- insert:',
+  '    - id: tool-subagent-readonly',
+  '      name: "@deepseek-ai/dsh-tool-subagent"',
+  '      config:',
+  '        provider: spawn',
+  '        agentOptions:',
+  '          provider: deepseek-official',
+  '          model: deepseek-flash',
+  '    - id: tool-subagent-spike',
+  '      name: "@deepseek-ai/dsh-tool-subagent"',
+  '      config:',
+  '        provider: spawn',
+  '        agentOptions:',
+  '          provider: deepseek-official',
+  '          model: deepseek-flash',
+)
+
+const modelPinBundleFixture = linesOf(
+  '- insert:',
+  '    - id: subagent-model-pin',
+  '      name: subagent-model-pin',
+  '      config:',
+  '        provider: deepseek-official',
+  '        model: deepseek-flash',
+)
+
+test('0.25.0: route-coverage passes when the three pins agree and warns when they drift', () => {
+  const aligned = assessRouteCoverage([], dispatchBundleFixture, modelPinBundleFixture)
+  assert.equal(aligned.status, 'aligned')
+  assert.equal(aligned.level, 'pass')
+  assert.equal(aligned.routes.readonly.source, 'bundle 默认')
+  assert.equal(aligned.routes.modelPin.source, 'bundle 默认')
+
+  // profile 覆盖 model-pin 顶层路由，只读工具仍是 stock 钉路 → 不一致只 WARN。
+  const drifted = assessRouteCoverage(linesOf(
+    '- id: subagent-model-pin',
+    '  config:',
+    '    provider: opencode-go',
+    '    model: deepseek-v4.1-flash',
+  ), dispatchBundleFixture, modelPinBundleFixture)
+  assert.equal(drifted.status, 'drift')
+  assert.equal(drifted.level, 'warn')
+  assert.equal(drifted.routes.modelPin.source, 'profile 覆盖')
+
+  // profile 覆盖段存在但缺 agentOptions：config 整体替换下该工具没有钉路，子代理
+  // 继承父路由——bundle 默认不生效，不得把它当成有效钉路（只 WARN：成本问题）。
+  const withoutPin = assessRouteCoverage(linesOf(
+    '- id: tool-subagent-readonly',
+    '  name: "@deepseek-ai/dsh-tool-subagent"',
+    '  config:',
+    '    provider: spawn',
+    '    toolName: subagent_readonly',
+    '    agentPreset: dispatch-readonly',
+    '    modelSelection: false',
+  ), dispatchBundleFixture, modelPinBundleFixture)
+  assert.equal(withoutPin.status, 'override-without-pin')
+  assert.equal(withoutPin.level, 'warn')
+  assert.equal(withoutPin.routes.readonly.route, null, 'a missing agentOptions leaves no pin, not the bundle default')
+  assert.equal(withoutPin.routes.readonly.source, 'profile 覆盖缺 agentOptions')
+  assert.equal(withoutPin.routes.spike.source, 'bundle 默认', 'the untouched tool still reads the bundle default')
+
+  const spikeWithoutPin = assessRouteCoverage(linesOf(
+    '- id: tool-subagent-spike',
+    '  config:',
+    '    toolName: subagent_spike',
+  ), dispatchBundleFixture, modelPinBundleFixture)
+  assert.equal(spikeWithoutPin.status, 'override-without-pin')
+  assert.equal(spikeWithoutPin.routes.spike.route, null)
+
+  // 任一处缺失 → incomplete：降级为单项提示，不 FAIL、不崩脚本。
+  const incomplete = assessRouteCoverage([], null, null)
+  assert.equal(incomplete.status, 'incomplete')
+  assert.equal(incomplete.level, 'pass')
+  assert.equal(incomplete.routes.readonly, null)
+})
+
+test('0.25.0: roles-migration fails on a sandboxed role and warns on routing-only roles', () => {
+  const noModelPin = assessRolesMigration(['- id: dispatch-protocol', '  config:', '    enabled: true'])
+  assert.equal(noModelPin.status, 'no-model-pin')
+  assert.equal(noModelPin.level, 'pass')
+
+  const noRoles = assessRolesMigration(linesOf(
+    '- id: subagent-model-pin',
+    '  config:',
+    '    provider: deepseek-official',
+    '    model: deepseek-flash',
+  ))
+  assert.equal(noRoles.status, 'no-roles')
+  assert.equal(noRoles.level, 'pass')
+
+  const routingOnly = assessRolesMigration(linesOf(
+    '- id: subagent-model-pin',
+    '  config:',
+    '    roles:',
+    '      - match: Review',
+    '        provider: opencode-go',
+    '        model: deepseek-v4.1-flash',
+  ))
+  assert.equal(routingOnly.status, 'routing-only')
+  assert.equal(routingOnly.level, 'warn')
+  assert.deepEqual(routingOnly.roles.map((role) => role.match), ['Review'])
+  assert.equal(routingOnly.roles[0].sandbox, false)
+
+  // 角色沙箱的失效方向是放宽约束（spec §4.1）：必须 FAIL，不许静默。
+  const sandboxed = assessRolesMigration(linesOf(
+    '- id: subagent-model-pin',
+    '  config:',
+    '    roles:',
+    '      - match: 勘察',
+    '        provider: opencode-go',
+    '        model: deepseek-v4.1-flash',
+    '        sandbox: read-only',
+  ))
+  assert.equal(sandboxed.status, 'sandbox')
+  assert.equal(sandboxed.level, 'fail')
+  assert.equal(sandboxed.roles[0].sandbox, true)
+  assert.equal(sandboxed.roles[0].line, 4, 'the line is the role block, not the roles: header')
+})
+
+test('0.25.0: spike-tool fails when a block or field is missing and passes on the repo bundle', () => {
+  const missing = assessSpikeTool(linesOf(
+    '- insert:',
+    '    - id: preset-dispatch-spike',
+    '      config:',
+    '        id: dispatch-spike',
+  ))
+  assert.equal(missing.status, 'missing')
+  assert.equal(missing.level, 'fail')
+  assert.equal(missing.tool, null)
+
+  const partial = assessSpikeTool(linesOf(
+    '- insert:',
+    '    - id: preset-dispatch-spike',
+    '      config:',
+    '        id: dispatch-spike',
+    '    - id: tool-subagent-spike',
+    '      config:',
+    '        provider: spawn',
+    '        toolName: subagent_spike',
+    '        agentPreset: dispatch-spike',
+    '        agentOptions:',
+    '          provider: deepseek-official',
+    '          model: deepseek-flash',
+  ))
+  assert.equal(partial.status, 'incomplete')
+  assert.equal(partial.level, 'fail')
+  assert.deepEqual(partial.missing, ['modelSelection: false'])
+
+  const repoYml = readFileSync(new URL('./cordis.patch.yml', import.meta.url), 'utf8').split(/\r?\n/)
+  const ok = assessSpikeTool(repoYml)
+  assert.equal(ok.status, 'ok')
+  assert.equal(ok.level, 'pass')
+  assert.ok(ok.preset.line > 0 && ok.tool.line > ok.preset.line,
+    'the repo bundle carries both blocks in order')
+})
+
+test('0.25.0: presets-override warns when the profile drops dispatch-spike', () => {
+  const noOverride = assessPresetsOverride(['- id: ui-chat', '  config:', '    enabled: true'])
+  assert.equal(noOverride.status, 'no-override')
+  assert.equal(noOverride.level, 'pass')
+
+  const noReadonly = assessPresetsOverride(['- id: dispatch-protocol', '  config:', '    enabled: true'])
+  assert.equal(noReadonly.status, 'no-readonly-sandbox')
+
+  const blockList = assessPresetsOverride(linesOf(
+    '- id: dispatch-protocol',
+    '  config:',
+    '    readonlySandbox:',
+    '      enabled: true',
+    '      presets:',
+    '        - dispatch-readonly',
+    '        - dispatch-spike',
+    '      mode: read-only',
+  ))
+  assert.equal(blockList.status, 'ok')
+  assert.deepEqual(blockList.presets, ['dispatch-readonly', 'dispatch-spike'])
+
+  const inline = assessPresetsOverride(linesOf(
+    '- id: dispatch-protocol',
+    '  config:',
+    '    readonlySandbox:',
+    '      presets: [dispatch-readonly]',
+  ))
+  assert.equal(inline.status, 'missing-spike')
+  assert.equal(inline.level, 'warn')
+  assert.deepEqual(inline.presets, ['dispatch-readonly'])
 })
 
 test('0.21.0/0.22.0: review and recon are bound to subagent_readonly in the default text', () => {
@@ -3183,12 +3428,14 @@ test('0.21.0/0.22.0: review and recon are bound to subagent_readonly in the defa
     'rule 1 dispatches recon through the read-only tool')
   assert.match(text, /一律用 `subagent_readonly` 派发；其组合无写工具与 shell/,
     'rule 4 names the tool and why the dispatcher must land the diff first')
-  assert.match(text, /`subagent_readonly` 的 preset 管工具面、路由与沙箱（结构钉死，不靠 label）/,
-    '0.22.0: the footer gives the preset all three surfaces, structurally pinned')
-  assert.match(text, /spike 要跑命令实测，仍走普通 subagent/,
-    'the spike exception stays on the normal subagent')
-  assert.match(text, /label 仍以「勘察\/只读」开头/,
-    'the label convention survives; 0.22.0 narrows its effect to the spike sandbox')
+  assert.match(text, /`subagent_readonly` 与 `subagent_spike` 的 preset 管工具面、路由与沙箱（结构钉死，不靠 label）/,
+    '0.25.0: both tools own all three surfaces, structurally pinned')
+  assert.match(text, /要跑命令实测外部环境的只读 spike 一律用 `subagent_spike` 派发/,
+    '0.25.0: the spike gets its own tool instead of the plain subagent')
+  assert.doesNotMatch(text, /label 仍以「勘察\/只读」开头/,
+    '0.25.0: rule 1 no longer asks for a label prefix')
+  assert.match(text, /要跑命令实测外部环境的只读 spike 用 `subagent_spike` 派发/,
+    '0.25.0: rule 1 routes the environment spike through its own tool')
 
   // 0.24.0 工具消歧：判定键是产出物（要不要写文件），不是批次名——「评审修复批」
   // 是执行批，误走 subagent_readonly 会被无写工具的 preset 整批钉死。
@@ -3207,6 +3454,10 @@ test('0.21.0/0.22.0: review and recon are bound to subagent_readonly in the defa
     'the business preset carries the dispatcher landing duty')
   assert.match(BUSINESS_RULES[0], /一律用 `subagent_readonly` 派发/,
     'the business preset binds recon to the tool as well')
+  assert.match(BUSINESS_RULES[0], /先派只读勘察：一律用 `subagent_readonly` 派发；要跑命令实测外部环境的用 `subagent_spike`。/,
+    '0.25.0: the business preset routes the environment spike through its own tool')
+  assert.doesNotMatch(BUSINESS_RULES[0], /派发（要跑命令实测/,
+    '0.25.0: the nested parenthesis is merged into the sentence instead of stacked')
   assert.doesNotMatch(AUTO_TEXT, /subagent_readonly/,
     'AUTO_TEXT names no full-only tool: auto injects no mechanism text')
 })
@@ -3217,11 +3468,12 @@ test('0.21.0/0.22.0: review and recon are bound to subagent_readonly in the defa
 // 在创建时钉死；沙箱由 readonlySandbox 按子会话的 preset 记录
 // （header.agentPreset / agent-preset/selected 事件）收窄，不再靠 label 字面前缀。
 
-test('0.22.0: readonlySandbox defaults to the dispatch-readonly preset and rejects silent breakage', () => {
+test('0.22.0/0.25.0: readonlySandbox defaults to the readonly and spike presets and rejects silent breakage', () => {
   const resolved = resolveConfig({})
+  assert.deepEqual(DEFAULT_READONLY_SANDBOX_PRESETS, ['dispatch-readonly', 'dispatch-spike'])
   assert.deepEqual(resolved.readonlySandbox, {
     enabled: true,
-    presets: ['dispatch-readonly'],
+    presets: ['dispatch-readonly', 'dispatch-spike'],
     mode: 'read-only',
   })
   assert.equal(resolveConfig({ readonlySandbox: { enabled: false } }).readonlySandbox.enabled, false)
@@ -3267,6 +3519,26 @@ test('0.22.0: a child composed from dispatch-readonly is narrowed at creation', 
 
     assert.deepEqual(appended, [{ type: 'sandbox/mode', data: { mode: 'read-only' } }],
       'the structural preset key appends exactly one narrowing event')
+    const row = readRows(log).find(entry => entry.kind === 'readonly-sandbox')
+    assert.equal(row.decision, 'applied')
+    assert.equal(row.mode, 'read-only')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('0.25.0: a child composed from dispatch-spike is narrowed the same way', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dispatch-protocol-spike-sandbox-'))
+  try {
+    const log = join(dir, 'decisions.jsonl')
+    const h = harness()
+    plugin.apply(h.ctx, { log })
+
+    const appended = []
+    h.created(readonlyChild('child-spike-1', 'parent-spike', { preset: 'dispatch-spike', appended }))
+
+    assert.deepEqual(appended, [{ type: 'sandbox/mode', data: { mode: 'read-only' } }],
+      'the spike preset is narrowed too: with a shell, the sandbox is its only write constraint')
     const row = readRows(log).find(entry => entry.kind === 'readonly-sandbox')
     assert.equal(row.decision, 'applied')
     assert.equal(row.mode, 'read-only')
@@ -3344,16 +3616,18 @@ test('0.22.0: root agents and a disabled section are never narrowed', () => {
   assert.equal(offAppended.length, 0, 'readonlySandbox.enabled:false registers nothing')
 })
 
-test('0.22.0/0.24.0: the default text grew by a bounded amount', (t) => {
+test('0.22.0/0.24.0/0.25.0: the default text grew by a bounded amount', (t) => {
   // 0.21.0 实测基线：六条规则 3326 字符 + footer 702 字符。0.22.0 只改规则 1 的
   // 括号注与 footer 末两句（前缀 → preset 的归属改词），增量 22；0.24.0 在规则 4
   // 加一句工具消歧（产出物判定 + 评审修复批例外 + 拿不准走 subagent），增量约
-  // 155。区间上下界留出措辞微调余量，超出时把实际增量报进失败信息。
+  // 155。0.25.0 删掉 footer 的 label 前缀强制句（净减 47）并在规则 1 换成 spike
+  // 半句，累计增量回落到 141。区间上下界留出措辞微调余量，超出时把实际增量报进
+  // 失败信息。
   const body = DEFAULT_RULES.reduce((sum, rule) => sum + rule.length, 0)
   const delta = (body - 3326) + (DEFAULT_FOOTER.length - 702)
   t.diagnostic(`DEFAULT_RULES ${body} 字符 / footer ${DEFAULT_FOOTER.length} 字符 / 累计增量 ${delta}`)
-  assert.ok(delta >= 150 && delta <= 220,
-    `text delta is ${delta} characters (0.21.0 baseline = 3326 body + 702 footer; 0.22.0 grew 22, 0.24.0 budget <= 200)`)
+  assert.ok(delta >= 130 && delta <= 220,
+    `text delta is ${delta} characters (0.21.0 baseline = 3326 body + 702 footer; 0.22.0 grew 22, 0.24.0 grew ~155, 0.25.0 shrank the footer)`)
   assert.equal(DEFAULT_RULES.length, 6, 'the binding lands inside existing rules, never a seventh clause')
 })
 
@@ -3426,93 +3700,6 @@ function settleNotice(childId) {
     },
   }
 }
-
-// ---------------------------------------------------------------------------
-// 0.23.2 route-alignment：verify-install 的钉路一致性判定（纯函数，行级 yml）
-// ---------------------------------------------------------------------------
-
-const BUNDLE_YML = [
-  '- insert:',
-  '    - id: tool-subagent-readonly',
-  "      name: '@deepseek-ai/dsh-tool-subagent'",
-  '      config:',
-  '        provider: spawn',
-  '        toolName: subagent_readonly',
-  '        agentPreset: dispatch-readonly',
-  '        modelSelection: false',
-  '        agentOptions:',
-  '          provider: deepseek-official',
-  '          model: deepseek-flash',
-]
-
-function profileYmlWithModelPin({ roles = [], direct = ['provider: opencode-go', 'model: deepseek-v4.1-flash', 'reasoningEffort: high'], override = null } = {}) {
-  const lines = ['- id: subagent-model-pin', '  config:']
-  if (roles.length > 0) {
-    lines.push('    roles:')
-    for (const role of roles) {
-      lines.push(`      - match: ${role.match}`)
-      for (const field of role.fields ?? []) lines.push(`        ${field}`)
-    }
-  }
-  for (const field of direct) lines.push(`    ${field}`)
-  if (override !== null) {
-    lines.push('- id: tool-subagent-readonly', "  name: '@deepseek-ai/dsh-tool-subagent'", '  config:', '    provider: spawn', '    toolName: subagent_readonly', '    agentPreset: dispatch-readonly', '    modelSelection: false')
-    if (override !== 'no-agentOptions') {
-      lines.push('    agentOptions:')
-      for (const field of override) lines.push(`      ${field}`)
-    }
-  }
-  return lines
-}
-
-test('route-alignment: profile 未覆盖 model-pin → no-model-pin', () => {
-  const { status } = assessRouteAlignment(['- id: other-plugin', '  config: {}'], BUNDLE_YML)
-  assert.equal(status, 'no-model-pin')
-})
-
-test('route-alignment: roles 表无只读角色 → no-roles（执行角色不算漂移面）', () => {
-  const lines = profileYmlWithModelPin({ roles: [{ match: 'Implement', fields: ['provider: opencode-go', 'model: deepseek-v4.1-flash'] }] })
-  const { status } = assessRouteAlignment(lines, BUNDLE_YML)
-  assert.equal(status, 'no-roles')
-})
-
-test('route-alignment: 只读角色与 bundle 钉路不同 → drift（0.23.0 后本机的真实形态）', () => {
-  const lines = profileYmlWithModelPin({
-    roles: [{ match: '评审', fields: ['provider: opencode-go', 'model: deepseek-v4.1-flash', 'sandbox: read-only'] }],
-  })
-  const { status, drifts } = assessRouteAlignment(lines, BUNDLE_YML)
-  assert.equal(status, 'drift')
-  assert.equal(drifts.length, 1)
-  assert.equal(drifts[0].match, '评审')
-})
-
-test('route-alignment: profile 覆盖钉路与角色同路由（含 effort 继承）→ aligned', () => {
-  const lines = profileYmlWithModelPin({
-    roles: [{ match: '评审', fields: ['provider: opencode-go', 'model: deepseek-v4.1-flash', 'sandbox: read-only'] }],
-    override: ['provider: opencode-go', 'model: deepseek-v4.1-flash', 'reasoningEffort: high'],
-  })
-  const { status, pin } = assessRouteAlignment(lines, BUNDLE_YML)
-  assert.equal(status, 'aligned')
-  assert.equal(pin.provider, 'opencode-go')
-})
-
-test('route-alignment: 覆盖行缺 agentOptions 且有只读角色 → pin-missing', () => {
-  const lines = profileYmlWithModelPin({
-    roles: [{ match: '勘察', fields: ['provider: opencode-go', 'model: deepseek-v4.1-flash'] }],
-    override: 'no-agentOptions',
-  })
-  const { status } = assessRouteAlignment(lines, BUNDLE_YML)
-  assert.equal(status, 'pin-missing')
-})
-
-test('route-alignment: 角色自带 effort 与默认不同且不等于钉路 → drift', () => {
-  const lines = profileYmlWithModelPin({
-    roles: [{ match: '只读', fields: ['provider: opencode-go', 'model: deepseek-v4.1-flash', 'reasoningEffort: low'] }],
-    override: ['provider: opencode-go', 'model: deepseek-v4.1-flash', 'reasoningEffort: high'],
-  })
-  const { status } = assessRouteAlignment(lines, BUNDLE_YML)
-  assert.equal(status, 'drift')
-})
 
 /**
  * 0.14.0: invoke the registered `/dispatch` command's handler.

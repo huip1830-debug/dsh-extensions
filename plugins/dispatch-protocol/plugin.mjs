@@ -21,8 +21,9 @@
 //      2026-11-23-dispatch-readonly-route-sandbox.md): children composed from a
 //      preset in `readonlySandbox.presets` get a `sandbox/mode` event at
 //      `agent/created`, keyed by the durable `agent-preset/selected` record
-//      instead of the delegation label's text prefix (model-pin's role table
-//      keeps covering only the spike path on the plain `subagent` tool).
+//      instead of the delegation label's text prefix. 0.25.0 extends the same
+//      anchor to the spike (`dispatch-spike` preset + `subagent_spike` tool);
+//      model-pin's role table is retired, so no mechanism reads a label.
 //
 // 0.17.0 removed the five turn-end state gates（Wait / Verify / Contract /
 // Review / Handoff）. They were checkable reminders about the turn just closed,
@@ -685,10 +686,10 @@ function readChildPreset(agent) {
  *
  * 命中 `readonlySandbox.presets` 的子代理在 `agent/created` 时追加一条
  * `sandbox/mode` 事件：子会话权限在委派开始时固定、不能自行放宽，只能从外部
- * 收窄，追加即生效（与 model-pin `applyRoleSandbox` 同款 last-wins 写路径；
+ * 收窄，追加即生效（与 model-pin 顶层 `sandbox` 同款 last-wins 写路径；
  * 当前已是目标 mode 时跳过，不产生重复事件）。判定键是 preset 记录而非
- * label 文本——label 前缀只继续服务 spike（普通 `subagent`，由 model-pin
- * roles 收窄）。
+ * label 文本——0.25.0 起 spike 也由 `dispatch-spike` preset + `subagent_spike`
+ * 工具结构收窄；model-pin 的 roles 表已退役，label 前缀不再被任何机制消费。
  *
  * 与 model-pin 同监听 `agent/created`、同写 `sandbox/mode`：监听顺序任意，
  * 先追加的一方让另一方走 `already` 跳过，终态一致。全程 fail-open：收窄是
